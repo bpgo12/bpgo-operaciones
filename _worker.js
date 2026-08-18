@@ -34,6 +34,16 @@ async function saveWhatsAppStatus(env, item) {
     .run();
 }
 
+async function ensureWhatsAppCampaignTable(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_campaign_sends (
+    campaign TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    message_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (campaign, recipient)
+  )`).run();
+}
+
 async function sendBillingMessages(request, env) {
   const body = await request.json().catch(() => ({}));
   const records = Array.isArray(body.records) ? body.records.slice(0, 50) : [];
@@ -43,7 +53,10 @@ async function sendBillingMessages(request, env) {
 
   const accessToken = String(env.WHATSAPP_ACCESS_TOKEN || "").trim();
   const phoneNumberId = String(env.WHATSAPP_PHONE_NUMBER_ID || "").trim();
-  const templateName = String(env.WHATSAPP_TEMPLATE_NAME || "recordatorio_pago_bpgo").trim();
+  const campaign = body.campaign === "number-change" ? "number-change" : "billing";
+  const templateName = campaign === "number-change"
+    ? "nuevo_numero_whatsapp"
+    : String(env.WHATSAPP_TEMPLATE_NAME || "recordatorio_pago_bpgo").trim();
   const languageCode = String(env.WHATSAPP_TEMPLATE_LANGUAGE || "es_CL").trim();
   if (!accessToken || !phoneNumberId || !templateName || !languageCode) {
     return Response.json({ ok: false, error: "Configuracion de WhatsApp incompleta." }, { status: 500 });
@@ -51,11 +64,20 @@ async function sendBillingMessages(request, env) {
 
   const endpoint = `https://graph.facebook.com/v23.0/${encodeURIComponent(phoneNumberId)}/messages`;
   const results = [];
+  if (campaign === "number-change") await ensureWhatsAppCampaignTable(env);
   for (const record of records) {
     const phone = normalizeWhatsAppPhone(record.phone);
     if (!phone) {
       results.push({ id: record.id, phone, ok: false, error: "Telefono invalido" });
       continue;
+    }
+    if (campaign === "number-change") {
+      const previous = await env.DB.prepare("SELECT message_id FROM whatsapp_campaign_sends WHERE campaign = ? AND recipient = ?")
+        .bind(campaign, phone).first();
+      if (previous) {
+        results.push({ id: record.id, phone, ok: true, skipped: true, messageId: previous.message_id });
+        continue;
+      }
     }
     const response = await fetch(endpoint, {
       method: "POST",
@@ -75,6 +97,10 @@ async function sendBillingMessages(request, env) {
     const messageId = meta.messages?.[0]?.id;
     if (messageId) {
       await saveWhatsAppStatus(env, { messageId, recipient: phone, status: "accepted" }).catch(() => null);
+      if (campaign === "number-change") {
+        await env.DB.prepare("INSERT OR IGNORE INTO whatsapp_campaign_sends (campaign, recipient, message_id) VALUES (?, ?, ?)")
+          .bind(campaign, phone, messageId).run();
+      }
     }
     results.push({
       id: record.id,
@@ -85,8 +111,10 @@ async function sendBillingMessages(request, env) {
       errorCode: response.ok ? undefined : meta.error?.code,
     });
   }
-  const sent = results.filter((item) => item.ok).length;
-  return Response.json({ ok: sent === results.length, sent, failed: results.length - sent, results });
+  const sent = results.filter((item) => item.ok && !item.skipped).length;
+  const skipped = results.filter((item) => item.skipped).length;
+  const failed = results.filter((item) => !item.ok).length;
+  return Response.json({ ok: failed === 0, sent, skipped, failed, campaign, templateName, results });
 }
 
 function toBase64Url(value) {

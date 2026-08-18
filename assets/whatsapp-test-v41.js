@@ -83,6 +83,81 @@
     status(panel, "Meta aceptó el mensaje, pero todavía no confirmó su entrega. ID: " + messageId, "pending");
   }
 
+  function getCustomerPhones(data) {
+    var customers = Array.isArray(data && data.billingCustomers) ? data.billingCustomers : [];
+    var unique = new Map();
+    customers.forEach(function (customer, index) {
+      if (customer && customer.active === false) return;
+      var phone = normalizePhone(customer && (customer.phone || customer.whatsapp || customer.telefono));
+      if (phone.length < 11 || phone.slice(0, 2) !== "56") return;
+      if (!unique.has(phone)) unique.set(phone, { id: customer.id || "cliente-" + index, phone: phone });
+    });
+    return Array.from(unique.values());
+  }
+
+  async function prepareNumberChange(panel) {
+    var campaign = panel.querySelector("[data-number-change-campaign]");
+    var button = campaign.querySelector("button");
+    var output = campaign.querySelector("[data-number-change-status]");
+    button.disabled = true;
+    output.className = "whatsapp-test-status pending";
+    output.hidden = false;
+    output.textContent = "Leyendo el maestro de clientes…";
+    try {
+      var stateResponse = await fetch("/api/state", { headers: { accept: "application/json" }, cache: "no-store" });
+      var payload = await stateResponse.json().catch(function () { return {}; });
+      var records = getCustomerPhones(payload.data || {});
+      if (!stateResponse.ok || !records.length) throw new Error("No se encontraron teléfonos activos válidos en el maestro.");
+      button.dataset.prepared = "true";
+      button.textContent = "Enviar alerta a " + records.length + " clientes";
+      button.disabled = false;
+      campaign._records = records;
+      output.className = "whatsapp-test-status success";
+      output.textContent = records.length + " teléfonos únicos preparados. La cobranza no será modificada.";
+    } catch (error) {
+      button.disabled = false;
+      output.className = "whatsapp-test-status error";
+      output.textContent = error.message || "No se pudo preparar la campaña.";
+    }
+  }
+
+  async function sendNumberChange(panel) {
+    var campaign = panel.querySelector("[data-number-change-campaign]");
+    var button = campaign.querySelector("button");
+    var output = campaign.querySelector("[data-number-change-status]");
+    var records = campaign._records || [];
+    if (!records.length) return prepareNumberChange(panel);
+    var confirmation = window.prompt("Se enviará la alerta de cambio de número a " + records.length + " clientes únicos. Para confirmar escribe ENVIAR");
+    if (String(confirmation || "").trim().toUpperCase() !== "ENVIAR") return;
+    button.disabled = true;
+    var sent = 0, failed = 0, skipped = 0;
+    try {
+      for (var start = 0; start < records.length; start += 40) {
+        output.className = "whatsapp-test-status pending";
+        output.hidden = false;
+        output.textContent = "Procesando " + Math.min(start + 40, records.length) + " de " + records.length + "…";
+        var response = await fetch("/api/whatsapp/send-billing", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ campaign: "number-change", records: records.slice(start, start + 40) })
+        });
+        var data = await response.json().catch(function () { return {}; });
+        if (!response.ok) throw new Error(data.error || "Meta rechazó el lote.");
+        sent += Number(data.sent || 0);
+        failed += Number(data.failed || 0);
+        skipped += Number(data.skipped || 0);
+      }
+      output.className = failed ? "whatsapp-test-status error" : "whatsapp-test-status success";
+      output.textContent = "Campaña terminada: " + sent + " enviados, " + skipped + " ya enviados anteriormente y " + failed + " fallidos.";
+      button.textContent = "Campaña procesada";
+    } catch (error) {
+      output.className = "whatsapp-test-status error";
+      output.textContent = "La campaña se detuvo: " + (error.message || "error de conexión") + ". Puedes reanudarla sin duplicar mensajes.";
+      button.disabled = false;
+      button.textContent = "Reanudar campaña";
+    }
+  }
+
   function markup() {
     return '<section class="whatsapp-test-panel" data-whatsapp-test-panel>' +
       '<div><p class="eyebrow">Validación segura</p><h3>Prueba controlada</h3>' +
@@ -90,7 +165,11 @@
       '<div class="whatsapp-test-controls"><label><span>Número que recibirá la prueba</span>' +
       '<input type="tel" inputmode="tel" autocomplete="tel" placeholder="+56 9 1234 5678"></label>' +
       '<button type="button" class="btn">Enviar 1 prueba</button></div>' +
-      '<div class="whatsapp-test-status" data-whatsapp-test-status hidden></div></section>';
+      '<div class="whatsapp-test-status" data-whatsapp-test-status hidden></div>' +
+      '<div class="number-change-campaign" data-number-change-campaign><div><p class="eyebrow">Campaña informativa</p>' +
+      '<h3>Nuevo número oficial BPGO</h3><p>Usa la plantilla aprobada <code>nuevo_numero_whatsapp</code> para avisar a los clientes activos. Los teléfonos duplicados se eliminan automáticamente.</p></div>' +
+      '<button type="button" class="btn secondary" data-number-change-button>Preparar alerta de cambio de número</button>' +
+      '<div class="whatsapp-test-status" data-number-change-status hidden></div></div></section>';
   }
 
   function install() {
@@ -106,6 +185,13 @@
   }
 
   document.addEventListener("click", function (event) {
+    var campaignButton = event.target.closest("[data-number-change-button]");
+    if (campaignButton) {
+      var campaignPanel = campaignButton.closest("[data-whatsapp-test-panel]");
+      if (campaignButton.dataset.prepared === "true") sendNumberChange(campaignPanel);
+      else prepareNumberChange(campaignPanel);
+      return;
+    }
     var button = event.target.closest("[data-whatsapp-test-panel] button");
     if (!button) return;
     sendTest(button.closest("[data-whatsapp-test-panel]"));
