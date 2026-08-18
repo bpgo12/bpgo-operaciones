@@ -25,3 +25,11 @@
 .bpgo-empty-detail { padding:28px!important;text-align:center!important;color:#667773; }
 @keyframes bpgo-detail-in { from { opacity:0;transform:translateY(-8px); } to { opacity:1;transform:none; } }
 @media(max-width:720px) { .bpgo-point-card { min-height:126px; } .bpgo-card-detail { padding:16px; } .bpgo-card-detail-table { min-width:760px; } }
+
+.delete-user-direct {
+  margin-top: 8px;
+  border-color: #e1aaa5 !important;
+  color: #a82d23 !important;
+  background: #fff7f6 !important;
+}
+.delete-user-direct:hover { background: #fde8e6 !important; }

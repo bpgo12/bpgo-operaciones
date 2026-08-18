@@ -133,6 +133,35 @@ export default {
       return Response.json({ ok: true, password: String(user.password || "") });
     }
 
+    if (url.pathname === "/api/user" && request.method === "DELETE") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session || session.role !== "super_admin") return Response.json({ ok: false, error: "Sin autorización" }, { status: 403 });
+      const body = await request.json().catch(() => ({}));
+      const email = String(body.email || "").trim().toLowerCase();
+      const row = await env.DB.prepare("SELECT data FROM app_state WHERE id = 'main'").first();
+      const state = row ? JSON.parse(row.data) : null;
+      if (!state || !Array.isArray(state.users) || !email) return Response.json({ ok: false, error: "Usuario inválido" }, { status: 400 });
+      const user = state.users.find((item) => String(item.email || "").trim().toLowerCase() === email);
+      if (!user) return Response.json({ ok: false, error: "Usuario no encontrado" }, { status: 404 });
+      if (String(user.id) === String(session.userId)) return Response.json({ ok: false, error: "No puedes eliminar tu propia sesión" }, { status: 409 });
+      state.users = state.users.filter((item) => String(item.id) !== String(user.id));
+      if (Array.isArray(state.workOrders)) {
+        state.workOrders = state.workOrders.map((work) => {
+          const next = { ...work };
+          if (Array.isArray(next.assignedToIds)) next.assignedToIds = next.assignedToIds.filter((id) => String(id) !== String(user.id));
+          if (String(next.assignedToId || "") === String(user.id)) delete next.assignedToId;
+          if (String(next.technicianId || "") === String(user.id)) delete next.technicianId;
+          return next;
+        });
+      }
+      ["technicianShifts", "shifts"].forEach((key) => {
+        if (Array.isArray(state[key])) state[key] = state[key].filter((item) => String(item.userId || item.technicianId || "") !== String(user.id));
+      });
+      await env.DB.prepare("UPDATE app_state SET data = ?, updated_at = datetime('now') WHERE id = 'main'")
+        .bind(JSON.stringify(state)).run();
+      return Response.json({ ok: true, deletedUserId: user.id });
+    }
+
     if (url.pathname === "/api/state" && request.method === "PUT") {
       const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
       if (!session) return Response.json({ ok: false }, { status: 401 });
