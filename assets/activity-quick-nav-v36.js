@@ -59,7 +59,8 @@
 
   function install() {
     var active = activityButton();
-    document.querySelectorAll(".activity-submenu, .activity-command-bar").forEach(function (item) {
+    document.querySelectorAll(".activity-submenu").forEach(function (item) { item.remove(); });
+    document.querySelectorAll(".activity-command-bar").forEach(function (item) {
       if (!active) item.remove();
     });
     if (!active) return;
