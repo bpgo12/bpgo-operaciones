@@ -64,8 +64,6 @@
     });
     if (!active) return;
 
-    if (!document.querySelector(".activity-submenu")) active.insertAdjacentHTML("afterend", menuMarkup("activity-submenu"));
-
     if (!document.querySelector(".activity-command-bar")) {
       var content = document.querySelector("main.content");
       var anchor = content && (content.querySelector(".breadcrumbs") || content.querySelector(".global-search"));
