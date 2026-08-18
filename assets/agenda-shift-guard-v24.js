@@ -151,7 +151,6 @@
     if (!today) return;
     panel.dataset.currentWeekPositioned = "true";
     today.classList.add("agenda-today-column");
-    setTimeout(function () { today.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" }); }, 80);
   }
 
   function scan() {
