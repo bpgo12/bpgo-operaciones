@@ -9,6 +9,31 @@ function normalizeWhatsAppPhone(value) {
   return phone;
 }
 
+async function ensureWhatsAppStatusTable(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_message_status (
+    message_id TEXT PRIMARY KEY,
+    recipient TEXT,
+    status TEXT NOT NULL,
+    error_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
+}
+
+async function saveWhatsAppStatus(env, item) {
+  await ensureWhatsAppStatusTable(env);
+  await env.DB.prepare(`INSERT INTO whatsapp_message_status
+    (message_id, recipient, status, error_json, created_at, updated_at)
+    VALUES (?, ?, ?, ?, datetime('now'), datetime('now'))
+    ON CONFLICT(message_id) DO UPDATE SET
+      recipient = COALESCE(excluded.recipient, whatsapp_message_status.recipient),
+      status = excluded.status,
+      error_json = excluded.error_json,
+      updated_at = datetime('now')`)
+    .bind(item.messageId, item.recipient || null, item.status, item.error ? JSON.stringify(item.error) : null)
+    .run();
+}
+
 async function sendBillingMessages(request, env) {
   const body = await request.json().catch(() => ({}));
   const records = Array.isArray(body.records) ? body.records.slice(0, 50) : [];
@@ -47,11 +72,15 @@ async function sendBillingMessages(request, env) {
       }),
     });
     const meta = await response.json().catch(() => ({}));
+    const messageId = meta.messages?.[0]?.id;
+    if (messageId) {
+      await saveWhatsAppStatus(env, { messageId, recipient: phone, status: "accepted" }).catch(() => null);
+    }
     results.push({
       id: record.id,
       phone,
       ok: response.ok,
-      messageId: meta.messages?.[0]?.id,
+      messageId,
       error: response.ok ? undefined : (meta.error?.message || "Error al enviar por WhatsApp"),
       errorCode: response.ok ? undefined : meta.error?.code,
     });
@@ -202,6 +231,43 @@ export default {
         });
       }
       return new Response("Webhook verification rejected", { status: 403 });
+    }
+
+    if (url.pathname === "/api/whatsapp/webhook" && request.method === "POST") {
+      const body = await request.json().catch(() => ({}));
+      const changes = Array.isArray(body.entry)
+        ? body.entry.flatMap((entry) => Array.isArray(entry.changes) ? entry.changes : [])
+        : [];
+      const statuses = changes.flatMap((change) => Array.isArray(change.value?.statuses) ? change.value.statuses : []);
+      for (const item of statuses) {
+        if (!item.id || !item.status) continue;
+        await saveWhatsAppStatus(env, {
+          messageId: item.id,
+          recipient: item.recipient_id,
+          status: item.status,
+          error: item.errors?.[0] || null,
+        }).catch(() => null);
+      }
+      return Response.json({ ok: true, received: statuses.length });
+    }
+
+    if (url.pathname === "/api/whatsapp/message-status" && request.method === "GET") {
+      const messageId = String(url.searchParams.get("id") || "").trim();
+      if (!messageId) return Response.json({ ok: false, error: "Falta el identificador del mensaje." }, { status: 400 });
+      await ensureWhatsAppStatusTable(env);
+      const row = await env.DB.prepare("SELECT message_id, recipient, status, error_json, created_at, updated_at FROM whatsapp_message_status WHERE message_id = ?")
+        .bind(messageId).first();
+      return Response.json({
+        ok: true,
+        message: row ? {
+          messageId: row.message_id,
+          recipient: row.recipient,
+          status: row.status,
+          error: row.error_json ? JSON.parse(row.error_json) : null,
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+        } : null,
+      });
     }
 
     if (url.pathname === "/api/whatsapp/send-billing" && request.method === "POST") {
