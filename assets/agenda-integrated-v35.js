@@ -57,6 +57,8 @@
         var shift = shifts.find(function (item) { return item.userId === user.id && item.date === date; });
         return { user: user, status: shift ? shift.status : "Sin turno definido" };
       });
+      column.classList.toggle("has-rest-day", dayShifts.some(function (item) { return item.status === "Descanso" || item.status === "Feriado"; }));
+      column.classList.toggle("has-work-shift", dayShifts.some(function (item) { return item.status === "Turno"; }) && !column.classList.contains("has-rest-day"));
       var workSignature = Array.from(column.querySelectorAll(".day-work")).map(function (work) { return normalize(work.textContent.replace(/^⚠[^\n]*/, "")); }).join("|");
       var signature = date + "|" + dayShifts.map(function (item) { return item.user.id + ":" + item.status; }).join("|") + "|" + workSignature;
       var old = column.querySelector(".agenda-roster-status");
@@ -69,7 +71,7 @@
       roster.dataset.signature = signature;
       roster.innerHTML = dayShifts.map(function (item) {
         var blocked = item.status === "Descanso" || item.status === "Feriado";
-        return '<span class="' + (blocked ? "off" : item.status === "Turno" ? "on" : "unset") + '" title="' + escapeHtml(item.user.name + ": " + item.status) + '">' + escapeHtml(item.user.name.split(" ")[0]) + ': ' + escapeHtml(item.status) + "</span>";
+        return '<span class="' + (blocked ? "off" : item.status === "Turno" ? "on" : "unset") + '" title="' + escapeHtml(item.user.name + ": " + item.status) + '">' + escapeHtml(item.user.name) + ': ' + escapeHtml(item.status) + "</span>";
       }).join("");
       head.insertAdjacentElement("afterend", roster);
 
