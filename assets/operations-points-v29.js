@@ -11,6 +11,7 @@
     const date = new Date(String(value).length === 10 ? `${value}T12:00:00` : value);
     return Number.isNaN(date.getTime()) ? null : date;
   };
+  let forcedMonth = "";
 
   function unwrapState(payload) {
     let value = payload;
@@ -60,6 +61,12 @@
   }
 
   function selectedPeriod(root) {
+    if (forcedMonth && /^\d{4}-\d{2}$/.test(forcedMonth)) {
+      const [year, month] = forcedMonth.split("-").map(Number);
+      const start = new Date(year, month - 1, 1);
+      const end = new Date(year, month, 0, 23, 59, 59, 999);
+      return { start, end, label: new Intl.DateTimeFormat("es-CL", { month: "long", year: "numeric" }).format(start) };
+    }
     const active = [...root.querySelectorAll(".segmented button")].find((button) => button.classList.contains("active"));
     const mode = normalize(active && active.textContent) || "semana";
     const today = new Date();
@@ -112,6 +119,18 @@
     return date ? new Intl.DateTimeFormat("es-CL").format(date) : "Sin fecha";
   }
 
+  function workKey(work) { return String(work.id || work.code || ""); }
+
+  function workDetailModal(work, data) {
+    const kind = classification(work);
+    const point = isClosed(work) && (kind === "installation" || isBpgoMaintenance(work)) ? 1 : 0;
+    const logs = Array.isArray(work.logs) ? work.logs : [];
+    const evidenceCount = logs.reduce((total, log) => total + (Array.isArray(log.evidence) ? log.evidence.length : 0), 0);
+    const latest = logs[0] || {};
+    const materials = Array.isArray(latest.materialsUsed) ? latest.materialsUsed.map((item) => `${item.name}: ${item.quantity} ${item.unit || ""}`).join(" · ") : (latest.materials || "Sin materiales registrados");
+    return `<div class="bpgo-work-modal-backdrop"><section class="bpgo-work-modal" role="dialog" aria-modal="true" aria-label="Detalle de ${escapeHtml(work.code || "actividad")}"><header><div><span>Ficha completa de actividad</span><h2>${escapeHtml(work.code || "Sin código")} · ${escapeHtml(work.client || work.customerName || "Sin cliente")}</h2><p>${escapeHtml(activityLabel(work))}</p></div><button type="button" class="bpgo-work-modal-close" aria-label="Cerrar detalle">×</button></header><div class="bpgo-work-detail-grid"><article><span>Estado</span><strong>${escapeHtml(work.status || "Sin estado")}</strong></article><article><span>Técnico(s)</span><strong>${escapeHtml(assignedTechnicianNames(work, data.users))}</strong></article><article><span>Fecha programada</span><strong>${escapeHtml(formatDate(work.plannedDate || work.dueDate))}</strong></article><article><span>Fecha de cierre</span><strong>${escapeHtml(isClosed(work) ? formatDate(closeDate(work)) : "Aún no cerrada")}</strong></article><article><span>Ubicación</span><strong>${escapeHtml(work.location || work.address || "Sin ubicación")}</strong></article><article><span>Puntaje</span><strong>${point} punto${point === 1 ? "" : "s"}</strong></article></div><section class="bpgo-work-copy"><h3>Trabajo solicitado</h3><p>${escapeHtml(work.description || work.title || "Sin descripción registrada")}</p></section><section class="bpgo-work-copy"><h3>Último registro técnico</h3><p>${escapeHtml(latest.summary || "Sin resumen técnico registrado")}</p><p><strong>Materiales:</strong> ${escapeHtml(materials)}</p><p><strong>Próximo paso:</strong> ${escapeHtml(latest.nextStep || "Sin próximo paso")}</p></section><footer><span>${evidenceCount} evidencia${evidenceCount === 1 ? "" : "s"} registrada${evidenceCount === 1 ? "" : "s"}</span><button type="button" class="btn bpgo-work-modal-ok">Cerrar</button></footer></section></div>`;
+  }
+
   function calculate(state, range) {
     const allWork = Array.isArray(state.workOrders) ? state.workOrders : [];
     const users = Array.isArray(state.users) ? state.users : [];
@@ -155,7 +174,7 @@
       const kind = classification(work);
       const point = isClosed(work) && (kind === "installation" || isBpgoMaintenance(work)) ? 1 : 0;
       const technicians = assignedTechnicianNames(work, data.users);
-      return `<tr><td><strong>${escapeHtml(work.code || "Sin código")}</strong><small>${escapeHtml(work.client || work.customerName || "Sin cliente")}</small></td><td>${escapeHtml(activityLabel(work))}</td><td><span class="bpgo-status-chip">${escapeHtml(work.status || "Sin estado")}</span></td><td>${escapeHtml(technicians)}</td><td>${escapeHtml(formatDate(activityDate(work, filter)))}</td><td><span class="bpgo-points-pill ${point ? "earned" : "zero"}">${point} pt</span></td></tr>`;
+      return `<tr class="bpgo-clickable-work" data-bpgo-work-id="${escapeHtml(workKey(work))}" tabindex="0"><td><strong>${escapeHtml(work.code || "Sin código")}</strong><small>${escapeHtml(work.client || work.customerName || "Sin cliente")}</small></td><td>${escapeHtml(activityLabel(work))}</td><td><span class="bpgo-status-chip">${escapeHtml(work.status || "Sin estado")}</span></td><td>${escapeHtml(technicians)}</td><td>${escapeHtml(formatDate(activityDate(work, filter)))}</td><td><span class="bpgo-points-pill ${point ? "earned" : "zero"}">${point} pt</span></td></tr>`;
     }).join("");
     return `<section class="bpgo-card-detail" aria-live="polite"><div class="bpgo-card-detail-head"><div><span>Detalle del indicador</span><h2>${escapeHtml(title)}</h2><p>${sorted.length} ${sorted.length === 1 ? "actividad encontrada" : "actividades encontradas"} en el periodo seleccionado.</p></div><button type="button" class="bpgo-card-detail-close" aria-label="Cerrar detalle">×</button></div><div class="bpgo-table-wrap"><table class="bpgo-analysis-table bpgo-card-detail-table"><thead><tr><th>Orden / cliente</th><th>Actividad</th><th>Estado</th><th>Técnico(s)</th><th>Fecha</th><th>Puntos</th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="bpgo-empty-detail">No hay actividades para este indicador.</td></tr>'}</tbody></table></div></section>`;
   }
@@ -189,7 +208,7 @@
       const point = kind === "installation" || isBpgoMaintenance(work) ? 1 : 0;
       const names = assignedTechnicianNames(work, data.users);
       const reason = point ? (kind === "installation" ? "Instalación cerrada" : "Mantención BPGO cerrada") : "Actividad cerrada sin puntaje";
-      return `<tr><td><strong>${escapeHtml(work.code || "Sin código")}</strong><small>${escapeHtml(work.client || "Sin cliente")}</small></td><td>${escapeHtml(activityLabel(work))}</td><td>${escapeHtml(names)}</td><td>${escapeHtml(formatDate(closeDate(work)))}</td><td><span class="bpgo-points-pill ${point ? "earned" : "zero"}">${point} pt</span><small>${escapeHtml(reason)}</small></td></tr>`;
+      return `<tr class="bpgo-clickable-work" data-bpgo-work-id="${escapeHtml(workKey(work))}" tabindex="0"><td><strong>${escapeHtml(work.code || "Sin código")}</strong><small>${escapeHtml(work.client || "Sin cliente")}</small></td><td>${escapeHtml(activityLabel(work))}</td><td>${escapeHtml(names)}</td><td>${escapeHtml(formatDate(closeDate(work)))}</td><td><span class="bpgo-points-pill ${point ? "earned" : "zero"}">${point} pt</span><small>${escapeHtml(reason)}</small></td></tr>`;
     }).join("");
 
     const techCards = data.rows.map((row) => `<article class="bpgo-tech-card"><header><div><span>Técnico</span><h3>${escapeHtml(row.name)}</h3></div><strong>${row.points} pts</strong></header><div class="bpgo-tech-metrics"><span><b>${row.installations}</b> instalaciones</span><span><b>${row.bpgoMaintenances}</b> mant. BPGO</span><span><b>${row.maintenances}</b> mant. totales</span><span><b>${row.rescheduled}</b> reagendadas</span><span><b>${row.closed}</b> finalizadas</span><span><b>${row.rate}%</b> avance</span></div></article>`).join("");
@@ -197,7 +216,7 @@
     const techRows = data.rows.map((row) => `<tr><td><strong>${escapeHtml(row.name)}</strong></td><td>${row.assigned}</td><td>${row.closed}</td><td>${row.installations}</td><td>${row.maintenances}</td><td>${row.bpgoMaintenances}</td><td>${row.other}</td><td>${row.rescheduled}</td><td>${row.missingEvidence}</td><td>${row.installationPoints}</td><td>${row.maintenancePoints}</td><td><strong class="bpgo-total-points">${row.points}</strong></td><td>${row.rate}%</td></tr>`).join("");
 
     container.innerHTML = `
-      <section class="bpgo-points-hero"><div><span class="eyebrow">Productividad y bonos · ${escapeHtml(range.label)}</span><h2>Puntos validados por cierre</h2><p>1 punto por instalación cerrada y 1 punto por mantención cerrada cuyo cliente sea BPGO. Las actividades abiertas no generan puntaje.</p></div><div class="bpgo-points-total"><span>Total periodo</span><strong>${totalPoints}</strong><small>puntos validados</small></div></section>
+      <section class="bpgo-points-hero"><div><span class="eyebrow">Productividad y bonos · ${escapeHtml(range.label)}</span><h2>Puntos validados por cierre</h2><p>1 punto por instalación cerrada y 1 punto por mantención cerrada cuyo cliente sea BPGO. Las actividades abiertas no generan puntaje.</p><div class="bpgo-month-review"><button type="button" data-month-step="-1" aria-label="Mes anterior">‹</button><label><span>Mes a revisar</span><input type="month" value="${escapeHtml(forcedMonth || dateKey(new Date()).slice(0, 7))}"></label><button type="button" data-month-step="1" aria-label="Mes siguiente">›</button><button type="button" class="bpgo-current-period">Periodo actual</button></div></div><div class="bpgo-points-total"><span>Total periodo</span><strong>${totalPoints}</strong><small>puntos validados</small></div></section>
       <section class="bpgo-point-grid">
         ${card("Actividades del periodo", data.periodWork.length, `${data.closedInPeriod.length} cierres registrados`, "", "period")}
         ${card("Instalaciones finalizadas", installations.length, `${installations.length} puntos de instalación`, "blue", "installations")}
@@ -233,6 +252,37 @@
       slot.querySelector(".bpgo-card-detail-close").addEventListener("click", closeDetail);
       slot.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }));
+
+    const topbar = container.previousElementSibling;
+    const monthInput = container.querySelector(".bpgo-month-review input");
+    const rerenderMonth = (value) => { forcedMonth = value; render(container, state, selectedPeriod(topbar)); };
+    monthInput.addEventListener("change", () => rerenderMonth(monthInput.value));
+    container.querySelectorAll("[data-month-step]").forEach((button) => button.addEventListener("click", () => {
+      const base = monthInput.value.split("-").map(Number);
+      const target = new Date(base[0], base[1] - 1 + Number(button.dataset.monthStep), 1);
+      rerenderMonth(`${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, "0")}`);
+    }));
+    container.querySelector(".bpgo-current-period").addEventListener("click", () => rerenderMonth(""));
+
+    const openWork = (row) => {
+      const work = data.allWork.find((item) => workKey(item) === row.dataset.bpgoWorkId);
+      if (!work) return;
+      document.body.insertAdjacentHTML("beforeend", workDetailModal(work, data));
+      document.body.classList.add("modal-open");
+      const backdrop = document.querySelector(".bpgo-work-modal-backdrop:last-of-type");
+      const close = () => { backdrop.remove(); document.body.classList.remove("modal-open"); };
+      backdrop.querySelector(".bpgo-work-modal-close").addEventListener("click", close);
+      backdrop.querySelector(".bpgo-work-modal-ok").addEventListener("click", close);
+      backdrop.addEventListener("mousedown", (event) => { if (event.target === backdrop) close(); });
+    };
+    container.onclick = (event) => {
+      const row = event.target.closest && event.target.closest(".bpgo-clickable-work");
+      if (row) openWork(row);
+    };
+    container.onkeydown = (event) => {
+      const row = event.target.closest && event.target.closest(".bpgo-clickable-work");
+      if (row && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); openWork(row); }
+    };
   }
 
   let statePromise;
@@ -258,7 +308,10 @@
     try {
       const state = await loadState();
       render(container, state, selectedPeriod(topbar));
-      topbar.querySelectorAll(".segmented button").forEach((button) => button.addEventListener("click", () => window.setTimeout(() => render(container, state, selectedPeriod(topbar)), 40)));
+      topbar.querySelectorAll(".segmented button").forEach((button) => button.addEventListener("click", () => {
+        forcedMonth = "";
+        window.setTimeout(() => render(container, state, selectedPeriod(topbar)), 40);
+      }));
     } catch (error) {
       container.innerHTML = `<section class="bpgo-analysis-panel bpgo-load-error"><h2>No se pudo cargar el análisis</h2><p>${escapeHtml(error.message)}</p><button type="button" class="btn" onclick="location.reload()">Reintentar</button></section>`;
     }
