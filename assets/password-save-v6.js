@@ -4,13 +4,13 @@
   const nativeFetch = window.fetch.bind(window);
   const TOKEN_KEY = "bpgo-operaciones-auth-token";
 
-  async function sendWhatsAppBatches(input, init, records) {
+  async function sendWhatsAppBatches(input, init, records, originalPayload) {
     const batchSize = 25;
     const results = [];
     for (let index = 0; index < records.length; index += batchSize) {
       const batch = records.slice(index, index + batchSize);
       const response = await nativeFetch(input, Object.assign({}, init, {
-        body: JSON.stringify({ records: batch }),
+        body: JSON.stringify(Object.assign({}, originalPayload || {}, { records: batch })),
       }));
       const payload = await response.json().catch(function () { return {}; });
       if (Array.isArray(payload.results)) results.push.apply(results, payload.results);
@@ -20,13 +20,16 @@
         });
       }
     }
-    const sent = results.filter(function (item) { return item.ok; }).length;
+    const sent = results.filter(function (item) { return item.ok && !item.skipped; }).length;
+    const skipped = results.filter(function (item) { return item.skipped; }).length;
+    const failed = results.filter(function (item) { return !item.ok; }).length;
     return new Response(JSON.stringify({
-      ok: sent === records.length,
+      ok: failed === 0,
       sent: sent,
-      failed: records.length - sent,
+      skipped: skipped,
+      failed: failed,
       results: results,
-    }), { status: sent === 0 ? 422 : 200, headers: { "content-type": "application/json; charset=utf-8" } });
+    }), { status: failed === records.length ? 422 : 200, headers: { "content-type": "application/json; charset=utf-8" } });
   }
 
   if (localStorage.getItem("bpgo-operaciones-session") && !sessionStorage.getItem(TOKEN_KEY)) {
@@ -37,7 +40,9 @@
     const url = typeof input === "string" ? input : input && input.url;
     const method = String((init && init.method) || (input && input.method) || "GET").toUpperCase();
     if (url && ((url.includes("/api/state") && method === "PUT") ||
-      (url.includes("/api/whatsapp/send-billing") && method === "POST"))) {
+      (url.includes("/api/whatsapp/send-billing") && method === "POST") ||
+      (url.includes("/api/whatsapp/inbox") && method === "GET") ||
+      (url.includes("/api/whatsapp/reply") && method === "POST"))) {
       const headers = new Headers(init && init.headers || {});
       const token = sessionStorage.getItem(TOKEN_KEY);
       if (token) headers.set("authorization", "Bearer " + token);
@@ -45,7 +50,7 @@
       if (url.includes("/api/whatsapp/send-billing") && method === "POST") {
         const payload = JSON.parse(String(init.body || "{}"));
         const records = Array.isArray(payload.records) ? payload.records : [];
-        if (records.length > 25) return sendWhatsAppBatches(input, init, records);
+        if (records.length > 25) return sendWhatsAppBatches(input, init, records, payload);
       }
     }
     return nativeFetch(input, init);

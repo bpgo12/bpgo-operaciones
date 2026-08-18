@@ -44,6 +44,41 @@ async function ensureWhatsAppCampaignTable(env) {
   )`).run();
 }
 
+async function ensureWhatsAppInboxTable(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_inbox_messages (
+    message_id TEXT PRIMARY KEY,
+    phone TEXT NOT NULL,
+    customer_name TEXT,
+    direction TEXT NOT NULL,
+    message_type TEXT NOT NULL,
+    message_text TEXT,
+    media_id TEXT,
+    created_at TEXT NOT NULL,
+    raw_json TEXT
+  )`).run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_inbox_phone_created ON whatsapp_inbox_messages(phone, created_at DESC)").run();
+}
+
+async function saveInboundWhatsAppMessages(env, changes) {
+  await ensureWhatsAppInboxTable(env);
+  let saved = 0;
+  for (const change of changes) {
+    const value = change.value || {};
+    const name = value.contacts?.[0]?.profile?.name || null;
+    for (const message of (Array.isArray(value.messages) ? value.messages : [])) {
+      const text = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || null;
+      const mediaId = message.image?.id || message.document?.id || message.audio?.id || message.video?.id || null;
+      await env.DB.prepare(`INSERT OR IGNORE INTO whatsapp_inbox_messages
+        (message_id, phone, customer_name, direction, message_type, message_text, media_id, created_at, raw_json)
+        VALUES (?, ?, ?, 'inbound', ?, ?, ?, ?, ?)`)
+        .bind(message.id, message.from, name, message.type || "unknown", text, mediaId, new Date(Number(message.timestamp || 0) * 1000).toISOString(), JSON.stringify(message))
+        .run();
+      saved += 1;
+    }
+  }
+  return saved;
+}
+
 async function sendBillingMessages(request, env) {
   const body = await request.json().catch(() => ({}));
   const records = Array.isArray(body.records) ? body.records.slice(0, 50) : [];
@@ -276,7 +311,41 @@ export default {
           error: item.errors?.[0] || null,
         }).catch(() => null);
       }
-      return Response.json({ ok: true, received: statuses.length });
+      const messagesSaved = await saveInboundWhatsAppMessages(env, changes).catch(() => 0);
+      return Response.json({ ok: true, received: statuses.length, messagesSaved });
+    }
+
+    if (url.pathname === "/api/whatsapp/inbox" && request.method === "GET") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      await ensureWhatsAppInboxTable(env);
+      const rows = await env.DB.prepare(`SELECT message_id, phone, customer_name, direction, message_type,
+        message_text, media_id, created_at FROM whatsapp_inbox_messages ORDER BY created_at DESC LIMIT 300`).all();
+      return Response.json({ ok: true, messages: rows.results || [] });
+    }
+
+    if (url.pathname === "/api/whatsapp/reply" && request.method === "POST") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      const body = await request.json().catch(() => ({}));
+      const phone = normalizeWhatsAppPhone(body.phone);
+      const messageText = String(body.text || "").trim().slice(0, 4000);
+      if (!phone || !messageText) return Response.json({ ok: false, error: "Falta teléfono o mensaje." }, { status: 400 });
+      const endpoint = `https://graph.facebook.com/v23.0/${encodeURIComponent(String(env.WHATSAPP_PHONE_NUMBER_ID || "").trim())}/messages`;
+      const metaResponse = await fetch(endpoint, {
+        method: "POST",
+        headers: { authorization: `Bearer ${String(env.WHATSAPP_ACCESS_TOKEN || "").trim()}`, "content-type": "application/json" },
+        body: JSON.stringify({ messaging_product: "whatsapp", recipient_type: "individual", to: phone, type: "text", text: { body: messageText } }),
+      });
+      const meta = await metaResponse.json().catch(() => ({}));
+      if (!metaResponse.ok) return Response.json({ ok: false, error: meta.error?.message || "Meta rechazó la respuesta.", errorCode: meta.error?.code }, { status: 422 });
+      const messageId = meta.messages?.[0]?.id;
+      await ensureWhatsAppInboxTable(env);
+      await env.DB.prepare(`INSERT OR IGNORE INTO whatsapp_inbox_messages
+        (message_id, phone, direction, message_type, message_text, created_at, raw_json)
+        VALUES (?, ?, 'outbound', 'text', ?, ?, ?)`)
+        .bind(messageId, phone, messageText, new Date().toISOString(), JSON.stringify(meta)).run();
+      return Response.json({ ok: true, messageId });
     }
 
     if (url.pathname === "/api/whatsapp/message-status" && request.method === "GET") {
