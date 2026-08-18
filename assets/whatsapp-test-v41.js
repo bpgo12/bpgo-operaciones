@@ -51,13 +51,36 @@
         status(panel, "No se envió: " + detail + code, "error");
         return;
       }
-      status(panel, "Prueba enviada correctamente. ID Meta: " + (result.messageId || "aceptado") + ". Revisa el teléfono destinatario.", "success");
+      status(panel, "Meta aceptó la prueba. Esperando confirmación de entrega…", "pending");
+      if (result.messageId) await watchDelivery(panel, result.messageId);
     } catch (error) {
       status(panel, "No se pudo completar la prueba: " + (error.message || "error de conexión"), "error");
     } finally {
       button.disabled = false;
       button.textContent = "Enviar 1 prueba";
     }
+  }
+
+  async function watchDelivery(panel, messageId) {
+    var labels = { accepted: "Aceptado por Meta", sent: "Enviado", delivered: "Entregado al teléfono", read: "Leído", failed: "Fallido" };
+    for (var attempt = 0; attempt < 12; attempt += 1) {
+      await new Promise(function (resolve) { window.setTimeout(resolve, 2500); });
+      var response = await fetch("/api/whatsapp/message-status?id=" + encodeURIComponent(messageId), { cache: "no-store" }).catch(function () { return null; });
+      var data = response ? await response.json().catch(function () { return {}; }) : {};
+      var message = data.message;
+      if (!message) continue;
+      if (message.status === "failed") {
+        var reason = message.error && (message.error.error_data?.details || message.error.message || message.error.title);
+        status(panel, "Falló la entrega: " + (reason || "Meta no informó el motivo") + ". ID: " + messageId, "error");
+        return;
+      }
+      if (message.status === "delivered" || message.status === "read") {
+        status(panel, labels[message.status] + ". ID Meta: " + messageId, "success");
+        return;
+      }
+      status(panel, (labels[message.status] || message.status) + ". Esperando entrega al teléfono…", "pending");
+    }
+    status(panel, "Meta aceptó el mensaje, pero todavía no confirmó su entrega. ID: " + messageId, "pending");
   }
 
   function markup() {
