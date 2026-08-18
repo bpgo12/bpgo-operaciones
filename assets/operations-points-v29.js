@@ -91,6 +91,17 @@
     return user ? user.name : "Sin asignar";
   }
 
+  function isPointTechnician(user) {
+    if (!user || user.active === false || normalize(user.role) !== "technician") return false;
+    const name = normalize(user.name);
+    return !name.includes("carlos pena") && !name.includes("eduardo bustamante");
+  }
+
+  function assignedTechnicianNames(work, users) {
+    return assignedIds(work).map((id) => users.find((user) => String(user.id) === String(id)))
+      .filter(isPointTechnician).map((user) => user.name).join(", ") || "Sin técnico con puntaje";
+  }
+
   function activityLabel(work) {
     const kind = classification(work);
     return kind === "installation" ? "Instalación" : kind === "maintenance" ? "Mantención" : (work.type || work.title || "Otra actividad");
@@ -106,9 +117,7 @@
     const users = Array.isArray(state.users) ? state.users : [];
     const periodWork = allWork.filter((work) => inRange(work.plannedDate || work.dueDate, range));
     const closedInPeriod = allWork.filter((work) => isClosed(work) && inRange(closeDate(work), range));
-    const technicians = users.filter((user) => user.role === "technician" || assignedIds({ assignedToIds: allWork.flatMap(assignedIds) }).includes(user.id));
-    const technicianIds = new Set(allWork.flatMap(assignedIds).map(String));
-    users.forEach((user) => { if (technicianIds.has(String(user.id)) && !technicians.includes(user)) technicians.push(user); });
+    const technicians = users.filter(isPointTechnician);
 
     const rows = technicians.map((user) => {
       const assigned = periodWork.filter((work) => assignedIds(work).some((id) => String(id) === String(user.id)));
@@ -145,7 +154,7 @@
     const rows = sorted.map((work) => {
       const kind = classification(work);
       const point = isClosed(work) && (kind === "installation" || isBpgoMaintenance(work)) ? 1 : 0;
-      const technicians = assignedIds(work).map((id) => technicianName(id, data.users)).join(", ") || "Sin asignar";
+      const technicians = assignedTechnicianNames(work, data.users);
       return `<tr><td><strong>${escapeHtml(work.code || "Sin código")}</strong><small>${escapeHtml(work.client || work.customerName || "Sin cliente")}</small></td><td>${escapeHtml(activityLabel(work))}</td><td><span class="bpgo-status-chip">${escapeHtml(work.status || "Sin estado")}</span></td><td>${escapeHtml(technicians)}</td><td>${escapeHtml(formatDate(activityDate(work, filter)))}</td><td><span class="bpgo-points-pill ${point ? "earned" : "zero"}">${point} pt</span></td></tr>`;
     }).join("");
     return `<section class="bpgo-card-detail" aria-live="polite"><div class="bpgo-card-detail-head"><div><span>Detalle del indicador</span><h2>${escapeHtml(title)}</h2><p>${sorted.length} ${sorted.length === 1 ? "actividad encontrada" : "actividades encontradas"} en el periodo seleccionado.</p></div><button type="button" class="bpgo-card-detail-close" aria-label="Cerrar detalle">×</button></div><div class="bpgo-table-wrap"><table class="bpgo-analysis-table bpgo-card-detail-table"><thead><tr><th>Orden / cliente</th><th>Actividad</th><th>Estado</th><th>Técnico(s)</th><th>Fecha</th><th>Puntos</th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="bpgo-empty-detail">No hay actividades para este indicador.</td></tr>'}</tbody></table></div></section>`;
@@ -178,7 +187,7 @@
     const detailRows = details.map((work) => {
       const kind = classification(work);
       const point = kind === "installation" || isBpgoMaintenance(work) ? 1 : 0;
-      const names = assignedIds(work).map((id) => technicianName(id, data.users)).join(", ") || "Sin asignar";
+      const names = assignedTechnicianNames(work, data.users);
       const reason = point ? (kind === "installation" ? "Instalación cerrada" : "Mantención BPGO cerrada") : "Actividad cerrada sin puntaje";
       return `<tr><td><strong>${escapeHtml(work.code || "Sin código")}</strong><small>${escapeHtml(work.client || "Sin cliente")}</small></td><td>${escapeHtml(activityLabel(work))}</td><td>${escapeHtml(names)}</td><td>${escapeHtml(formatDate(closeDate(work)))}</td><td><span class="bpgo-points-pill ${point ? "earned" : "zero"}">${point} pt</span><small>${escapeHtml(reason)}</small></td></tr>`;
     }).join("");
