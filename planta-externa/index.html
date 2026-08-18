@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BP GIS v1.9</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+<link rel="stylesheet" href="styles.css?v=osm-20260817-1">
+</head>
+<body>
+<header>
+  <div class="brand">⚡ <b>BP GIS</b> <small>v1.9 local</small></div>
+  <a class="back-to-operations" href="/" aria-label="Volver a Operaciones">← Operaciones</a>
+  <div id="powerSummary" class="power-summary">Potencia OLT: --</div>
+  <input id="search" placeholder="Buscar elemento">
+  <button id="exportBtn">Exportar</button>
+  <label class="import-label">Importar<input id="importFile" type="file" accept=".json,.geojson" hidden></label>
+</header>
+
+<div class="layout">
+  <aside class="left">
+    <div class="aside-title"><h3>Capas</h3><button id="toggleAllLayers" type="button">Todas</button></div>
+    <div class="layer-grid">
+      <label><input id="layerFiber" type="checkbox" checked> Fibra</label>
+      <label><input class="layerAsset" data-type="OLT" type="checkbox" checked> OLT</label>
+      <label><input class="layerAsset" data-type="MUF" type="checkbox" checked> Mufas</label>
+      <label><input class="layerAsset" data-type="CTO" type="checkbox" checked> CTO</label>
+      <label><input class="layerAsset" data-type="CAJ" type="checkbox" checked> Cajas</label>
+      <label><input class="layerAsset" data-type="POS" type="checkbox" checked> Postes</label>
+      <label><input class="layerAsset" data-type="CLI" type="checkbox" checked> Clientes</label>
+    </div>
+
+    <h3>Herramientas</h3>
+    <div class="tools">
+      <button data-tool="select" class="active">Seleccionar</button>
+      <button data-tool="fiber">Conectar fibra</button>
+      <button id="cancelTool">Cancelar</button>
+    </div>
+
+    <select id="assetType" class="hidden" aria-hidden="true">
+      <option value="OLT">OLT / Central</option>
+      <option value="MUF">Mufa</option>
+      <option value="CTO">CTO</option>
+      <option value="CAJ">Caja</option>
+      <option value="POS">Poste</option>
+      <option value="CLI">Cliente / ONT</option>
+    </select>
+
+    <label class="cable-type-control">Tipo de cable al conectar
+      <select id="newCableClass">
+        <option value="TRK">Troncal (TRK)</option>
+        <option value="DST">Distribución (DST)</option>
+        <option value="DRP">Drop (DRP)</option>
+      </select>
+    </label>
+
+    <p id="toolHelp" class="context-hint">＋ Clic derecho en el mapa para agregar elementos</p>
+
+    <div class="aside-title elements-title"><h3>Elementos</h3><span id="elementCount" class="count-badge">0</span></div>
+    <div id="elementList"></div>
+  </aside>
+
+  <main>
+    <div id="map"></div>
+    <div class="map-tools">
+      <button id="undoBtn">↶</button>
+      <button id="redoBtn">↷</button>
+      <button id="deleteBtn">🗑</button>
+    </div>
+    <div id="mapStatus">Cargando mapa…</div>
+  </main>
+
+  <aside class="right">
+    <div id="emptyPanel">
+      <h3>Ficha técnica</h3>
+      <p>Selecciona un elemento.</p>
+    </div>
+
+    <form id="featureForm" class="hidden">
+      <div class="title-row">
+        <div id="badge" class="badge">CTO</div>
+        <div>
+          <h2 id="featureTitle"></h2>
+          <small id="featureSubtitle"></small>
+        </div>
+      </div>
+
+      <input id="featureId" type="hidden">
+      <label>Código<input id="code" readonly></label>
+      <label>Nombre<input id="name"></label>
+      <label>Sector<input id="sector"></label>
+      <label>Estado
+        <select id="status">
+          <option>Operativo</option>
+          <option>En construcción</option>
+          <option>Proyectado</option>
+          <option>Averiado</option>
+          <option>Fuera de servicio</option>
+        </select>
+      </label>
+      <label>PON / Puerto<input id="pon"></label>
+      <label id="cableClassLabel">Tipo de cable
+        <select id="cableClass">
+          <option value="TRK">Troncal (TRK)</option>
+          <option value="DST">Distribución (DST)</option>
+          <option value="DRP">Drop (DRP)</option>
+        </select>
+      </label>
+      <label id="capacityLabel">Capacidad / filamentos
+        <select id="capacity">
+          <option value="">Sin definir</option>
+          <option value="12">12F</option>
+          <option value="24">24F</option>
+          <option value="48">48F</option>
+          <option value="96">96F</option>
+          <option value="144">144F</option>
+        </select>
+      </label>
+      <label id="oltPowerLabel">Potencia salida OLT (dBm)<input id="oltPower" type="text" inputmode="decimal" placeholder="Ej.: 2,3 o 2.3"><small class="field-help">Pulsa Guardar para recalcular toda la red.</small></label>
+      <div id="opticalEstimate" class="optical-estimate hidden"></div>
+      <section id="clientFields" class="form-section hidden">
+        <h3>Datos del cliente / ONT</h3>
+        <div class="form-grid">
+          <label>RUT<input id="clientRut"></label>
+          <label>Teléfono<input id="clientPhone"></label>
+          <label class="wide">Dirección<input id="clientAddress"></label>
+          <label>Plan contratado<input id="clientPlan"></label>
+          <label>Serie ONT<input id="clientOntSerial"></label>
+          <label>Puerto CTO<input id="clientCtoPort"></label>
+          <label>Fecha instalación<input id="clientInstallDate" type="date"></label>
+          <label>Potencia medida (dBm)<input id="clientMeasuredPower" inputmode="decimal"></label>
+        </div>
+      </section>
+      <label>Referencia en terreno<input id="reference"></label>
+      <label>Observaciones<textarea id="notes"></textarea></label>
+
+      <section id="maintenanceSection" class="form-section">
+        <h3>Incidencias y mantenimiento</h3>
+        <div class="form-grid">
+          <label>Tipo<select id="incidentType"><option>Corte</option><option>Alta pérdida</option><option>Elemento dañado</option><option>Poste caído</option><option>Cliente sin servicio</option><option>Mantenimiento preventivo</option><option>Otro</option></select></label>
+          <label>Prioridad<select id="incidentPriority"><option>Baja</option><option selected>Media</option><option>Alta</option><option>Crítica</option></select></label>
+          <label class="wide">Descripción<input id="incidentDescription" placeholder="Describe el problema o trabajo"></label>
+        </div>
+        <button type="button" id="addIncidentBtn">+ Registrar incidencia</button>
+        <div id="incidentList" class="incident-list"></div>
+      </section>
+
+      <div id="geometryInfo" class="info"></div>
+
+      <button class="save">Guardar</button>
+      <button type="button" id="openCabinetBtn">Abrir gabinete</button>
+      <button type="button" id="deleteFeatureBtn" class="danger">Eliminar</button>
+    </form>
+  </aside>
+</div>
+
+<div id="cabinetModal" class="modal hidden">
+  <div class="cabinet-card">
+    <div class="modal-header">
+      <div>
+        <h2 id="cabinetTitle"></h2>
+        <small id="cabinetSubtitle"></small>
+      </div>
+      <div id="cabinetStats" class="cabinet-stats" aria-live="polite"></div>
+      <button id="closeCabinetBtn">✕</button>
+    </div>
+
+    <div class="cabinet-tabs">
+      <button class="cab-tab active" data-cabtab="overview">Resumen</button>
+      <button class="cab-tab" data-cabtab="fibers">Filamentos</button>
+      <button class="cab-tab" data-cabtab="splices">Empalmes</button>
+      <button class="cab-tab" data-cabtab="scheme">Esquema</button>
+      <span class="cabinet-shortcuts">Atajos: 1–4 pestañas · Esc cerrar</span>
+    </div>
+
+    <div class="cab-pane" data-cabpane="overview">
+      <div class="cabinet-body">
+        <section class="cabinet-visual">
+          <h3>Vista interna</h3>
+          <div id="cabinetVisual"></div>
+        </section>
+
+        <section class="cabinet-controls">
+          <h3>Elementos internos</h3>
+
+          <div id="oltControls" class="internal-controls hidden">
+            <label>Puertos PON
+              <input id="ponCount" type="number" min="1" max="128" value="16">
+            </label>
+            <button id="applyPonCountBtn" type="button">Aplicar cantidad de PON</button>
+          </div>
+
+          <div id="splitterControls" class="internal-controls">
+            <label>Relación splitter
+              <select id="splitterRatio">
+                <option value="2">1:2</option>
+                <option value="4">1:4</option>
+                <option value="8" selected>1:8</option>
+                <option value="16">1:16</option>
+                <option value="32">1:32</option>
+                <option value="64">1:64</option>
+              </select>
+            </label>
+            <button id="addSplitterBtn" type="button">+ Agregar splitter interno</button>
+          </div>
+
+          <div id="internalList"></div>
+        </section>
+
+        <section class="cabinet-connections">
+          <h3>Cables exteriores conectados</h3>
+          <table>
+            <thead><tr><th>#</th><th>Destino</th><th>Tramo</th><th>Capacidad</th><th>Estado</th></tr></thead>
+            <tbody id="connectionTable"></tbody>
+          </table>
+        </section>
+      </div>
+    </div>
+
+    <div class="cab-pane hidden" data-cabpane="fibers">
+      <div class="fiber-workspace">
+        <aside class="cable-list-panel">
+          <h3>Cables que llegan</h3>
+          <div id="cabCableList"></div>
+        </aside>
+        <section class="fiber-panel">
+          <div class="fiber-toolbar">
+            <div>
+              <h3 id="fiberCableTitle">Selecciona un cable</h3>
+              <small id="fiberCableSubtitle"></small>
+            </div>
+            <label>Capacidad
+              <select id="fiberCountSelect">
+                <option value="12">12F</option>
+                <option value="24">24F</option>
+                <option value="48">48F</option>
+                <option value="96">96F</option>
+                <option value="144">144F</option>
+              </select>
+            </label>
+            <label>Ver
+              <select id="fiberFilter"><option value="all">Todas</option><option value="free">Libres</option><option value="used">Ocupadas</option><option value="reserve">Reserva</option><option value="cut">Cortadas</option></select>
+            </label>
+            <button id="applyFiberCountBtn" type="button">Aplicar</button>
+          </div>
+          <div id="fiberGrid" class="fiber-grid"></div>
+        </section>
+        <aside class="target-panel">
+          <section id="bulkSplicePanel" class="bulk-splice-panel">
+            <h3>Empalme múltiple</h3>
+            <label>Cable destino<select id="bulkTargetCable"></select></label>
+            <div class="bulk-row"><label>Desde F<input id="bulkSourceStart" type="number" min="1" value="1"></label><label>Hacia F<input id="bulkTargetStart" type="number" min="1" value="1"></label><label>Cantidad<input id="bulkCount" type="number" min="1" value="12"></label></div>
+            <button id="applyBulkSpliceBtn" type="button">Fusionar rango</button>
+          </section>
+          <h3>Destinos internos</h3>
+          <div id="splitterTargetList"></div>
+          <h3 class="fiber-fusion-title">Fusionar con otro cable</h3>
+          <div id="fiberFusionTargetList"></div>
+          <p class="hint">Selecciona un filamento y luego un destino o una fibra de otro cable.</p>
+        </aside>
+      </div>
+    </div>
+
+    <div class="cab-pane hidden" data-cabpane="splices">
+      <div class="splices-panel">
+        <h3>Empalmes y conexiones internas</h3>
+        <div id="spliceList"></div>
+      </div>
+    </div>
+
+    <div class="cab-pane hidden" data-cabpane="scheme">
+      <div class="scheme-toolbar">
+        <div>
+          <h3 id="schemeTitle">Esquema del gabinete</h3>
+          <small id="schemeSubtitle">Vista técnica por tubos, colores y conexiones.</small>
+        </div>
+        <label id="schemePonLabel" class="hidden">Puerto PON
+          <select id="schemePonSelect"></select>
+        </label>
+        <button id="showPonTreeBtn" type="button" class="hidden">Ver mapa de red PON</button>
+        <button id="showLocalSchemeBtn" type="button">Vista técnica local</button>
+      </div>
+      <div id="schemeCanvas" class="scheme-canvas"></div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<div id="mapContextMenu" class="map-context-menu hidden" role="menu">
+  <div class="context-title">Agregar en este punto</div>
+  <button type="button" data-context-asset="OLT">OLT / Central</button>
+  <button type="button" data-context-asset="MUF">Mufa</button>
+  <button type="button" data-context-asset="CTO">CTO</button>
+  <button type="button" data-context-asset="CAJ">Caja</button>
+  <button type="button" data-context-asset="POS">Poste</button>
+  <button type="button" data-context-asset="CLI">Cliente / ONT</button>
+  <button type="button" id="contextInsertMuf" class="context-cable-action hidden">Insertar mufa aquí</button>
+</div>
+
+<script src="config.js?v=osm-20260817-1"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script src="https://unpkg.com/leaflet-editable@1.3.0/src/Leaflet.Editable.js"></script>
+<script src="app.js?v=osm-20260817-2"></script>
+</body>
+</html>
