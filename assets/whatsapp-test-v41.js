@@ -158,6 +158,51 @@
     }
   }
 
+  function escapeHtml(value) {
+    return String(value == null ? "" : value).replace(/[&<>"']/g, function (char) {
+      return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char];
+    });
+  }
+
+  async function loadInbox(panel) {
+    var inbox = panel.querySelector("[data-whatsapp-inbox]");
+    var list = inbox.querySelector("[data-inbox-list]");
+    list.innerHTML = '<div class="whatsapp-test-status pending">Actualizando conversaciones…</div>';
+    try {
+      var response = await fetch("/api/whatsapp/inbox", { cache: "no-store" });
+      var data = await response.json().catch(function () { return {}; });
+      if (!response.ok) throw new Error(data.error || "No se pudo abrir la bandeja.");
+      var groups = new Map();
+      (data.messages || []).forEach(function (message) {
+        if (!groups.has(message.phone)) groups.set(message.phone, []);
+        groups.get(message.phone).push(message);
+      });
+      if (!groups.size) {
+        list.innerHTML = '<div class="whatsapp-inbox-empty">Todavía no hay mensajes recibidos. Pide a un teléfono de prueba que responda al número BPGO y presiona Actualizar.</div>';
+        return;
+      }
+      list.innerHTML = Array.from(groups.entries()).map(function (entry) {
+        var phone = entry[0], messages = entry[1].slice().reverse();
+        var name = messages.find(function (item) { return item.customer_name; });
+        return '<article class="whatsapp-conversation"><header><div><strong>' + escapeHtml(name && name.customer_name || "+" + phone) + '</strong><small>+' + escapeHtml(phone) + '</small></div><button type="button" class="btn secondary small" data-reply-phone="' + escapeHtml(phone) + '">Responder</button></header><div class="whatsapp-thread">' + messages.map(function (message) {
+          var content = message.message_text || (message.media_id ? "Archivo recibido (" + message.message_type + ")" : "Mensaje " + message.message_type);
+          return '<div class="whatsapp-bubble ' + (message.direction === "outbound" ? "outbound" : "inbound") + '"><span>' + escapeHtml(content) + '</span><small>' + escapeHtml(new Date(message.created_at).toLocaleString("es-CL")) + '</small></div>';
+        }).join("") + '</div></article>';
+      }).join("");
+    } catch (error) {
+      list.innerHTML = '<div class="whatsapp-test-status error">' + escapeHtml(error.message || "Error al cargar mensajes") + '</div>';
+    }
+  }
+
+  async function replyTo(panel, phone) {
+    var text = window.prompt("Escribe la respuesta para +" + phone + ":");
+    if (!String(text || "").trim()) return;
+    var response = await fetch("/api/whatsapp/reply", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ phone: phone, text: text }) });
+    var data = await response.json().catch(function () { return {}; });
+    if (!response.ok) window.alert(data.error || "No se pudo enviar la respuesta. Recuerda que los textos libres solo funcionan dentro de las 24 horas desde el mensaje del cliente.");
+    await loadInbox(panel);
+  }
+
   function markup() {
     return '<section class="whatsapp-test-panel" data-whatsapp-test-panel>' +
       '<div><p class="eyebrow">Validación segura</p><h3>Prueba controlada</h3>' +
@@ -169,7 +214,8 @@
       '<div class="number-change-campaign" data-number-change-campaign><div><p class="eyebrow">Campaña informativa</p>' +
       '<h3>Nuevo número oficial BPGO</h3><p>Usa la plantilla aprobada <code>nuevo_numero_whatsapp</code> para avisar a los clientes activos. Los teléfonos duplicados se eliminan automáticamente.</p></div>' +
       '<button type="button" class="btn secondary" data-number-change-button>Preparar alerta de cambio de número</button>' +
-      '<div class="whatsapp-test-status" data-number-change-status hidden></div></div></section>';
+      '<div class="whatsapp-test-status" data-number-change-status hidden></div></div>' +
+      '<div class="whatsapp-inbox" data-whatsapp-inbox><header><div><p class="eyebrow">Atención al cliente</p><h3>Bandeja de mensajes</h3><p>Conversaciones recibidas en el número oficial BPGO.</p></div><button type="button" class="btn secondary" data-refresh-inbox>Actualizar</button></header><div data-inbox-list><div class="whatsapp-inbox-empty">Presiona Actualizar para revisar los mensajes.</div></div></div></section>';
   }
 
   function install() {
@@ -185,6 +231,16 @@
   }
 
   document.addEventListener("click", function (event) {
+    var refreshInbox = event.target.closest("[data-refresh-inbox]");
+    if (refreshInbox) {
+      loadInbox(refreshInbox.closest("[data-whatsapp-test-panel]"));
+      return;
+    }
+    var replyButton = event.target.closest("[data-reply-phone]");
+    if (replyButton) {
+      replyTo(replyButton.closest("[data-whatsapp-test-panel]"), replyButton.dataset.replyPhone);
+      return;
+    }
     var campaignButton = event.target.closest("[data-number-change-button]");
     if (campaignButton) {
       var campaignPanel = campaignButton.closest("[data-whatsapp-test-panel]");
