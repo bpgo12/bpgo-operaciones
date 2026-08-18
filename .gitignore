@@ -1,0 +1,9 @@
+.DS_Store
+Thumbs.db
+*.zip
+.wrangler/
+.dev.vars
+.env
+.env.*
+node_modules/
+
