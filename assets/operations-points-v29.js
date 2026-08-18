@@ -301,8 +301,14 @@
   }
 
   async function mount() {
+    const activeSection = [...document.querySelectorAll(".sidebar .nav > button")].find((button) => button.classList.contains("active"));
+    const isDashboard = activeSection && normalize(activeSection.textContent) === "dashboard ops";
     const heading = [...document.querySelectorAll("h1")].find((element) => normalize(element.textContent).includes("control operativo de tecnicos"));
-    if (!heading) return;
+    if (!isDashboard || !heading) {
+      document.querySelectorAll("#bpgo-points-dashboard").forEach((element) => element.remove());
+      document.querySelectorAll(".bpgo-original-dashboard-hidden").forEach((element) => element.classList.remove("bpgo-original-dashboard-hidden"));
+      return;
+    }
     const topbar = heading.closest(".topbar") || heading.parentElement;
     const parent = topbar && topbar.parentElement;
     if (!parent || parent.querySelector("#bpgo-points-dashboard")) return;
@@ -325,6 +331,12 @@
 
   const observer = new MutationObserver(mount);
   observer.observe(document.documentElement, { childList: true, subtree: true });
+  document.addEventListener("click", (event) => {
+    const navigation = event.target.closest(".sidebar .nav > button");
+    if (!navigation || normalize(navigation.textContent) === "dashboard ops") return;
+    document.querySelectorAll("#bpgo-points-dashboard").forEach((element) => element.remove());
+    document.querySelectorAll(".bpgo-original-dashboard-hidden").forEach((element) => element.classList.remove("bpgo-original-dashboard-hidden"));
+  });
   window.addEventListener("DOMContentLoaded", mount);
   window.addEventListener("focus", () => { statePromise = null; mount(); });
 })();
