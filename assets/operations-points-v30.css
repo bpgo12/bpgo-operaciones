@@ -1,0 +1,27 @@
+.bpgo-point-card {
+  appearance: none;
+  width: 100%;
+  min-height: 148px;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+}
+.bpgo-point-card:hover,.bpgo-point-card:focus-visible { transform: translateY(-2px); border-color: #75b9ae; box-shadow: 0 14px 30px rgba(9,49,45,.12); outline: none; }
+.bpgo-point-card.active { border-color: #087c70; box-shadow: 0 0 0 3px rgba(8,124,112,.14),0 14px 30px rgba(9,49,45,.1); }
+.bpgo-point-card em { display:flex;align-items:center;justify-content:space-between;margin-top:12px;padding-top:10px;border-top:1px solid #e5ecea;color:#087568;font-size:12px;font-style:normal;font-weight:800; }
+.bpgo-point-card em b { font-size:18px;line-height:1;transition:transform .18s ease; }
+.bpgo-point-card.active em b { transform:rotate(180deg); }
+.bpgo-card-detail-slot:empty { display:none; }
+.bpgo-card-detail { padding:22px;background:#fff;border:1px solid #91c8c0;border-radius:18px;box-shadow:0 14px 34px rgba(9,49,45,.1);animation:bpgo-detail-in .2s ease; }
+.bpgo-card-detail-head { display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:17px; }
+.bpgo-card-detail-head span { display:block;color:#087568;text-transform:uppercase;font-size:11px;font-weight:900; }
+.bpgo-card-detail-head h2 { margin:3px 0; }
+.bpgo-card-detail-head p { margin:0;color:#667773; }
+.bpgo-card-detail-close { display:grid;place-items:center;width:42px;height:42px;flex:0 0 auto;border:1px solid #cadbd7;border-radius:12px;background:#f2f8f6;color:#174a44;font-size:27px;line-height:1;cursor:pointer; }
+.bpgo-card-detail-close:hover { background:#e3f2ee; }
+.bpgo-card-detail-table { min-width:900px; }
+.bpgo-status-chip { display:inline-block;padding:5px 8px;border-radius:999px;background:#e9f2f0;color:#405652;font-size:11px;font-weight:800; }
+.bpgo-empty-detail { padding:28px!important;text-align:center!important;color:#667773; }
+@keyframes bpgo-detail-in { from { opacity:0;transform:translateY(-8px); } to { opacity:1;transform:none; } }
+@media(max-width:720px) { .bpgo-point-card { min-height:126px; } .bpgo-card-detail { padding:16px; } .bpgo-card-detail-table { min-width:760px; } }
