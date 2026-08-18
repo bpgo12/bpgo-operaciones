@@ -37,13 +37,16 @@
 .bpgo-clickable-work { cursor:pointer; }
 .bpgo-clickable-work td:first-child strong { color:#076f64; }
 .bpgo-clickable-work:hover,.bpgo-clickable-work:focus { background:#e9f7f4!important;outline:2px solid #80c8bd;outline-offset:-2px; }
-.bpgo-month-review { display:flex;align-items:end;gap:8px;margin-top:18px; }
-.bpgo-month-review label { display:grid;gap:4px; }
-.bpgo-month-review label span { color:#d9f4ef;font-size:11px;font-weight:800;text-transform:uppercase; }
-.bpgo-month-review input,.bpgo-month-review button { min-height:42px;border:1px solid rgba(255,255,255,.35);border-radius:10px;background:rgba(255,255,255,.13);color:#fff;padding:0 12px;font:inherit;font-weight:800;cursor:pointer; }
-.bpgo-month-review input { color-scheme:dark; }
-.bpgo-month-review>button:not(.bpgo-current-period) { width:42px;padding:0;font-size:24px; }
-.bpgo-month-review button:hover { background:rgba(255,255,255,.23); }
+.bpgo-period-toolbar { display:flex;align-items:center;justify-content:space-between;gap:18px;padding:13px 16px;background:#fff;border:1px solid #d6e2df;border-radius:14px;box-shadow:0 8px 20px rgba(9,49,45,.05); }
+.bpgo-period-toolbar>div:first-child span { display:block;color:#71817e;font-size:10px;font-weight:900;text-transform:uppercase; }
+.bpgo-period-toolbar>div:first-child strong { display:block;margin-top:2px;color:#073d38;text-transform:capitalize; }
+.bpgo-month-review { display:flex;align-items:end;gap:7px; }
+.bpgo-month-review label { display:grid;gap:3px; }
+.bpgo-month-review label span { color:#60716e;font-size:10px;font-weight:900;text-transform:uppercase; }
+.bpgo-month-review input,.bpgo-month-review button { box-sizing:border-box!important;width:auto!important;min-height:38px!important;margin:0!important;border:1px solid #cbdcd8!important;border-radius:9px!important;background:#f6faf9!important;color:#16443e!important;padding:0 11px!important;font:inherit!important;font-size:13px!important;font-weight:800!important;line-height:1!important;cursor:pointer; }
+.bpgo-month-review input { min-width:155px; color-scheme:light; }
+.bpgo-month-review>button:not(.bpgo-current-period) { width:38px!important;min-width:38px!important;padding:0!important;font-size:21px!important; }
+.bpgo-month-review button:hover { background:#e4f2ef!important;border-color:#78b9af!important; }
 .bpgo-work-modal-backdrop { position:fixed;z-index:10000;inset:0;display:grid;place-items:center;padding:20px;background:rgba(3,24,22,.72);backdrop-filter:blur(4px); }
 .bpgo-work-modal { width:min(860px,100%);max-height:90vh;overflow:auto;background:#fff;border-radius:20px;box-shadow:0 30px 80px rgba(0,0,0,.3); }
 .bpgo-work-modal>header { display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding:22px 24px;background:linear-gradient(135deg,#06463f,#078276);color:#fff; }
@@ -59,4 +62,4 @@
 .bpgo-work-copy h3 { margin:0 0 8px; }
 .bpgo-work-copy p { margin:6px 0;color:#455955; }
 .bpgo-work-modal footer { display:flex;align-items:center;justify-content:space-between;gap:14px;padding:16px 24px 22px;color:#60716e; }
-@media(max-width:720px) { .bpgo-month-review { flex-wrap:wrap; }.bpgo-month-review label { flex:1; }.bpgo-month-review input { width:100%; }.bpgo-current-period { width:100%; }.bpgo-work-modal-backdrop { padding:8px; }.bpgo-work-modal { max-height:96vh;border-radius:15px; }.bpgo-work-modal>header { padding:18px; }.bpgo-work-modal header h2 { font-size:19px; }.bpgo-work-detail-grid { grid-template-columns:1fr 1fr;padding:14px; }.bpgo-work-copy { margin:8px 14px;padding:14px; }.bpgo-work-modal footer { padding:14px; } }
+@media(max-width:720px) { .bpgo-period-toolbar { align-items:stretch;flex-direction:column; }.bpgo-month-review { display:grid;grid-template-columns:38px 1fr 38px;align-items:end; }.bpgo-month-review label { min-width:0; }.bpgo-month-review input { width:100%!important;min-width:0; }.bpgo-current-period { grid-column:1/-1;width:100%!important; }.bpgo-work-modal-backdrop { padding:8px; }.bpgo-work-modal { max-height:96vh;border-radius:15px; }.bpgo-work-modal>header { padding:18px; }.bpgo-work-modal header h2 { font-size:19px; }.bpgo-work-detail-grid { grid-template-columns:1fr 1fr;padding:14px; }.bpgo-work-copy { margin:8px 14px;padding:14px; }.bpgo-work-modal footer { padding:14px; } }

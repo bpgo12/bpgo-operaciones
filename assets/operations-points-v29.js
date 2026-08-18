@@ -216,7 +216,8 @@
     const techRows = data.rows.map((row) => `<tr><td><strong>${escapeHtml(row.name)}</strong></td><td>${row.assigned}</td><td>${row.closed}</td><td>${row.installations}</td><td>${row.maintenances}</td><td>${row.bpgoMaintenances}</td><td>${row.other}</td><td>${row.rescheduled}</td><td>${row.missingEvidence}</td><td>${row.installationPoints}</td><td>${row.maintenancePoints}</td><td><strong class="bpgo-total-points">${row.points}</strong></td><td>${row.rate}%</td></tr>`).join("");
 
     container.innerHTML = `
-      <section class="bpgo-points-hero"><div><span class="eyebrow">Productividad y bonos · ${escapeHtml(range.label)}</span><h2>Puntos validados por cierre</h2><p>1 punto por instalación cerrada y 1 punto por mantención cerrada cuyo cliente sea BPGO. Las actividades abiertas no generan puntaje.</p><div class="bpgo-month-review"><button type="button" data-month-step="-1" aria-label="Mes anterior">‹</button><label><span>Mes a revisar</span><input type="month" value="${escapeHtml(forcedMonth || dateKey(new Date()).slice(0, 7))}"></label><button type="button" data-month-step="1" aria-label="Mes siguiente">›</button><button type="button" class="bpgo-current-period">Periodo actual</button></div></div><div class="bpgo-points-total"><span>Total periodo</span><strong>${totalPoints}</strong><small>puntos validados</small></div></section>
+      <section class="bpgo-points-hero"><div><span class="eyebrow">Productividad y bonos · ${escapeHtml(range.label)}</span><h2>Puntos validados por cierre</h2><p>1 punto por instalación cerrada y 1 punto por mantención cerrada cuyo cliente sea BPGO. Las actividades abiertas no generan puntaje.</p></div><div class="bpgo-points-total"><span>Total periodo</span><strong>${totalPoints}</strong><small>puntos validados</small></div></section>
+      <section class="bpgo-period-toolbar"><div><span>Periodo analizado</span><strong>${escapeHtml(range.label)}</strong></div><div class="bpgo-month-review"><button type="button" data-month-step="-1" aria-label="Mes anterior">‹</button><label><span>Mes a revisar</span><input type="month" value="${escapeHtml(forcedMonth || dateKey(new Date()).slice(0, 7))}"></label><button type="button" data-month-step="1" aria-label="Mes siguiente">›</button><button type="button" class="bpgo-current-period">Volver al periodo actual</button></div></section>
       <section class="bpgo-point-grid">
         ${card("Actividades del periodo", data.periodWork.length, `${data.closedInPeriod.length} cierres registrados`, "", "period")}
         ${card("Instalaciones finalizadas", installations.length, `${installations.length} puntos de instalación`, "blue", "installations")}
@@ -250,6 +251,7 @@
       button.setAttribute("aria-expanded", "true");
       slot.innerHTML = detailPanel(button.dataset.bpgoFilter, selected.title, selected.works, data);
       slot.querySelector(".bpgo-card-detail-close").addEventListener("click", closeDetail);
+      bindWorkRows(slot);
       slot.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }));
 
@@ -269,20 +271,24 @@
       if (!work) return;
       document.body.insertAdjacentHTML("beforeend", workDetailModal(work, data));
       document.body.classList.add("modal-open");
-      const backdrop = document.querySelector(".bpgo-work-modal-backdrop:last-of-type");
+      const backdrop = document.body.lastElementChild;
+      if (!backdrop || !backdrop.classList.contains("bpgo-work-modal-backdrop")) return;
       const close = () => { backdrop.remove(); document.body.classList.remove("modal-open"); };
       backdrop.querySelector(".bpgo-work-modal-close").addEventListener("click", close);
       backdrop.querySelector(".bpgo-work-modal-ok").addEventListener("click", close);
       backdrop.addEventListener("mousedown", (event) => { if (event.target === backdrop) close(); });
     };
-    container.onclick = (event) => {
-      const row = event.target.closest && event.target.closest(".bpgo-clickable-work");
-      if (row) openWork(row);
-    };
-    container.onkeydown = (event) => {
-      const row = event.target.closest && event.target.closest(".bpgo-clickable-work");
-      if (row && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); openWork(row); }
-    };
+    function bindWorkRows(scope) {
+      scope.querySelectorAll(".bpgo-clickable-work").forEach((row) => {
+        if (row.dataset.bpgoDetailReady === "true") return;
+        row.dataset.bpgoDetailReady = "true";
+        row.addEventListener("click", (event) => { event.preventDefault(); event.stopPropagation(); openWork(row); });
+        row.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") { event.preventDefault(); event.stopPropagation(); openWork(row); }
+        });
+      });
+    }
+    bindWorkRows(container);
   }
 
   let statePromise;
