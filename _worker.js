@@ -2,11 +2,81 @@ const STABLE_BACKEND = "478e127a.bpgo-operaciones.pages.dev";
 const encoder = new TextEncoder();
 const MASKED_PASSWORD = "********";
 
+async function ensureWhatsAppOnboardingTable(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_onboarding_config (
+    id TEXT PRIMARY KEY,
+    waba_id TEXT,
+    phone_number_id TEXT,
+    access_token_encrypted TEXT,
+    connected_at TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
+}
+
+async function credentialKey(secret) {
+  return crypto.subtle.importKey(
+    "raw",
+    await crypto.subtle.digest("SHA-256", encoder.encode(String(secret || ""))),
+    { name: "AES-GCM" },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+async function encryptCredential(value, secret) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, await credentialKey(secret), encoder.encode(value));
+  return `${toBase64Url(iv)}.${toBase64Url(encrypted)}`;
+}
+
+function fromBase64Url(value) {
+  const normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
+  return Uint8Array.from(atob(padded), (char) => char.charCodeAt(0));
+}
+
+async function decryptCredential(value, secret) {
+  const [ivPart, encryptedPart] = String(value || "").split(".");
+  if (!ivPart || !encryptedPart) return "";
+  const decrypted = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: fromBase64Url(ivPart) },
+    await credentialKey(secret),
+    fromBase64Url(encryptedPart),
+  );
+  return new TextDecoder().decode(decrypted);
+}
+
+async function getWhatsAppCredentials(env) {
+  let stored = null;
+  if (env.DB) {
+    await ensureWhatsAppOnboardingTable(env).catch(() => null);
+    stored = await env.DB.prepare("SELECT waba_id, phone_number_id, access_token_encrypted, connected_at FROM whatsapp_onboarding_config WHERE id = 'primary'").first().catch(() => null);
+  }
+  let storedToken = "";
+  if (stored?.access_token_encrypted && env.OPERATIONS_ADMIN_SECRET) {
+    storedToken = await decryptCredential(stored.access_token_encrypted, env.OPERATIONS_ADMIN_SECRET).catch(() => "");
+  }
+  return {
+    accessToken: storedToken || String(env.WHATSAPP_ACCESS_TOKEN || "").trim(),
+    phoneNumberId: String(stored?.phone_number_id || env.WHATSAPP_PHONE_NUMBER_ID || "").trim(),
+    wabaId: String(stored?.waba_id || env.WHATSAPP_WABA_ID || "").trim(),
+    connectedAt: stored?.connected_at || null,
+    source: storedToken ? "embedded-signup" : "cloudflare-secrets",
+  };
+}
+
 function normalizeWhatsAppPhone(value) {
   let phone = String(value || "").replace(/\D/g, "");
   if (phone.startsWith("0")) phone = phone.slice(1);
   if (phone.length === 9) phone = `56${phone}`;
   return phone;
+}
+
+function equalBytes(left, right) {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) difference |= left[index] ^ right[index];
+  return difference === 0;
 }
 
 async function ensureWhatsAppStatusTable(env) {
@@ -86,8 +156,9 @@ async function sendBillingMessages(request, env) {
     return Response.json({ ok: false, error: "No hay destinatarios para enviar." }, { status: 400 });
   }
 
-  const accessToken = String(env.WHATSAPP_ACCESS_TOKEN || "").trim();
-  const phoneNumberId = String(env.WHATSAPP_PHONE_NUMBER_ID || "").trim();
+  const credentials = await getWhatsAppCredentials(env);
+  const accessToken = credentials.accessToken;
+  const phoneNumberId = credentials.phoneNumberId;
   const campaign = body.campaign === "number-change" ? "number-change" : "billing";
   const templateName = campaign === "number-change"
     ? "nuevo_numero_whatsapp"
@@ -297,7 +368,17 @@ export default {
     }
 
     if (url.pathname === "/api/whatsapp/webhook" && request.method === "POST") {
-      const body = await request.json().catch(() => ({}));
+      const rawBody = await request.text();
+      if (env.META_APP_SECRET) {
+        const signature = String(request.headers.get("x-hub-signature-256") || "").replace(/^sha256=/i, "");
+        const key = await crypto.subtle.importKey("raw", encoder.encode(String(env.META_APP_SECRET)), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+        const expected = new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(rawBody)));
+        const received = /^[a-f0-9]{64}$/i.test(signature) ? Uint8Array.from(signature.match(/.{2}/g), (byte) => parseInt(byte, 16)) : new Uint8Array();
+        if (!equalBytes(received, expected)) {
+          return Response.json({ ok: false, error: "Firma de Meta inválida." }, { status: 401 });
+        }
+      }
+      const body = (() => { try { return JSON.parse(rawBody || "{}"); } catch { return {}; } })();
       const changes = Array.isArray(body.entry)
         ? body.entry.flatMap((entry) => Array.isArray(entry.changes) ? entry.changes : [])
         : [];
@@ -331,10 +412,12 @@ export default {
       const phone = normalizeWhatsAppPhone(body.phone);
       const messageText = String(body.text || "").trim().slice(0, 4000);
       if (!phone || !messageText) return Response.json({ ok: false, error: "Falta teléfono o mensaje." }, { status: 400 });
-      const endpoint = `https://graph.facebook.com/v23.0/${encodeURIComponent(String(env.WHATSAPP_PHONE_NUMBER_ID || "").trim())}/messages`;
+      const credentials = await getWhatsAppCredentials(env);
+      if (!credentials.accessToken || !credentials.phoneNumberId) return Response.json({ ok: false, error: "WhatsApp todavía no está conectado." }, { status: 409 });
+      const endpoint = `https://graph.facebook.com/v23.0/${encodeURIComponent(credentials.phoneNumberId)}/messages`;
       const metaResponse = await fetch(endpoint, {
         method: "POST",
-        headers: { authorization: `Bearer ${String(env.WHATSAPP_ACCESS_TOKEN || "").trim()}`, "content-type": "application/json" },
+        headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
         body: JSON.stringify({ messaging_product: "whatsapp", recipient_type: "individual", to: phone, type: "text", text: { body: messageText } }),
       });
       const meta = await metaResponse.json().catch(() => ({}));
@@ -373,31 +456,99 @@ export default {
       return sendBillingMessages(request, env);
     }
 
+    if (url.pathname === "/api/whatsapp/onboarding" && request.method === "GET") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session || session.role !== "super_admin") return Response.json({ ok: false, error: "Solo un superadministrador puede configurar Meta." }, { status: 403 });
+      const credentials = await getWhatsAppCredentials(env);
+      const appId = String(env.META_APP_ID || "").trim();
+      const configId = String(env.META_EMBEDDED_SIGNUP_CONFIG_ID || "").trim();
+      const featureType = String(env.META_EMBEDDED_SIGNUP_FEATURE || "").trim();
+      return Response.json({
+        ok: true,
+        readyToStart: Boolean(appId && configId && featureType && env.META_APP_SECRET),
+        connected: Boolean(credentials.accessToken && credentials.phoneNumberId && credentials.wabaId && credentials.source === "embedded-signup"),
+        appId,
+        configId,
+        featureType,
+        businessId: String(env.META_BUSINESS_ID || ""),
+        phoneNumberId: credentials.phoneNumberId ? `…${credentials.phoneNumberId.slice(-6)}` : "",
+        wabaId: credentials.wabaId ? `…${credentials.wabaId.slice(-6)}` : "",
+        connectedAt: credentials.connectedAt,
+        checks: [
+          { key: "META_APP_ID", label: "App BPGO COBRANZA", configured: Boolean(appId) },
+          { key: "META_APP_SECRET", label: "Clave secreta protegida", configured: Boolean(String(env.META_APP_SECRET || "").trim()) },
+          { key: "META_EMBEDDED_SIGNUP_CONFIG_ID", label: "Configuración de registro integrado", configured: Boolean(configId) },
+          { key: "META_EMBEDDED_SIGNUP_FEATURE", label: "Modo de coexistencia", configured: Boolean(featureType) },
+          { key: "OPERATIONS_ADMIN_SECRET", label: "Cifrado de credenciales", configured: Boolean(String(env.OPERATIONS_ADMIN_SECRET || "").trim()) },
+        ],
+      });
+    }
+
+    if (url.pathname === "/api/whatsapp/onboarding" && request.method === "POST") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session || session.role !== "super_admin") return Response.json({ ok: false, error: "Solo un superadministrador puede conectar Meta." }, { status: 403 });
+      const body = await request.json().catch(() => ({}));
+      const code = String(body.code || "").trim();
+      const wabaId = String(body.wabaId || "").trim();
+      const phoneNumberId = String(body.phoneNumberId || "").trim();
+      const appId = String(env.META_APP_ID || "").trim();
+      const appSecret = String(env.META_APP_SECRET || "").trim();
+      if (!code || !/^\d+$/.test(wabaId) || !/^\d+$/.test(phoneNumberId)) return Response.json({ ok: false, error: "Meta no entregó todos los identificadores necesarios." }, { status: 400 });
+      if (!appId || !appSecret || !env.OPERATIONS_ADMIN_SECRET) return Response.json({ ok: false, error: "Faltan secretos de Meta en Cloudflare." }, { status: 409 });
+
+      const tokenUrl = new URL("https://graph.facebook.com/v23.0/oauth/access_token");
+      tokenUrl.searchParams.set("client_id", appId);
+      tokenUrl.searchParams.set("client_secret", appSecret);
+      tokenUrl.searchParams.set("code", code);
+      const tokenResponse = await fetch(tokenUrl, { headers: { accept: "application/json" } });
+      const tokenPayload = await tokenResponse.json().catch(() => ({}));
+      const accessToken = String(tokenPayload.access_token || "").trim();
+      if (!tokenResponse.ok || !accessToken) return Response.json({ ok: false, error: tokenPayload.error?.message || "Meta no pudo intercambiar el código de autorización." }, { status: 422 });
+
+      const numbersResponse = await fetch(`https://graph.facebook.com/v23.0/${encodeURIComponent(wabaId)}/phone_numbers?fields=id,display_phone_number,verified_name`, {
+        headers: { authorization: `Bearer ${accessToken}` },
+      });
+      const numbersPayload = await numbersResponse.json().catch(() => ({}));
+      const selectedNumber = Array.isArray(numbersPayload.data) ? numbersPayload.data.find((item) => String(item.id) === phoneNumberId) : null;
+      if (!numbersResponse.ok || !selectedNumber) return Response.json({ ok: false, error: numbersPayload.error?.message || "El número no pertenece a la cuenta de WhatsApp autorizada." }, { status: 422 });
+
+      await ensureWhatsAppOnboardingTable(env);
+      const encryptedToken = await encryptCredential(accessToken, env.OPERATIONS_ADMIN_SECRET);
+      await env.DB.prepare(`INSERT INTO whatsapp_onboarding_config
+        (id, waba_id, phone_number_id, access_token_encrypted, connected_at, updated_at)
+        VALUES ('primary', ?, ?, ?, datetime('now'), datetime('now'))
+        ON CONFLICT(id) DO UPDATE SET waba_id = excluded.waba_id, phone_number_id = excluded.phone_number_id,
+          access_token_encrypted = excluded.access_token_encrypted, connected_at = excluded.connected_at, updated_at = datetime('now')`)
+        .bind(wabaId, phoneNumberId, encryptedToken).run();
+      return Response.json({ ok: true, connected: true, displayPhoneNumber: selectedNumber.display_phone_number, verifiedName: selectedNumber.verified_name });
+    }
+
     if (url.pathname === "/api/whatsapp/status" && request.method === "GET") {
+      const credentials = await getWhatsAppCredentials(env);
       const checks = [
-        "WHATSAPP_ACCESS_TOKEN",
-        "WHATSAPP_PHONE_NUMBER_ID",
-        "WHATSAPP_TEMPLATE_NAME",
-        "WHATSAPP_TEMPLATE_LANGUAGE",
-        "WHATSAPP_WEBHOOK_SECRET",
-      ].map((key) => ({ key, configured: Boolean(String(env[key] || "").trim()) }));
+        { key: "WHATSAPP_ACCESS_TOKEN", configured: Boolean(credentials.accessToken) },
+        { key: "WHATSAPP_PHONE_NUMBER_ID", configured: Boolean(credentials.phoneNumberId) },
+        { key: "WHATSAPP_TEMPLATE_NAME", configured: Boolean(String(env.WHATSAPP_TEMPLATE_NAME || "").trim()) },
+        { key: "WHATSAPP_TEMPLATE_LANGUAGE", configured: Boolean(String(env.WHATSAPP_TEMPLATE_LANGUAGE || "").trim()) },
+        { key: "WHATSAPP_WEBHOOK_SECRET", configured: Boolean(String(env.WHATSAPP_WEBHOOK_SECRET || "").trim()) },
+      ];
       let metaConnection = { ok: false, error: "Configuracion incompleta" };
       if (checks[0].configured && checks[1].configured) {
-        const metaResponse = await fetch(`https://graph.facebook.com/v23.0/${encodeURIComponent(String(env.WHATSAPP_PHONE_NUMBER_ID).trim())}?fields=verified_name,display_phone_number,quality_rating`, {
-          headers: { authorization: `Bearer ${String(env.WHATSAPP_ACCESS_TOKEN).trim()}` },
+        const metaResponse = await fetch(`https://graph.facebook.com/v23.0/${encodeURIComponent(credentials.phoneNumberId)}?fields=verified_name,display_phone_number,quality_rating`, {
+          headers: { authorization: `Bearer ${credentials.accessToken}` },
         });
         const meta = await metaResponse.json().catch(() => ({}));
         metaConnection = metaResponse.ok
           ? { ok: true, verifiedName: meta.verified_name, qualityRating: meta.quality_rating }
           : { ok: false, error: meta.error?.message || "Meta rechazo la conexion", errorCode: meta.error?.code };
         if (metaResponse.ok) {
-          const templatesResponse = await fetch(`https://graph.facebook.com/v23.0/1036223895702559/message_templates?name=${encodeURIComponent(String(env.WHATSAPP_TEMPLATE_NAME || "").trim())}&fields=name,status,language,category`, {
-            headers: { authorization: `Bearer ${String(env.WHATSAPP_ACCESS_TOKEN).trim()}` },
-          });
-          const templates = await templatesResponse.json().catch(() => ({}));
-          metaConnection.template = templatesResponse.ok
+          const templatesResponse = credentials.wabaId ? await fetch(`https://graph.facebook.com/v23.0/${encodeURIComponent(credentials.wabaId)}/message_templates?name=${encodeURIComponent(String(env.WHATSAPP_TEMPLATE_NAME || "").trim())}&fields=name,status,language,category`, {
+            headers: { authorization: `Bearer ${credentials.accessToken}` },
+          }) : null;
+          const templates = templatesResponse ? await templatesResponse.json().catch(() => ({})) : {};
+          metaConnection.template = templatesResponse?.ok
             ? (templates.data?.[0] || null)
-            : { error: templates.error?.message || "No se pudo consultar la plantilla", errorCode: templates.error?.code };
+            : { error: templatesResponse ? (templates.error?.message || "No se pudo consultar la plantilla") : "Falta WHATSAPP_WABA_ID", errorCode: templates.error?.code };
         }
       }
       return Response.json({
@@ -409,6 +560,8 @@ export default {
         templateName: String(env.WHATSAPP_TEMPLATE_NAME || ""),
         templateLanguage: String(env.WHATSAPP_TEMPLATE_LANGUAGE || ""),
         checkedAt: new Date().toISOString(),
+        credentialSource: credentials.source,
+        connectedAt: credentials.connectedAt,
       });
     }
 
@@ -420,7 +573,7 @@ export default {
     }
 
     const assetResponse = await env.ASSETS.fetch(request);
-    if (url.pathname === "/" || url.pathname === "/index.html" || url.pathname === "/assets/index-bulk-v28.js" || url.pathname === "/assets/password-save-v6.js" || url.pathname === "/assets/sheets-resilience-v9.js" || url.pathname === "/assets/mobile-ux-v11.js" || url.pathname === "/assets/billing-mobile-search-v12.js" || url.pathname === "/assets/mobile-tables-v13.js" || url.pathname === "/assets/technician-shifts-v15.js" || url.pathname === "/assets/agenda-shift-guard-v24.js" || url.pathname === "/assets/enterprise-v22.js" || url.pathname === "/assets/planta-externa-entry.js" || url.pathname === "/assets/operations-points-v29.js" || url.pathname === "/assets/mobile-v5.css" || url.pathname === "/assets/enterprise-v22.css" || url.pathname === "/assets/operations-points-v29.css") {
+    if (url.pathname === "/" || url.pathname === "/index.html" || url.pathname === "/assets/index-bulk-v28.js" || url.pathname === "/assets/password-save-v6.js" || url.pathname === "/assets/sheets-resilience-v9.js" || url.pathname === "/assets/mobile-ux-v11.js" || url.pathname === "/assets/billing-mobile-search-v12.js" || url.pathname === "/assets/mobile-tables-v13.js" || url.pathname === "/assets/technician-shifts-v15.js" || url.pathname === "/assets/agenda-shift-guard-v24.js" || url.pathname === "/assets/enterprise-v22.js" || url.pathname === "/assets/planta-externa-entry.js" || url.pathname === "/assets/operations-points-v29.js" || url.pathname === "/assets/whatsapp-onboarding-v42.js" || url.pathname === "/assets/mobile-v5.css" || url.pathname === "/assets/enterprise-v22.css" || url.pathname === "/assets/operations-points-v29.css" || url.pathname === "/assets/whatsapp-onboarding-v42.css") {
       const headers = new Headers(assetResponse.headers);
       headers.set("cache-control", "no-store, no-cache, must-revalidate, max-age=0");
       headers.set("pragma", "no-cache");
@@ -434,3 +587,4 @@ export default {
     return assetResponse;
   },
 };
+
