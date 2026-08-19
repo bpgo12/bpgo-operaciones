@@ -2,6 +2,8 @@
 
 La plataforma queda preparada para vincular el mismo número de WhatsApp Business mediante el registro integrado oficial de Meta. El inicio se mantiene bloqueado hasta que la verificación comercial y la configuración de coexistencia estén completas.
 
+Estado técnico: código previo a la aprobación completado y listo para despliegue automático.
+
 ## Configuración pendiente en Cloudflare
 
 Crear estos secretos o variables en el entorno de producción de `bpgo-operaciones`:
