@@ -194,6 +194,45 @@
     }
   }
 
+  function automationLabel(type) {
+    return ({ payment: "Pago recibido", technical_fault: "Falla técnica", general: "Consulta general" })[type] || type;
+  }
+
+  async function loadAutomation(panel) {
+    var list = panel.querySelector("[data-automation-list]");
+    list.innerHTML = '<div class="whatsapp-test-status pending">Analizando casos recibidos…</div>';
+    try {
+      var response = await fetch("/api/whatsapp/automation-cases", { cache: "no-store" });
+      var data = await response.json().catch(function () { return {}; });
+      if (!response.ok) throw new Error(data.error || "No se pudo abrir la revisión del bot.");
+      var cases = (data.cases || []).filter(function (item) { return item.status !== "dismissed"; });
+      if (!cases.length) {
+        list.innerHTML = '<div class="whatsapp-inbox-empty">Todavía no hay casos sugeridos. Cuando llegue un pago, comprobante o reporte de falla aparecerá aquí.</div>';
+        return;
+      }
+      list.innerHTML = cases.map(function (item) {
+        var identified = item.customer_id ? escapeHtml(item.customer_name || item.customer_id) : "Cliente por identificar";
+        var details = [];
+        if (item.service_month) details.push("Período " + escapeHtml(item.service_month));
+        if (item.amount) details.push("$" + Number(item.amount).toLocaleString("es-CL"));
+        return '<article class="automation-case ' + escapeHtml(item.case_type) + '"><header><div><span class="automation-kind">' + escapeHtml(automationLabel(item.case_type)) + '</span><strong>' + identified + '</strong><small>+' + escapeHtml(item.phone) + ' · confianza ' + escapeHtml(item.confidence) + '%</small></div><span class="automation-state">' + escapeHtml(item.status) + '</span></header><p>' + escapeHtml(item.summary || "Pendiente de revisión") + '</p>' + (details.length ? '<p class="automation-details">' + details.join(" · ") + '</p>' : '') + '<footer><button type="button" class="btn secondary small" data-case-action="dismissed" data-case-id="' + escapeHtml(item.id) + '">Descartar</button><button type="button" class="btn small" data-case-action="reviewing" data-case-id="' + escapeHtml(item.id) + '">Revisar</button></footer></article>';
+      }).join("");
+    } catch (error) {
+      list.innerHTML = '<div class="whatsapp-test-status error">' + escapeHtml(error.message || "Error al cargar los casos") + '</div>';
+    }
+  }
+
+  async function updateAutomationCase(panel, id, statusValue) {
+    var response = await fetch("/api/whatsapp/automation-cases", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: id, status: statusValue })
+    });
+    var data = await response.json().catch(function () { return {}; });
+    if (!response.ok) window.alert(data.error || "No se pudo actualizar el caso.");
+    await loadAutomation(panel);
+  }
+
   async function replyTo(panel, phone) {
     var text = window.prompt("Escribe la respuesta para +" + phone + ":");
     if (!String(text || "").trim()) return;
@@ -215,7 +254,8 @@
       '<h3>Nuevo número oficial BPGO</h3><p>Usa la plantilla aprobada <code>nuevo_numero_whatsapp</code> para avisar a los clientes activos. Los teléfonos duplicados se eliminan automáticamente.</p></div>' +
       '<button type="button" class="btn secondary" data-number-change-button>Preparar alerta de cambio de número</button>' +
       '<div class="whatsapp-test-status" data-number-change-status hidden></div></div>' +
-      '<div class="whatsapp-inbox" data-whatsapp-inbox><header><div><p class="eyebrow">Atención al cliente</p><h3>Bandeja de mensajes</h3><p>Conversaciones recibidas en el número oficial BPGO.</p></div><button type="button" class="btn secondary" data-refresh-inbox>Actualizar</button></header><div data-inbox-list><div class="whatsapp-inbox-empty">Presiona Actualizar para revisar los mensajes.</div></div></div></section>';
+      '<div class="whatsapp-inbox" data-whatsapp-inbox><header><div><p class="eyebrow">Atención al cliente</p><h3>Bandeja de mensajes</h3><p>Conversaciones recibidas en el número oficial BPGO.</p></div><button type="button" class="btn secondary" data-refresh-inbox>Actualizar</button></header><div data-inbox-list><div class="whatsapp-inbox-empty">Presiona Actualizar para revisar los mensajes.</div></div></div>' +
+      '<div class="whatsapp-automation" data-whatsapp-automation><header><div><p class="eyebrow">Preparación del bot</p><h3>Casos detectados</h3><p>Pagos y fallas sugeridos automáticamente. Ningún caso modifica Cobranza ni crea órdenes sin revisión.</p></div><button type="button" class="btn secondary" data-refresh-automation>Actualizar casos</button></header><div class="automation-list" data-automation-list><div class="whatsapp-inbox-empty">Presiona Actualizar casos para revisar las sugerencias.</div></div></div></section>';
   }
 
   function install() {
@@ -231,6 +271,16 @@
   }
 
   document.addEventListener("click", function (event) {
+    var refreshAutomation = event.target.closest("[data-refresh-automation]");
+    if (refreshAutomation) {
+      loadAutomation(refreshAutomation.closest("[data-whatsapp-test-panel]"));
+      return;
+    }
+    var caseAction = event.target.closest("[data-case-action]");
+    if (caseAction) {
+      updateAutomationCase(caseAction.closest("[data-whatsapp-test-panel]"), caseAction.dataset.caseId, caseAction.dataset.caseAction);
+      return;
+    }
     var refreshInbox = event.target.closest("[data-refresh-inbox]");
     if (refreshInbox) {
       loadInbox(refreshInbox.closest("[data-whatsapp-test-panel]"));

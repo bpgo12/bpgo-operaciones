@@ -129,6 +129,101 @@ async function ensureWhatsAppInboxTable(env) {
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_inbox_phone_created ON whatsapp_inbox_messages(phone, created_at DESC)").run();
 }
 
+async function ensureWhatsAppAutomationTable(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_automation_cases (
+    id TEXT PRIMARY KEY,
+    source_message_id TEXT NOT NULL UNIQUE,
+    phone TEXT NOT NULL,
+    customer_name TEXT,
+    customer_id TEXT,
+    case_type TEXT NOT NULL,
+    confidence INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'suggested',
+    summary TEXT,
+    service_month TEXT,
+    amount INTEGER,
+    media_id TEXT,
+    decision_note TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_cases_status_created ON whatsapp_automation_cases(status, created_at DESC)").run();
+}
+
+const SPANISH_MONTHS = {
+  enero: "01", febrero: "02", marzo: "03", abril: "04", mayo: "05", junio: "06",
+  julio: "07", agosto: "08", septiembre: "09", setiembre: "09", octubre: "10", noviembre: "11", diciembre: "12",
+};
+
+function inferServiceMonth(text, createdAt) {
+  const normalized = String(text || "").toLocaleLowerCase("es-CL");
+  const monthName = Object.keys(SPANISH_MONTHS).find((month) => normalized.includes(month));
+  if (!monthName) return null;
+  const explicitYear = normalized.match(/\b(20\d{2})\b/)?.[1];
+  const baseYear = Number(explicitYear || new Date(createdAt).getUTCFullYear());
+  return `${baseYear}-${SPANISH_MONTHS[monthName]}`;
+}
+
+function inferAmount(text) {
+  const candidates = String(text || "").match(/(?:\$\s*)?\b\d{1,3}(?:[.\s]\d{3})+\b|\$\s*\d{4,7}\b/g) || [];
+  const values = candidates.map((value) => Number(value.replace(/\D/g, ""))).filter((value) => value >= 1000 && value <= 2000000);
+  return values.length ? Math.max(...values) : null;
+}
+
+function classifyInboundMessage(message) {
+  const text = String(message.text || "").toLocaleLowerCase("es-CL");
+  const paymentWords = /\b(pagu[eé]|pago|pagado|transfer|dep[oó]sito|comprobante|boleta)\b/.test(text);
+  const faultWords = /\b(sin internet|sin conexi[oó]n|no tengo internet|no funciona|falla|corte|fibra|router|los roja|luz roja|intermitente|lento)\b/.test(text);
+  const hasReceipt = Boolean(message.mediaId) && ["image", "document"].includes(message.type);
+  if (paymentWords || hasReceipt) {
+    return {
+      type: "payment",
+      confidence: paymentWords && hasReceipt ? 96 : hasReceipt ? 82 : 70,
+      summary: hasReceipt ? "Comprobante de pago recibido para validación." : "Cliente informa un pago; falta revisar el comprobante.",
+      serviceMonth: inferServiceMonth(text, message.createdAt),
+      amount: inferAmount(text),
+    };
+  }
+  if (faultWords) {
+    return { type: "technical_fault", confidence: 90, summary: "Posible falla de servicio para crear como orden por planificar.", serviceMonth: null, amount: null };
+  }
+  return { type: "general", confidence: 35, summary: "Consulta general pendiente de atención.", serviceMonth: null, amount: null };
+}
+
+function normalizeComparablePhone(value) {
+  const phone = normalizeWhatsAppPhone(value);
+  return phone.length >= 8 ? phone.slice(-8) : phone;
+}
+
+async function findCustomerForWhatsApp(env, phone, fallbackName) {
+  const row = await env.DB.prepare("SELECT data FROM app_state WHERE id = 'main'").first().catch(() => null);
+  const state = row?.data ? JSON.parse(row.data) : null;
+  const collections = [state?.billingCustomers, state?.customers].filter(Array.isArray);
+  const wanted = normalizeComparablePhone(phone);
+  for (const customer of collections.flat()) {
+    const candidate = normalizeComparablePhone(customer.phone || customer.whatsapp || customer.telefono || "");
+    if (wanted && candidate && wanted === candidate) {
+      return { id: String(customer.id || customer.rut || customer.name || ""), name: customer.name || customer.client || fallbackName || null };
+    }
+  }
+  return { id: null, name: fallbackName || null };
+}
+
+async function createAutomationCase(env, message) {
+  await ensureWhatsAppAutomationTable(env);
+  const classification = classifyInboundMessage(message);
+  const customer = await findCustomerForWhatsApp(env, message.phone, message.customerName);
+  const id = crypto.randomUUID();
+  await env.DB.prepare(`INSERT OR IGNORE INTO whatsapp_automation_cases
+    (id, source_message_id, phone, customer_name, customer_id, case_type, confidence, status, summary,
+     service_month, amount, media_id, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 'suggested', ?, ?, ?, ?, ?, datetime('now'))`)
+    .bind(id, message.messageId, message.phone, customer.name, customer.id, classification.type,
+      classification.confidence, classification.summary, classification.serviceMonth, classification.amount,
+      message.mediaId || null, message.createdAt)
+    .run();
+}
+
 async function saveInboundWhatsAppMessages(env, changes) {
   await ensureWhatsAppInboxTable(env);
   let saved = 0;
@@ -143,6 +238,15 @@ async function saveInboundWhatsAppMessages(env, changes) {
         VALUES (?, ?, ?, 'inbound', ?, ?, ?, ?, ?)`)
         .bind(message.id, message.from, name, message.type || "unknown", text, mediaId, new Date(Number(message.timestamp || 0) * 1000).toISOString(), JSON.stringify(message))
         .run();
+      await createAutomationCase(env, {
+        messageId: message.id,
+        phone: message.from,
+        customerName: name,
+        type: message.type || "unknown",
+        text,
+        mediaId,
+        createdAt: new Date(Number(message.timestamp || 0) * 1000).toISOString(),
+      }).catch(() => null);
       saved += 1;
     }
   }
@@ -403,6 +507,32 @@ export default {
       const rows = await env.DB.prepare(`SELECT message_id, phone, customer_name, direction, message_type,
         message_text, media_id, created_at FROM whatsapp_inbox_messages ORDER BY created_at DESC LIMIT 300`).all();
       return Response.json({ ok: true, messages: rows.results || [] });
+    }
+
+    if (url.pathname === "/api/whatsapp/automation-cases" && request.method === "GET") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      await ensureWhatsAppAutomationTable(env);
+      const rows = await env.DB.prepare(`SELECT id, source_message_id, phone, customer_name, customer_id,
+        case_type, confidence, status, summary, service_month, amount, media_id, decision_note, created_at, updated_at
+        FROM whatsapp_automation_cases ORDER BY created_at DESC LIMIT 200`).all();
+      return Response.json({ ok: true, cases: rows.results || [] });
+    }
+
+    if (url.pathname === "/api/whatsapp/automation-cases" && request.method === "PATCH") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      const body = await request.json().catch(() => ({}));
+      const id = String(body.id || "").trim();
+      const status = String(body.status || "").trim();
+      const allowed = new Set(["suggested", "reviewing", "approved", "dismissed"]);
+      if (!id || !allowed.has(status)) return Response.json({ ok: false, error: "Caso o estado inválido." }, { status: 400 });
+      await ensureWhatsAppAutomationTable(env);
+      const result = await env.DB.prepare(`UPDATE whatsapp_automation_cases
+        SET status = ?, decision_note = ?, updated_at = datetime('now') WHERE id = ?`)
+        .bind(status, String(body.note || "").trim().slice(0, 1000) || null, id).run();
+      if (!result.meta?.changes) return Response.json({ ok: false, error: "Caso no encontrado." }, { status: 404 });
+      return Response.json({ ok: true, id, status });
     }
 
     if (url.pathname === "/api/whatsapp/reply" && request.method === "POST") {
