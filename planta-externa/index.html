@@ -33,11 +33,12 @@
     <h3>Herramientas</h3>
     <div class="tools">
       <button data-tool="select" class="active">Seleccionar</button>
+      <button id="addAssetBtn" type="button">Agregar elemento</button>
       <button data-tool="fiber">Conectar fibra</button>
       <button id="cancelTool">Cancelar</button>
     </div>
 
-    <select id="assetType" class="hidden" aria-hidden="true">
+    <select id="assetType" class="asset-type-picker hidden" aria-label="Tipo de elemento que se agregará">
       <option value="OLT">OLT / Central</option>
       <option value="MUF">Mufa</option>
       <option value="CTO">CTO</option>
@@ -301,6 +302,6 @@
 <script src="config.js?v=osm-20260817-1"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script src="https://unpkg.com/leaflet-editable@1.3.0/src/Leaflet.Editable.js"></script>
-<script src="app.js?v=osm-20260819-4"></script>
+<script src="app.js?v=osm-20260819-5"></script>
 </body>
 </html>
