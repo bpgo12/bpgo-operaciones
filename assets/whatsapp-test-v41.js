@@ -186,7 +186,8 @@
         var name = messages.find(function (item) { return item.customer_name; });
         return '<article class="whatsapp-conversation"><header><div><strong>' + escapeHtml(name && name.customer_name || "+" + phone) + '</strong><small>+' + escapeHtml(phone) + '</small></div><button type="button" class="btn secondary small" data-reply-phone="' + escapeHtml(phone) + '">Responder</button></header><div class="whatsapp-thread">' + messages.map(function (message) {
           var content = message.message_text || (message.media_id ? "Archivo recibido (" + message.message_type + ")" : "Mensaje " + message.message_type);
-          return '<div class="whatsapp-bubble ' + (message.direction === "outbound" ? "outbound" : "inbound") + '"><span>' + escapeHtml(content) + '</span><small>' + escapeHtml(new Date(message.created_at).toLocaleString("es-CL")) + '</small></div>';
+          var attachment = message.media_id ? '<button type="button" class="btn secondary small" data-media-id="' + escapeHtml(message.media_id) + '">Ver comprobante o archivo</button>' : "";
+          return '<div class="whatsapp-bubble ' + (message.direction === "outbound" ? "outbound" : "inbound") + '"><span>' + escapeHtml(content) + '</span>' + attachment + '<small>' + escapeHtml(new Date(message.created_at).toLocaleString("es-CL")) + '</small></div>';
         }).join("") + '</div></article>';
       }).join("");
     } catch (error) {
@@ -242,6 +243,22 @@
     await loadInbox(panel);
   }
 
+  async function openMedia(mediaId) {
+    try {
+      var response = await fetch("/api/whatsapp/media?id=" + encodeURIComponent(mediaId), { cache: "no-store" });
+      if (!response.ok) {
+        var data = await response.json().catch(function () { return {}; });
+        throw new Error(data.error || "No se pudo abrir el archivo.");
+      }
+      var blob = await response.blob();
+      var objectUrl = URL.createObjectURL(blob);
+      window.open(objectUrl, "_blank", "noopener");
+      window.setTimeout(function () { URL.revokeObjectURL(objectUrl); }, 60000);
+    } catch (error) {
+      window.alert(error.message || "No se pudo abrir el archivo recibido.");
+    }
+  }
+
   function markup() {
     return '<section class="whatsapp-test-panel" data-whatsapp-test-panel>' +
       '<div><p class="eyebrow">Validación segura</p><h3>Prueba controlada</h3>' +
@@ -284,6 +301,11 @@
     var refreshInbox = event.target.closest("[data-refresh-inbox]");
     if (refreshInbox) {
       loadInbox(refreshInbox.closest("[data-whatsapp-test-panel]"));
+      return;
+    }
+    var mediaButton = event.target.closest("[data-media-id]");
+    if (mediaButton) {
+      openMedia(mediaButton.dataset.mediaId);
       return;
     }
     var replyButton = event.target.closest("[data-reply-phone]");
