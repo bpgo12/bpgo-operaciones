@@ -509,6 +509,41 @@ export default {
       return Response.json({ ok: true, messages: rows.results || [] });
     }
 
+    if (url.pathname === "/api/whatsapp/media" && request.method === "GET") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      const mediaId = String(url.searchParams.get("id") || "").trim();
+      if (!/^\d+$/.test(mediaId)) return Response.json({ ok: false, error: "Comprobante inválido." }, { status: 400 });
+      await ensureWhatsAppInboxTable(env);
+      const storedMedia = await env.DB.prepare("SELECT media_id FROM whatsapp_inbox_messages WHERE media_id = ? LIMIT 1")
+        .bind(mediaId).first();
+      if (!storedMedia) return Response.json({ ok: false, error: "Comprobante no encontrado." }, { status: 404 });
+      const credentials = await getWhatsAppCredentials(env);
+      if (!credentials.accessToken) return Response.json({ ok: false, error: "WhatsApp todavía no está conectado." }, { status: 409 });
+      const metadataResponse = await fetch(`https://graph.facebook.com/v23.0/${encodeURIComponent(mediaId)}`, {
+        headers: { authorization: `Bearer ${credentials.accessToken}` },
+      });
+      const metadata = await metadataResponse.json().catch(() => ({}));
+      if (!metadataResponse.ok || !metadata.url) {
+        return Response.json({ ok: false, error: metadata.error?.message || "Meta no pudo abrir el comprobante." }, { status: 422 });
+      }
+      const mediaResponse = await fetch(metadata.url, {
+        headers: { authorization: `Bearer ${credentials.accessToken}` },
+      });
+      if (!mediaResponse.ok || !mediaResponse.body) {
+        return Response.json({ ok: false, error: "No se pudo descargar el comprobante desde Meta." }, { status: 422 });
+      }
+      return new Response(mediaResponse.body, {
+        status: 200,
+        headers: {
+          "content-type": metadata.mime_type || mediaResponse.headers.get("content-type") || "application/octet-stream",
+          "content-disposition": `inline; filename="comprobante-${mediaId}"`,
+          "cache-control": "private, no-store, max-age=0",
+          "x-content-type-options": "nosniff",
+        },
+      });
+    }
+
     if (url.pathname === "/api/whatsapp/automation-cases" && request.method === "GET") {
       const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
       if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
@@ -604,7 +639,9 @@ export default {
         phoneNumberId: credentials.phoneNumberId ? `…${credentials.phoneNumberId.slice(-6)}` : "",
         wabaId: credentials.wabaId ? `…${credentials.wabaId.slice(-6)}` : "",
         connectedAt: credentials.connectedAt,
+        businessVerified: true,
         checks: [
+          { key: "META_BUSINESS_VERIFIED", label: "Negocio BPGO verificado por Meta", configured: true },
           { key: "META_APP_ID", label: "App BPGO COBRANZA", configured: Boolean(appId) },
           { key: "META_APP_SECRET", label: "Clave secreta protegida", configured: Boolean(String(env.META_APP_SECRET || "").trim()) },
           { key: "META_EMBEDDED_SIGNUP_CONFIG_ID", label: "Configuración de registro integrado", configured: Boolean(configId) },
@@ -641,6 +678,16 @@ export default {
       const numbersPayload = await numbersResponse.json().catch(() => ({}));
       const selectedNumber = Array.isArray(numbersPayload.data) ? numbersPayload.data.find((item) => String(item.id) === phoneNumberId) : null;
       if (!numbersResponse.ok || !selectedNumber) return Response.json({ ok: false, error: numbersPayload.error?.message || "El número no pertenece a la cuenta de WhatsApp autorizada." }, { status: 422 });
+
+      const subscriptionResponse = await fetch(`https://graph.facebook.com/v23.0/${encodeURIComponent(wabaId)}/subscribed_apps`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ subscribed_fields: ["messages"] }),
+      });
+      const subscriptionPayload = await subscriptionResponse.json().catch(() => ({}));
+      if (!subscriptionResponse.ok || subscriptionPayload.success !== true) {
+        return Response.json({ ok: false, error: subscriptionPayload.error?.message || "Meta no pudo suscribir el número al webhook de mensajes." }, { status: 422 });
+      }
 
       await ensureWhatsAppOnboardingTable(env);
       const encryptedToken = await encryptCredential(accessToken, env.OPERATIONS_ADMIN_SECRET);
@@ -703,7 +750,7 @@ export default {
     }
 
     const assetResponse = await env.ASSETS.fetch(request);
-    if (url.pathname === "/" || url.pathname === "/index.html" || url.pathname === "/assets/index-bulk-v28.js" || url.pathname === "/assets/password-save-v6.js" || url.pathname === "/assets/sheets-resilience-v9.js" || url.pathname === "/assets/mobile-ux-v11.js" || url.pathname === "/assets/billing-mobile-search-v12.js" || url.pathname === "/assets/mobile-tables-v13.js" || url.pathname === "/assets/technician-shifts-v15.js" || url.pathname === "/assets/agenda-shift-guard-v24.js" || url.pathname === "/assets/enterprise-v22.js" || url.pathname === "/assets/planta-externa-entry.js" || url.pathname === "/assets/operations-points-v29.js" || url.pathname === "/assets/whatsapp-onboarding-v42.js" || url.pathname === "/assets/mobile-v5.css" || url.pathname === "/assets/enterprise-v22.css" || url.pathname === "/assets/operations-points-v29.css" || url.pathname === "/assets/whatsapp-onboarding-v42.css") {
+    if (url.pathname === "/" || url.pathname === "/index.html" || url.pathname === "/assets/index-bulk-v28.js" || url.pathname === "/assets/password-save-v6.js" || url.pathname === "/assets/sheets-resilience-v9.js" || url.pathname === "/assets/mobile-ux-v11.js" || url.pathname === "/assets/billing-mobile-search-v12.js" || url.pathname === "/assets/mobile-tables-v13.js" || url.pathname === "/assets/technician-shifts-v15.js" || url.pathname === "/assets/agenda-shift-guard-v24.js" || url.pathname === "/assets/enterprise-v22.js" || url.pathname === "/assets/planta-externa-entry.js" || url.pathname === "/assets/operations-points-v29.js" || url.pathname === "/assets/whatsapp-onboarding-v43.js" || url.pathname === "/assets/whatsapp-test-v41.js" || url.pathname === "/assets/mobile-v5.css" || url.pathname === "/assets/enterprise-v22.css" || url.pathname === "/assets/operations-points-v29.css" || url.pathname === "/assets/whatsapp-onboarding-v42.css") {
       const headers = new Headers(assetResponse.headers);
       headers.set("cache-control", "no-store, no-cache, must-revalidate, max-age=0");
       headers.set("pragma", "no-cache");

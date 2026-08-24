@@ -1,8 +1,10 @@
 # Meta WhatsApp: preparación de coexistencia
 
-La plataforma queda preparada para vincular el mismo número de WhatsApp Business mediante el registro integrado oficial de Meta. El inicio se mantiene bloqueado hasta que la verificación comercial y la configuración de coexistencia estén completas.
+La plataforma queda preparada para vincular el mismo número de WhatsApp Business mediante el registro integrado oficial de Meta.
 
-Estado técnico: código previo a la aprobación completado y listo para despliegue automático.
+Estado Meta: negocio verificado el 24 de agosto de 2026.
+
+Estado técnico: bandeja, respuestas, bot inicial, comprobantes, webhooks y registro integrado preparados. Al conectar el número, la plataforma suscribe automáticamente la cuenta de WhatsApp Business al webhook de mensajes.
 
 ## Configuración pendiente en Cloudflare
 
@@ -18,16 +20,16 @@ Crear estos secretos o variables en el entorno de producción de `bpgo-operacion
 
 No reutilizar el Phone Number ID ni el WABA ID anteriores: quedaron obsoletos al retirar el número de Cloud API para instalar WhatsApp Business en el teléfono.
 
-## Después de la aprobación
+## Activación de coexistencia
 
-1. Crear en Meta la configuración de registro integrado con coexistencia.
+1. Crear en Meta la configuración de registro integrado con coexistencia, ahora que el negocio está verificado.
 2. Copiar el Config ID y el modo/feature oficial a Cloudflare.
 3. Confirmar que el dominio permitido sea `operaciones.bpgo.cl`.
 4. Entrar como superadministrador a Cobranza > WhatsApp API.
 5. Presionar **Conectar con Meta** y completar el flujo oficial sin desinstalar WhatsApp Business.
 6. Confirmar que el panel muestre el nuevo WABA ID y Phone Number ID.
 7. Enviar una prueba controlada a un único teléfono.
-8. Responder desde el teléfono y verificar que el mensaje aparezca en la bandeja de la plataforma.
+8. Responder desde el teléfono, verificar que el mensaje aparezca en la bandeja y abrir el comprobante desde la conversación.
 9. Recién después de validar envío, recepción y estados, habilitar campañas masivas.
 
 ## Controles incluidos
