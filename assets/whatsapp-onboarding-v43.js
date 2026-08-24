@@ -2,6 +2,7 @@
   "use strict";
 
   var timer = 0;
+  var signupTimeout = 0;
   var onboarding = null;
   var signupResult = {};
 
@@ -35,6 +36,19 @@
     output.hidden = false;
     output.className = "whatsapp-test-status " + (kind || "pending");
     output.textContent = message;
+  }
+
+  function clearSignupTimeout() {
+    window.clearTimeout(signupTimeout);
+    signupTimeout = 0;
+  }
+
+  function showSignupProgress(panel) {
+    if (signupResult.code && (!signupResult.wabaId || !signupResult.phoneNumberId)) {
+      showStatus(panel, "Autorización recibida. Completa la selección del número en la ventana de Meta…", "pending");
+    } else if (!signupResult.code && signupResult.wabaId && signupResult.phoneNumberId) {
+      showStatus(panel, "Número seleccionado. Esperando la autorización final de Meta…", "pending");
+    }
   }
 
   async function loadStatus(panel) {
@@ -71,6 +85,7 @@
 
   async function finishSignup(panel) {
     if (!signupResult.code || !signupResult.wabaId || !signupResult.phoneNumberId || signupResult.saving) return;
+    clearSignupTimeout();
     signupResult.saving = true;
     showStatus(panel, "Validando la cuenta, suscribiendo el webhook y cifrando las credenciales…", "pending");
     try {
@@ -92,23 +107,38 @@
   async function startSignup(panel) {
     if (!onboarding || !onboarding.readyToStart) return;
     signupResult = {};
+    clearSignupTimeout();
     showStatus(panel, "Abriendo la ventana segura de Meta…", "pending");
     try {
       var FB = await loadFacebookSdk(onboarding.appId);
       FB.login(function (response) {
         if (!response.authResponse || !response.authResponse.code) {
+          clearSignupTimeout();
           showStatus(panel, "La vinculación fue cancelada o Meta no entregó autorización.", "error");
           return;
         }
         signupResult.code = response.authResponse.code;
+        showSignupProgress(panel);
         finishSignup(panel);
       }, {
         config_id: onboarding.configId,
         response_type: "code",
         override_default_response_type: true,
-        extras: { featureType: onboarding.featureType, sessionInfoVersion: "3" }
+        extras: {
+          setup: {},
+          featureType: onboarding.featureType,
+          sessionInfoVersion: "3"
+        }
       });
+      signupTimeout = window.setTimeout(function () {
+        if (signupResult.saving) return;
+        var missing = [];
+        if (!signupResult.code) missing.push("autorización");
+        if (!signupResult.wabaId || !signupResult.phoneNumberId) missing.push("selección del número");
+        showStatus(panel, "Meta no completó " + missing.join(" y ") + ". Cierra cualquier ventana de Meta abierta y vuelve a presionar Conectar con Meta.", "error");
+      }, 120000);
     } catch (error) {
+      clearSignupTimeout();
       showStatus(panel, error.message || "No se pudo abrir Meta.", "error");
     }
   }
@@ -126,7 +156,14 @@
       signupResult.wabaId = String(payload.data && payload.data.waba_id || "");
       signupResult.phoneNumberId = String(payload.data && payload.data.phone_number_id || "");
       var panel = document.querySelector("[data-whatsapp-onboarding]");
-      if (panel) finishSignup(panel);
+      if (panel) {
+        showSignupProgress(panel);
+        finishSignup(panel);
+      }
+    } else if (payload.event === "CANCEL" || payload.event === "ERROR") {
+      clearSignupTimeout();
+      var errorPanel = document.querySelector("[data-whatsapp-onboarding]");
+      if (errorPanel) showStatus(errorPanel, "Meta canceló el registro del número. Vuelve a intentarlo y completa todos los pasos de la ventana.", "error");
     }
   });
 
