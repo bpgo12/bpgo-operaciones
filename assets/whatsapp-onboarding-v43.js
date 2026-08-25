@@ -115,9 +115,9 @@
     var button = panel && panel.querySelector("[data-start-embedded-signup]");
     if (button) button.disabled = Boolean(disabled);
   }
-
-  async function finishSignup(panel) {
-    if (!signupResult.code || !signupResult.wabaId || !signupResult.phoneNumberId || signupResult.saving) return;
+  async function finishSignup(panel, discoverAutomatically) {
+    if (!signupResult.code || signupResult.saving) return;
+    if (!discoverAutomatically && (!signupResult.wabaId || !signupResult.phoneNumberId)) return;
     clearSignupTimeout();
     signupResult.saving = true;
     showStatus(panel, "Validando la cuenta, suscribiendo el webhook y cifrando las credenciales…", "pending");
@@ -125,7 +125,7 @@
       var response = await fetch("/api/whatsapp/onboarding", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ code: signupResult.code, wabaId: signupResult.wabaId, phoneNumberId: signupResult.phoneNumberId })
+        body: JSON.stringify({ code: signupResult.code, wabaId: signupResult.wabaId || "", phoneNumberId: signupResult.phoneNumberId || "" })
       });
       var data = await response.json().catch(function () { return {}; });
       if (!response.ok) throw new Error(data.error || "Meta no pudo completar la vinculación.");
@@ -153,8 +153,11 @@
           return;
         }
         signupResult.code = response.authResponse.code;
-        showStatus(panel, "Autorización recibida. Esperando que Meta entregue la cuenta y el número seleccionados…", "pending");
+        showStatus(panel, "Autorización recibida. Identificando automáticamente el número BPGO…", "pending");
         finishSignup(panel);
+        window.setTimeout(function () {
+          if (!signupResult.saving && signupResult.code) finishSignup(panel, true);
+        }, 1800);
       }, {
         config_id: onboarding.configId,
         response_type: "code",
@@ -172,7 +175,7 @@
         if (!signupResult.wabaId || !signupResult.phoneNumberId) missing.push("selección del número");
         setStartButton(panel, false);
         showStatus(panel, "Meta no completó " + missing.join(" y ") + ". Presiona nuevamente Conectar con Meta: se abrirá un registro nuevo.", "error");
-      }, 30000);
+      }, 45000);
     } catch (error) {
       clearSignupTimeout();
       setStartButton(panel, false);
@@ -190,8 +193,9 @@
     }
     if (!payload || payload.type !== "WA_EMBEDDED_SIGNUP") return;
     if (payload.event === "FINISH" || payload.event === "FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING") {
-      signupResult.wabaId = String(payload.data && payload.data.waba_id || "");
-      signupResult.phoneNumberId = String(payload.data && payload.data.phone_number_id || "");
+      var eventData = payload.data && payload.data.data ? payload.data.data : (payload.data || {});
+      signupResult.wabaId = String(eventData.waba_id || eventData.wabaId || signupResult.wabaId || "");
+      signupResult.phoneNumberId = String(eventData.phone_number_id || eventData.phoneNumberId || signupResult.phoneNumberId || "");
       var panel = document.querySelector("[data-whatsapp-onboarding]");
       if (panel) {
         showSignupProgress(panel);
