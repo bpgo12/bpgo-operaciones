@@ -125,7 +125,12 @@
       var response = await fetch("/api/whatsapp/onboarding", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ code: signupResult.code, wabaId: signupResult.wabaId || "", phoneNumberId: signupResult.phoneNumberId || "" })
+        body: JSON.stringify({
+          code: signupResult.code,
+          wabaId: signupResult.wabaId || "",
+          phoneNumberId: signupResult.phoneNumberId || "",
+          redirectUri: onboarding.redirectUri
+        })
       });
       var data = await response.json().catch(function () { return {}; });
       if (!response.ok) throw new Error(data.error || "Meta no pudo completar la vinculación.");
@@ -162,6 +167,7 @@
         config_id: onboarding.configId,
         response_type: "code",
         override_default_response_type: true,
+        redirect_uri: onboarding.redirectUri,
         extras: {
           setup: {},
           featureType: "whatsapp_business_app_onboarding",
