@@ -5,6 +5,7 @@
   var signupTimeout = 0;
   var onboarding = null;
   var signupResult = {};
+  var facebookSdkPromise = null;
 
   function isApiView() {
     return Array.from(document.querySelectorAll("h2")).some(function (heading) {
@@ -58,29 +59,61 @@
       var data = await response.json().catch(function () { return {}; });
       if (!response.ok) throw new Error(data.error || "No se pudo revisar la configuración.");
       render(panel, data);
+      if (data.readyToStart && !data.connected) {
+        loadFacebookSdk(data.appId).catch(function () {});
+      }
     } catch (error) {
       panel.innerHTML = '<div class="whatsapp-test-status error">' + escapeHtml(error.message || "No se pudo cargar el registro integrado.") + '</div>';
     }
   }
 
   function loadFacebookSdk(appId) {
-    return new Promise(function (resolve, reject) {
-      if (window.FB) return resolve(window.FB);
-      window.fbAsyncInit = function () {
+    if (window.FB) return Promise.resolve(window.FB);
+    if (facebookSdkPromise) return facebookSdkPromise;
+    facebookSdkPromise = new Promise(function (resolve, reject) {
+      var settled = false;
+      function ready() {
+        if (settled || !window.FB) return;
+        settled = true;
         window.FB.init({ appId: appId, cookie: true, xfbml: false, version: "v23.0" });
         resolve(window.FB);
+      }
+      window.fbAsyncInit = function () {
+        ready();
       };
       var existing = document.getElementById("facebook-jssdk");
-      if (existing) return;
-      var script = document.createElement("script");
-      script.id = "facebook-jssdk";
-      script.async = true;
-      script.defer = true;
-      script.crossOrigin = "anonymous";
-      script.src = "https://connect.facebook.net/es_LA/sdk.js";
-      script.onerror = function () { reject(new Error("No se pudo cargar el acceso seguro de Meta.")); };
-      document.head.appendChild(script);
+      if (!existing) {
+        var script = document.createElement("script");
+        script.id = "facebook-jssdk";
+        script.async = true;
+        script.defer = true;
+        script.crossOrigin = "anonymous";
+        script.src = "https://connect.facebook.net/es_LA/sdk.js";
+        script.onerror = function () {
+          facebookSdkPromise = null;
+          reject(new Error("No se pudo cargar el acceso seguro de Meta."));
+        };
+        document.head.appendChild(script);
+      }
+      var checks = 0;
+      var poll = window.setInterval(function () {
+        checks += 1;
+        if (window.FB) {
+          window.clearInterval(poll);
+          ready();
+        } else if (checks >= 100) {
+          window.clearInterval(poll);
+          facebookSdkPromise = null;
+          reject(new Error("Meta no terminó de cargar. Actualiza la página y vuelve a intentarlo."));
+        }
+      }, 100);
     });
+    return facebookSdkPromise;
+  }
+
+  function setStartButton(panel, disabled) {
+    var button = panel && panel.querySelector("[data-start-embedded-signup]");
+    if (button) button.disabled = Boolean(disabled);
   }
 
   async function finishSignup(panel) {
@@ -108,22 +141,26 @@
     if (!onboarding || !onboarding.readyToStart) return;
     signupResult = {};
     clearSignupTimeout();
+    setStartButton(panel, true);
     showStatus(panel, "Abriendo la ventana segura de Meta…", "pending");
     try {
       var FB = await loadFacebookSdk(onboarding.appId);
       FB.login(function (response) {
         if (!response.authResponse || !response.authResponse.code) {
           clearSignupTimeout();
+          setStartButton(panel, false);
           showStatus(panel, "La vinculación fue cancelada o Meta no entregó autorización.", "error");
           return;
         }
         signupResult.code = response.authResponse.code;
-        showSignupProgress(panel);
+        showStatus(panel, "Autorización recibida. Esperando que Meta entregue la cuenta y el número seleccionados…", "pending");
         finishSignup(panel);
       }, {
         config_id: onboarding.configId,
         response_type: "code",
         override_default_response_type: true,
+        auth_type: "rerequest",
+        display: "popup",
         extras: {
           setup: {},
           featureType: onboarding.featureType,
@@ -135,10 +172,12 @@
         var missing = [];
         if (!signupResult.code) missing.push("autorización");
         if (!signupResult.wabaId || !signupResult.phoneNumberId) missing.push("selección del número");
-        showStatus(panel, "Meta no completó " + missing.join(" y ") + ". Cierra cualquier ventana de Meta abierta y vuelve a presionar Conectar con Meta.", "error");
-      }, 120000);
+        setStartButton(panel, false);
+        showStatus(panel, "Meta no completó " + missing.join(" y ") + ". Presiona nuevamente Conectar con Meta: se abrirá un registro nuevo.", "error");
+      }, 30000);
     } catch (error) {
       clearSignupTimeout();
+      setStartButton(panel, false);
       showStatus(panel, error.message || "No se pudo abrir Meta.", "error");
     }
   }
@@ -152,7 +191,7 @@
       try { payload = JSON.parse(payload); } catch (_) { return; }
     }
     if (!payload || payload.type !== "WA_EMBEDDED_SIGNUP") return;
-    if (payload.event === "FINISH") {
+    if (payload.event === "FINISH" || payload.event === "FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING") {
       signupResult.wabaId = String(payload.data && payload.data.waba_id || "");
       signupResult.phoneNumberId = String(payload.data && payload.data.phone_number_id || "");
       var panel = document.querySelector("[data-whatsapp-onboarding]");
@@ -163,7 +202,10 @@
     } else if (payload.event === "CANCEL" || payload.event === "ERROR") {
       clearSignupTimeout();
       var errorPanel = document.querySelector("[data-whatsapp-onboarding]");
-      if (errorPanel) showStatus(errorPanel, "Meta canceló el registro del número. Vuelve a intentarlo y completa todos los pasos de la ventana.", "error");
+      if (errorPanel) {
+        setStartButton(errorPanel, false);
+        showStatus(errorPanel, "Meta canceló el registro del número. Vuelve a intentarlo y completa todos los pasos de la ventana.", "error");
+      }
     }
   });
 
@@ -191,3 +233,4 @@
   document.addEventListener("DOMContentLoaded", install);
   install();
 })();
+
