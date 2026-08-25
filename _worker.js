@@ -656,11 +656,14 @@ export default {
       if (!session || session.role !== "super_admin") return Response.json({ ok: false, error: "Solo un superadministrador puede conectar Meta." }, { status: 403 });
       const body = await request.json().catch(() => ({}));
       const code = String(body.code || "").trim();
-      const wabaId = String(body.wabaId || "").trim();
-      const phoneNumberId = String(body.phoneNumberId || "").trim();
+      let wabaId = String(body.wabaId || "").trim();
+      let phoneNumberId = String(body.phoneNumberId || "").trim();
       const appId = String(env.META_APP_ID || "").trim();
       const appSecret = String(env.META_APP_SECRET || "").trim();
-      if (!code || !/^\d+$/.test(wabaId) || !/^\d+$/.test(phoneNumberId)) return Response.json({ ok: false, error: "Meta no entregó todos los identificadores necesarios." }, { status: 400 });
+      if (!code) return Response.json({ ok: false, error: "Meta no entregó el código de autorización." }, { status: 400 });
+      if ((wabaId && !/^\d+$/.test(wabaId)) || (phoneNumberId && !/^\d+$/.test(phoneNumberId))) {
+        return Response.json({ ok: false, error: "Meta entregó identificadores inválidos." }, { status: 400 });
+      }
       if (!appId || !appSecret || !env.OPERATIONS_ADMIN_SECRET) return Response.json({ ok: false, error: "Faltan secretos de Meta en Cloudflare." }, { status: 409 });
 
       const tokenUrl = new URL("https://graph.facebook.com/v23.0/oauth/access_token");
@@ -671,6 +674,58 @@ export default {
       const tokenPayload = await tokenResponse.json().catch(() => ({}));
       const accessToken = String(tokenPayload.access_token || "").trim();
       if (!tokenResponse.ok || !accessToken) return Response.json({ ok: false, error: tokenPayload.error?.message || "Meta no pudo intercambiar el código de autorización." }, { status: 422 });
+
+      // Embedded Signup puede autorizar correctamente y omitir el evento de
+      // selección en el navegador. Resolvemos el número autorizado mediante
+      // Graph para evitar que el usuario repita indefinidamente la ventana.
+      if (!wabaId || !phoneNumberId) {
+        const businessId = String(env.META_BUSINESS_ID || "").trim();
+        if (!/^\d+$/.test(businessId)) {
+          return Response.json({ ok: false, error: "Falta META_BUSINESS_ID para identificar automáticamente el número autorizado." }, { status: 409 });
+        }
+        const candidates = [];
+        const seenWabas = new Set();
+        for (const edge of ["owned_whatsapp_business_accounts", "client_whatsapp_business_accounts"]) {
+          const accountsResponse = await fetch(`https://graph.facebook.com/v23.0/${encodeURIComponent(businessId)}/${edge}?fields=id,name&limit=100`, {
+            headers: { authorization: `Bearer ${accessToken}` },
+          });
+          const accountsPayload = await accountsResponse.json().catch(() => ({}));
+          if (!accountsResponse.ok) continue;
+          for (const account of Array.isArray(accountsPayload.data) ? accountsPayload.data : []) {
+            const accountId = String(account.id || "");
+            if (!/^\d+$/.test(accountId) || seenWabas.has(accountId)) continue;
+            seenWabas.add(accountId);
+            const accountNumbersResponse = await fetch(`https://graph.facebook.com/v23.0/${encodeURIComponent(accountId)}/phone_numbers?fields=id,display_phone_number,verified_name,status&limit=100`, {
+              headers: { authorization: `Bearer ${accessToken}` },
+            });
+            const accountNumbersPayload = await accountNumbersResponse.json().catch(() => ({}));
+            if (!accountNumbersResponse.ok) continue;
+            for (const number of Array.isArray(accountNumbersPayload.data) ? accountNumbersPayload.data : []) {
+              if (!/^\d+$/.test(String(number.id || ""))) continue;
+              candidates.push({
+                wabaId: accountId,
+                phoneNumberId: String(number.id),
+                displayPhoneNumber: String(number.display_phone_number || ""),
+              });
+            }
+          }
+        }
+        const uniqueCandidates = candidates.filter((candidate, index, list) =>
+          list.findIndex((item) => item.phoneNumberId === candidate.phoneNumberId) === index
+        );
+        const expected = uniqueCandidates.find((candidate) => candidate.displayPhoneNumber.replace(/\D/g, "") === "56941985967");
+        const selected = expected || (uniqueCandidates.length === 1 ? uniqueCandidates[0] : null);
+        if (!selected) {
+          return Response.json({
+            ok: false,
+            error: uniqueCandidates.length
+              ? `Meta autorizó ${uniqueCandidates.length} números y no identificó automáticamente el +56 9 4198 5967.`
+              : "Meta autorizó la cuenta, pero todavía no incorporó el número de WhatsApp Business a esta configuración.",
+          }, { status: 422 });
+        }
+        wabaId = selected.wabaId;
+        phoneNumberId = selected.phoneNumberId;
+      }
 
       const numbersResponse = await fetch(`https://graph.facebook.com/v23.0/${encodeURIComponent(wabaId)}/phone_numbers?fields=id,display_phone_number,verified_name`, {
         headers: { authorization: `Bearer ${accessToken}` },
