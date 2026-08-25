@@ -116,9 +116,10 @@
     if (button) button.disabled = Boolean(disabled);
   }
   async function finishSignup(panel, discoverAutomatically) {
-    if (!signupResult.code || signupResult.saving) return;
-    if (!discoverAutomatically && (!signupResult.wabaId || !signupResult.phoneNumberId)) return;
+    if (!signupResult.code || signupResult.exchangeStarted || signupResult.completed) return;
+    if (!signupResult.wabaId || !signupResult.phoneNumberId) return;
     clearSignupTimeout();
+    signupResult.exchangeStarted = true;
     signupResult.saving = true;
     showStatus(panel, "Validando la cuenta, suscribiendo el webhook y cifrando las credenciales…", "pending");
     try {
@@ -133,11 +134,14 @@
       });
       var data = await response.json().catch(function () { return {}; });
       if (!response.ok) throw new Error(data.error || "Meta no pudo completar la vinculación.");
+      signupResult.completed = true;
       showStatus(panel, "Conexión y recepción de mensajes activadas para " + (data.displayPhoneNumber || "el número BPGO") + ".", "success");
       window.setTimeout(function () { loadStatus(panel); }, 1800);
     } catch (error) {
       signupResult.saving = false;
-      showStatus(panel, error.message || "No se pudo terminar la conexión.", "error");
+      signupResult.code = "";
+      setStartButton(panel, false);
+      showStatus(panel, (error.message || "No se pudo terminar la conexión.") + " Inicia una vinculación nueva para obtener un código válido.", "error");
     }
   }
 
@@ -157,11 +161,8 @@
           return;
         }
         signupResult.code = response.authResponse.code;
-        showStatus(panel, "Autorización recibida. Identificando automáticamente el número BPGO…", "pending");
+        showStatus(panel, "Autorización recibida. Esperando la confirmación del número en Meta…", "pending");
         finishSignup(panel);
-        window.setTimeout(function () {
-          if (!signupResult.saving && signupResult.code) finishSignup(panel, true);
-        }, 1800);
       }, {
         config_id: onboarding.configId,
         response_type: "code",
@@ -173,7 +174,7 @@
         }
       });
       signupTimeout = window.setTimeout(function () {
-        if (signupResult.saving) return;
+        if (signupResult.saving || signupResult.completed) return;
         var missing = [];
         if (!signupResult.code) missing.push("autorización");
         if (!signupResult.wabaId || !signupResult.phoneNumberId) missing.push("selección del número");
