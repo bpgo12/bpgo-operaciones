@@ -671,9 +671,6 @@ export default {
       tokenUrl.searchParams.set("client_id", appId);
       tokenUrl.searchParams.set("client_secret", appSecret);
       tokenUrl.searchParams.set("code", code);
-      // Meta exige que sea idéntica a la URL enviada al abrir el diálogo.
-      // La fijamos en ambos extremos para evitar diferencias por rutas, hash o querystring.
-      tokenUrl.searchParams.set("redirect_uri", `${url.origin}/`);
       const tokenResponse = await fetch(tokenUrl, { headers: { accept: "application/json" } });
       const tokenPayload = await tokenResponse.json().catch(() => ({}));
       const accessToken = String(tokenPayload.access_token || "").trim();
