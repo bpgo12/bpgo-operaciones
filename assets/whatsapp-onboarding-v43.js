@@ -128,8 +128,7 @@
         body: JSON.stringify({
           code: signupResult.code,
           wabaId: signupResult.wabaId || "",
-          phoneNumberId: signupResult.phoneNumberId || "",
-          redirectUri: onboarding.redirectUri
+          phoneNumberId: signupResult.phoneNumberId || ""
         })
       });
       var data = await response.json().catch(function () { return {}; });
@@ -167,7 +166,6 @@
         config_id: onboarding.configId,
         response_type: "code",
         override_default_response_type: true,
-        redirect_uri: onboarding.redirectUri,
         extras: {
           setup: {},
           featureType: "whatsapp_business_app_onboarding",
