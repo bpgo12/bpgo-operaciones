@@ -671,7 +671,6 @@ export default {
       tokenUrl.searchParams.set("client_id", appId);
       tokenUrl.searchParams.set("client_secret", appSecret);
       tokenUrl.searchParams.set("code", code);
-      tokenUrl.searchParams.set("redirect_uri", "https://www.facebook.com/connect/login_success.html");
       const tokenResponse = await fetch(tokenUrl, { headers: { accept: "application/json" } });
       const tokenPayload = await tokenResponse.json().catch(() => ({}));
       const accessToken = String(tokenPayload.access_token || "").trim();
