@@ -117,7 +117,7 @@
   }
   async function finishSignup(panel, discoverAutomatically) {
     if (!signupResult.code || signupResult.exchangeStarted || signupResult.completed) return;
-    if (!signupResult.wabaId || !signupResult.phoneNumberId) return;
+    if ((!signupResult.wabaId || !signupResult.phoneNumberId) && !discoverAutomatically) return;
     clearSignupTimeout();
     signupResult.exchangeStarted = true;
     signupResult.saving = true;
@@ -128,8 +128,8 @@
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           code: signupResult.code,
-          wabaId: signupResult.wabaId || "",
-          phoneNumberId: signupResult.phoneNumberId || ""
+          wabaId: discoverAutomatically ? "" : (signupResult.wabaId || ""),
+          phoneNumberId: discoverAutomatically ? "" : (signupResult.phoneNumberId || "")
         })
       });
       var data = await response.json().catch(function () { return {}; });
@@ -163,10 +163,19 @@
         signupResult.code = response.authResponse.code;
         showStatus(panel, "Autorización recibida. Esperando la confirmación del número en Meta…", "pending");
         finishSignup(panel);
+        // En coexistencia Meta puede cerrar la ventana después de autorizar
+        // sin emitir FINISH. Esperamos el evento normal y, si no llega, el
+        // servidor identifica el número autorizado sin reutilizar el código.
+        window.setTimeout(function () {
+          if (signupResult.saving || signupResult.completed || !signupResult.code) return;
+          showStatus(panel, "Autorización recibida. Identificando el número oficial BPGO…", "pending");
+          finishSignup(panel, true);
+        }, 3500);
       }, {
         config_id: onboarding.configId,
         response_type: "code",
         override_default_response_type: true,
+        redirect_uri: onboarding.redirectUri,
         extras: {
           setup: {},
           featureType: "whatsapp_business_app_onboarding",
