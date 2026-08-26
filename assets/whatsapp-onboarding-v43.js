@@ -129,7 +129,8 @@
         body: JSON.stringify({
           code: signupResult.code,
           wabaId: discoverAutomatically ? "" : (signupResult.wabaId || ""),
-          phoneNumberId: discoverAutomatically ? "" : (signupResult.phoneNumberId || "")
+          phoneNumberId: discoverAutomatically ? "" : (signupResult.phoneNumberId || ""),
+          redirectUri: signupResult.dialogRedirectUri || ""
         })
       });
       var data = await response.json().catch(function () { return {}; });
@@ -153,6 +154,20 @@
     showStatus(panel, "Abriendo la ventana segura de Meta…", "pending");
     try {
       var FB = await loadFacebookSdk(onboarding.appId);
+      // El SDK abre el diálogo con un redirect_uri interno (canal
+      // xd_arbiter) que cambia por sesión. Meta exige que el canje del
+      // código use exactamente ese mismo valor, así que lo capturamos
+      // desde el propio window.open antes de invocar FB.login.
+      var nativeWindowOpen = window.open.bind(window);
+      window.open = function (url) {
+        try {
+          var opened = new URL(url, window.location.href);
+          var capturedRedirectUri = opened.searchParams.get("redirect_uri");
+          if (capturedRedirectUri) signupResult.dialogRedirectUri = capturedRedirectUri;
+        } catch (_) { /* ignore */ }
+        window.open = nativeWindowOpen;
+        return nativeWindowOpen.apply(window, arguments);
+      };
       FB.login(function (response) {
         if (!response.authResponse || !response.authResponse.code) {
           clearSignupTimeout();

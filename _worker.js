@@ -657,6 +657,7 @@ export default {
       if (!session || session.role !== "super_admin") return Response.json({ ok: false, error: "Solo un superadministrador puede conectar Meta." }, { status: 403 });
       const body = await request.json().catch(() => ({}));
       const code = String(body.code || "").trim();
+      const dialogRedirectUri = String(body.redirectUri || "").trim();
       let wabaId = String(body.wabaId || "").trim();
       let phoneNumberId = String(body.phoneNumberId || "").trim();
       const appId = String(env.META_APP_ID || "").trim();
@@ -671,6 +672,7 @@ export default {
       tokenUrl.searchParams.set("client_id", appId);
       tokenUrl.searchParams.set("client_secret", appSecret);
       tokenUrl.searchParams.set("code", code);
+      if (dialogRedirectUri) tokenUrl.searchParams.set("redirect_uri", dialogRedirectUri);
       const tokenResponse = await fetch(tokenUrl, { headers: { accept: "application/json" } });
       const tokenPayload = await tokenResponse.json().catch(() => ({}));
       const accessToken = String(tokenPayload.access_token || "").trim();
