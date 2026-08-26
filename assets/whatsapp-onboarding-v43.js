@@ -175,7 +175,6 @@
         config_id: onboarding.configId,
         response_type: "code",
         override_default_response_type: true,
-        redirect_uri: onboarding.redirectUri,
         extras: {
           setup: {},
           featureType: "whatsapp_business_app_onboarding",
