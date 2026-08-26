@@ -75,7 +75,7 @@
       function ready() {
         if (settled || !window.FB) return;
         settled = true;
-        window.FB.init({ appId: appId, cookie: true, xfbml: false, version: "v23.0" });
+        window.FB.init({ appId: appId, cookie: true, xfbml: false, version: "v25.0" });
         resolve(window.FB);
       }
       window.fbAsyncInit = function () {

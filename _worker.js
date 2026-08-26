@@ -272,7 +272,7 @@ async function sendBillingMessages(request, env) {
     return Response.json({ ok: false, error: "Configuracion de WhatsApp incompleta." }, { status: 500 });
   }
 
-  const endpoint = `https://graph.facebook.com/v23.0/${encodeURIComponent(phoneNumberId)}/messages`;
+  const endpoint = `https://graph.facebook.com/v25.0/${encodeURIComponent(phoneNumberId)}/messages`;
   const results = [];
   if (campaign === "number-change") await ensureWhatsAppCampaignTable(env);
   for (const record of records) {
@@ -520,7 +520,7 @@ export default {
       if (!storedMedia) return Response.json({ ok: false, error: "Comprobante no encontrado." }, { status: 404 });
       const credentials = await getWhatsAppCredentials(env);
       if (!credentials.accessToken) return Response.json({ ok: false, error: "WhatsApp todavía no está conectado." }, { status: 409 });
-      const metadataResponse = await fetch(`https://graph.facebook.com/v23.0/${encodeURIComponent(mediaId)}`, {
+      const metadataResponse = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(mediaId)}`, {
         headers: { authorization: `Bearer ${credentials.accessToken}` },
       });
       const metadata = await metadataResponse.json().catch(() => ({}));
@@ -579,7 +579,7 @@ export default {
       if (!phone || !messageText) return Response.json({ ok: false, error: "Falta teléfono o mensaje." }, { status: 400 });
       const credentials = await getWhatsAppCredentials(env);
       if (!credentials.accessToken || !credentials.phoneNumberId) return Response.json({ ok: false, error: "WhatsApp todavía no está conectado." }, { status: 409 });
-      const endpoint = `https://graph.facebook.com/v23.0/${encodeURIComponent(credentials.phoneNumberId)}/messages`;
+      const endpoint = `https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/messages`;
       const metaResponse = await fetch(endpoint, {
         method: "POST",
         headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
@@ -667,7 +667,7 @@ export default {
       }
       if (!appId || !appSecret || !env.OPERATIONS_ADMIN_SECRET) return Response.json({ ok: false, error: "Faltan secretos de Meta en Cloudflare." }, { status: 409 });
 
-      const tokenUrl = new URL("https://graph.facebook.com/v23.0/oauth/access_token");
+      const tokenUrl = new URL("https://graph.facebook.com/v25.0/oauth/access_token");
       tokenUrl.searchParams.set("client_id", appId);
       tokenUrl.searchParams.set("client_secret", appSecret);
       tokenUrl.searchParams.set("code", code);
@@ -687,7 +687,7 @@ export default {
         const candidates = [];
         const seenWabas = new Set();
         for (const edge of ["owned_whatsapp_business_accounts", "client_whatsapp_business_accounts"]) {
-          const accountsResponse = await fetch(`https://graph.facebook.com/v23.0/${encodeURIComponent(businessId)}/${edge}?fields=id,name&limit=100`, {
+          const accountsResponse = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(businessId)}/${edge}?fields=id,name&limit=100`, {
             headers: { authorization: `Bearer ${accessToken}` },
           });
           const accountsPayload = await accountsResponse.json().catch(() => ({}));
@@ -696,7 +696,7 @@ export default {
             const accountId = String(account.id || "");
             if (!/^\d+$/.test(accountId) || seenWabas.has(accountId)) continue;
             seenWabas.add(accountId);
-            const accountNumbersResponse = await fetch(`https://graph.facebook.com/v23.0/${encodeURIComponent(accountId)}/phone_numbers?fields=id,display_phone_number,verified_name,status&limit=100`, {
+            const accountNumbersResponse = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(accountId)}/phone_numbers?fields=id,display_phone_number,verified_name,status&limit=100`, {
               headers: { authorization: `Bearer ${accessToken}` },
             });
             const accountNumbersPayload = await accountNumbersResponse.json().catch(() => ({}));
@@ -728,14 +728,14 @@ export default {
         phoneNumberId = selected.phoneNumberId;
       }
 
-      const numbersResponse = await fetch(`https://graph.facebook.com/v23.0/${encodeURIComponent(wabaId)}/phone_numbers?fields=id,display_phone_number,verified_name`, {
+      const numbersResponse = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(wabaId)}/phone_numbers?fields=id,display_phone_number,verified_name`, {
         headers: { authorization: `Bearer ${accessToken}` },
       });
       const numbersPayload = await numbersResponse.json().catch(() => ({}));
       const selectedNumber = Array.isArray(numbersPayload.data) ? numbersPayload.data.find((item) => String(item.id) === phoneNumberId) : null;
       if (!numbersResponse.ok || !selectedNumber) return Response.json({ ok: false, error: numbersPayload.error?.message || "El número no pertenece a la cuenta de WhatsApp autorizada." }, { status: 422 });
 
-      const subscriptionResponse = await fetch(`https://graph.facebook.com/v23.0/${encodeURIComponent(wabaId)}/subscribed_apps`, {
+      const subscriptionResponse = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(wabaId)}/subscribed_apps`, {
         method: "POST",
         headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
         body: JSON.stringify({ subscribed_fields: ["messages"] }),
@@ -767,7 +767,7 @@ export default {
       ];
       let metaConnection = { ok: false, error: "Configuracion incompleta" };
       if (checks[0].configured && checks[1].configured) {
-        const metaResponse = await fetch(`https://graph.facebook.com/v23.0/${encodeURIComponent(credentials.phoneNumberId)}?fields=verified_name,display_phone_number,quality_rating`, {
+        const metaResponse = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}?fields=verified_name,display_phone_number,quality_rating`, {
           headers: { authorization: `Bearer ${credentials.accessToken}` },
         });
         const meta = await metaResponse.json().catch(() => ({}));
@@ -775,7 +775,7 @@ export default {
           ? { ok: true, verifiedName: meta.verified_name, qualityRating: meta.quality_rating }
           : { ok: false, error: meta.error?.message || "Meta rechazo la conexion", errorCode: meta.error?.code };
         if (metaResponse.ok) {
-          const templatesResponse = credentials.wabaId ? await fetch(`https://graph.facebook.com/v23.0/${encodeURIComponent(credentials.wabaId)}/message_templates?name=${encodeURIComponent(String(env.WHATSAPP_TEMPLATE_NAME || "").trim())}&fields=name,status,language,category`, {
+          const templatesResponse = credentials.wabaId ? await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.wabaId)}/message_templates?name=${encodeURIComponent(String(env.WHATSAPP_TEMPLATE_NAME || "").trim())}&fields=name,status,language,category`, {
             headers: { authorization: `Bearer ${credentials.accessToken}` },
           }) : null;
           const templates = templatesResponse ? await templatesResponse.json().catch(() => ({})) : {};
