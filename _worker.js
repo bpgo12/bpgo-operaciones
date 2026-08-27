@@ -758,6 +758,24 @@ export default {
       return Response.json({ ok: true, connected: true, displayPhoneNumber: selectedNumber.display_phone_number, verifiedName: selectedNumber.verified_name });
     }
 
+    if (url.pathname === "/api/whatsapp/register" && request.method === "POST") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session || session.role !== "super_admin") return Response.json({ ok: false, error: "Solo un superadministrador puede registrar el número." }, { status: 403 });
+      const credentials = await getWhatsAppCredentials(env);
+      if (!credentials.accessToken || !credentials.phoneNumberId) return Response.json({ ok: false, error: "WhatsApp todavía no está conectado." }, { status: 409 });
+      const pin = String(Math.floor(100000 + Math.random() * 900000));
+      const registerResponse = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/register`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ messaging_product: "whatsapp", pin }),
+      });
+      const registerPayload = await registerResponse.json().catch(() => ({}));
+      if (!registerResponse.ok || registerPayload.success !== true) {
+        return Response.json({ ok: false, error: registerPayload.error?.message || "Meta no pudo registrar el número.", errorCode: registerPayload.error?.code, errorSubcode: registerPayload.error?.error_subcode }, { status: 422 });
+      }
+      return Response.json({ ok: true, pin });
+    }
+
     if (url.pathname === "/api/whatsapp/status" && request.method === "GET") {
       const credentials = await getWhatsAppCredentials(env);
       const checks = [
