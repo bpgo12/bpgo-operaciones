@@ -1,0 +1,184 @@
+.mobile-agenda-calendar {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .mobile-agenda-calendar {
+    display: block;
+    background: #ffffff;
+    border: 1px solid #e2ece8;
+    border-radius: 16px;
+    padding: 14px 12px 16px;
+    margin: 0 0 16px;
+    box-shadow: 0 1px 2px rgba(15, 45, 35, 0.06);
+  }
+
+  .mac-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+
+  .mac-month-label {
+    flex: 1;
+    text-align: center;
+    font-weight: 700;
+    font-size: 17px;
+    color: #0b3d2e;
+    text-transform: capitalize;
+  }
+
+  .mac-nav,
+  .mac-today {
+    min-height: 34px;
+    min-width: 34px;
+    border: none;
+    background: #eef6f2;
+    color: #0f5c46;
+    border-radius: 10px;
+    font-size: 18px;
+    line-height: 1;
+    font-weight: 600;
+    padding: 0;
+  }
+
+  .mac-today {
+    min-width: auto;
+    font-size: 13px;
+    padding: 0 10px;
+  }
+
+  .mac-weekdays {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    text-align: center;
+    font-size: 11px;
+    font-weight: 700;
+    color: #7c9089;
+    letter-spacing: 0.03em;
+    margin-bottom: 4px;
+  }
+
+  .mac-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    row-gap: 4px;
+  }
+
+  .mac-day {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 3px;
+    background: transparent;
+    border: none;
+    padding: 4px 0 8px;
+    min-height: 40px;
+    color: #14332a;
+    font-size: 14px;
+  }
+
+  .mac-day-number {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+  }
+
+  .mac-day.outside .mac-day-number {
+    color: #c3cfca;
+  }
+
+  .mac-day.today .mac-day-number {
+    background: #e0473c;
+    color: #fff;
+    font-weight: 700;
+  }
+
+  .mac-day.selected:not(.today) .mac-day-number {
+    background: #0f5c46;
+    color: #fff;
+    font-weight: 700;
+  }
+
+  .mac-day-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: #0f5c46;
+  }
+
+  .mac-day.today .mac-day-dot {
+    background: #e0473c;
+  }
+
+  .mac-day:not(.has-activities) .mac-day-dot {
+    visibility: hidden;
+  }
+
+  .mac-agenda {
+    margin-top: 12px;
+    border-top: 1px solid #eef2f0;
+    padding-top: 10px;
+  }
+
+  .mac-agenda-heading {
+    margin: 0 0 8px;
+    font-size: 14px;
+    color: #0b3d2e;
+  }
+
+  .mac-empty {
+    margin: 0;
+    font-size: 13px;
+    color: #8a9a94;
+  }
+
+  .mac-agenda-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .mac-activity {
+    text-align: left;
+    background: #f6faf8;
+    border: 1px solid #e2ece8;
+    border-radius: 12px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .mac-activity-top {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 14px;
+  }
+
+  .mac-activity-top strong {
+    color: #0b3d2e;
+  }
+
+  .mac-activity-top em {
+    font-style: normal;
+    font-size: 12px;
+    color: #0f5c46;
+    background: #e5f7ec;
+    border-radius: 999px;
+    padding: 2px 8px;
+    white-space: nowrap;
+  }
+
+  .mac-activity-bottom {
+    font-size: 12px;
+    color: #6f8580;
+  }
+}
