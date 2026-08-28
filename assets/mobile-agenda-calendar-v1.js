@@ -86,6 +86,12 @@
     });
   }
 
+  function setInputValue(input, value) {
+    var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+    setter.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
   function openActivity(code) {
     if (!code) return;
     var activities = Array.from(document.querySelectorAll(".sidebar .nav button, .mobile-nav button")).find(function (button) {
@@ -96,13 +102,13 @@
     window.setTimeout(function () {
       var input = document.querySelector(".global-search input");
       if (!input) return;
-      var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-      setter.call(input, code);
-      input.dispatchEvent(new Event("input", { bubbles: true }));
+      setInputValue(input, code);
       window.setTimeout(function () {
         var result = Array.from(document.querySelectorAll(".search-results button")).find(function (button) { return button.textContent.includes(code); });
         if (result) result.click();
-      }, 120);
+        // Limpia la búsqueda para que no quede el código pegado al volver a esta vista.
+        window.setTimeout(function () { setInputValue(input, ""); }, 200);
+      }, 150);
     }, 100);
   }
 
@@ -178,9 +184,12 @@
     var content = document.querySelector("main.content");
     var anchor = content && (content.querySelector(".breadcrumbs") || content.querySelector(".topbar"));
     if (!anchor) return;
+    // Cada vez que se vuelve a entrar a Planificación se reinicia al mes y día
+    // actuales, para no dejar al usuario mirando un mes en el que quedó
+    // navegando la última vez que visitó esta sección.
     var now = new Date();
-    if (!viewMonth) viewMonth = { year: now.getFullYear(), month: now.getMonth() };
-    if (!selectedDate) selectedDate = todayKey();
+    viewMonth = { year: now.getFullYear(), month: now.getMonth() };
+    selectedDate = todayKey();
     var panel = document.createElement("section");
     panel.className = "mobile-agenda-calendar";
     panel.innerHTML =
@@ -194,7 +203,9 @@
       '<div class="mac-grid"></div>' +
       '<div class="mac-agenda"></div>';
     anchor.insertAdjacentElement("afterend", panel);
-    loadState(false).then(render).catch(function () {});
+    // Refresca datos al (re)entrar a esta vista, para no mostrar información
+    // que quedó obsoleta desde la última visita.
+    loadState(true).then(render).catch(function () {});
   }
 
   document.addEventListener("click", function (event) {
