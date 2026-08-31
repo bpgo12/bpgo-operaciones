@@ -450,6 +450,8 @@ export default {
     }
 
     if (url.pathname === "/api/state" && request.method === "GET") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
       const row = await env.DB.prepare("SELECT data FROM app_state WHERE id = 'main'").first();
       const state = row ? JSON.parse(row.data) : null;
       if (state && Array.isArray(state.users)) {
