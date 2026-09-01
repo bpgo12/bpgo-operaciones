@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Factibilidad comercial · BPGO</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
-<link rel="stylesheet" href="factibilidad.css?v=20260901-1">
+<link rel="stylesheet" href="factibilidad.css?v=20260901-2">
 </head>
 <body>
 <header class="commercial-header">
@@ -23,9 +23,9 @@
   <section class="commercial-panel">
     <p class="eyebrow">Cobertura comercial</p>
     <h1>Factibilidad de fibra óptica</h1>
-    <p>Zona preliminar disponible hasta <b>1.000 metros</b> de la red desplegada.</p>
+    <p>Zona preliminar disponible hasta <b>500 metros</b> alrededor de las cajas de distribución.</p>
     <div class="commercial-stats">
-      <div><strong id="networkLength">0 km</strong><span>red utilizada</span></div>
+      <div><strong id="boxCount">0</strong><span>cajas con cobertura</span></div>
       <div><strong id="coverageArea">0 km²</strong><span>área estimada</span></div>
     </div>
     <div id="commercialStatus" class="status neutral">
@@ -37,18 +37,17 @@
 
   <div class="commercial-legend">
     <span><i class="coverage-swatch"></i>Zona con factibilidad preliminar</span>
-    <span><i class="network-swatch"></i>Referencia de red</span>
   </div>
 
   <div id="noNetwork" class="no-network hidden">
     <b>No hay red disponible</b>
-    <span>Primero deben registrarse cables en Planta Externa.</span>
+    <span>Primero deben registrarse cajas en Planta Externa.</span>
   </div>
 </main>
 
 <script src="config.js?v=osm-20260817-1"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script src="https://cdn.jsdelivr.net/npm/@turf/turf@7/turf.min.js"></script>
-<script src="factibilidad.js?v=20260901-1"></script>
+<script src="factibilidad.js?v=20260901-2"></script>
 </body>
 </html>
