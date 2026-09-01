@@ -100,6 +100,7 @@ th,td{padding:9px;border-bottom:1px solid #294052;text-align:left}
 .map-context-menu .context-title{grid-column:1/-1;padding:6px 7px;color:#aab7c5;font-size:12px;font-weight:bold}
 .map-context-menu button{padding:8px;text-align:left;font-size:13px}
 .map-context-menu .context-cable-action{grid-column:1/-1;background:#20d34a;color:#061108;font-weight:bold;text-align:center;border-color:#20d34a}
+.map-context-menu .context-box-action{background:#e99312;border-color:#e99312}
 @media(max-width:1000px){
 .layout{grid-template-columns:220px 1fr}.right{position:fixed;right:0;top:58px;bottom:0;width:320px;z-index:20;box-shadow:-8px 0 25px #0008}
 .cabinet-body,.fiber-workspace{grid-template-columns:1fr}
