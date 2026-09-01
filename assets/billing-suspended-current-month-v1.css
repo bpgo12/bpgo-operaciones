@@ -1,0 +1,12 @@
+.susp-month-toggle {
+  display: flex;
+  gap: 8px;
+  margin: 4px 0 12px;
+}
+
+.susp-mode-suffix {
+  display: block;
+  font-size: 11px;
+  color: #8a8a8a;
+  font-weight: 400;
+}
