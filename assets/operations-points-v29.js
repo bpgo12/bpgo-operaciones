@@ -46,6 +46,18 @@
     return /(^|\s)bpgo($|\s)/.test(client);
   }
 
+  const MANUAL_POINT_OPTIONS = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 1];
+
+  function hasManualPoints(work) {
+    return work.manualPoints !== undefined && work.manualPoints !== null && work.manualPoints !== "" && Number.isFinite(Number(work.manualPoints));
+  }
+
+  function pointsFor(work) {
+    if (hasManualPoints(work)) return Number(work.manualPoints);
+    const kind = classification(work);
+    return isClosed(work) && (kind === "installation" || isBpgoMaintenance(work)) ? 1 : 0;
+  }
+
   function isClosed(work) { return CLOSED.has(normalize(work.status)); }
   function isRescheduled(work) { return RESCHEDULED.has(normalize(work.status)) || Boolean(work.rescheduleRequestedDate); }
   function hasEvidence(work) { return Array.isArray(work.logs) && work.logs.some((log) => Array.isArray(log.evidence) && log.evidence.length); }
@@ -122,8 +134,7 @@
   function workKey(work) { return String(work.id || work.code || ""); }
 
   function workDetailModal(work, data) {
-    const kind = classification(work);
-    const point = isClosed(work) && (kind === "installation" || isBpgoMaintenance(work)) ? 1 : 0;
+    const point = pointsFor(work);
     const logs = Array.isArray(work.logs) ? work.logs : [];
     const evidenceCount = logs.reduce((total, log) => total + (Array.isArray(log.evidence) ? log.evidence.length : 0), 0);
     const latest = logs[0] || {};
@@ -146,13 +157,18 @@
       const maintenances = closed.filter((work) => classification(work) === "maintenance");
       const other = closed.filter((work) => classification(work) === "other");
       const rescheduled = assigned.filter(isRescheduled);
+      const otherManualPoints = closed
+        .filter((work) => classification(work) !== "installation" && !isBpgoMaintenance(work))
+        .reduce((sum, work) => sum + pointsFor(work), 0);
+      const installationPoints = installations.reduce((sum, work) => sum + pointsFor(work), 0);
+      const maintenancePoints = bpgoMaintenances.reduce((sum, work) => sum + pointsFor(work), 0);
       return {
         id: user.id, name: user.name, assigned: assigned.length, closed: closed.length,
         installations: installations.length, maintenances: maintenances.length,
         bpgoMaintenances: bpgoMaintenances.length, other: other.length,
         rescheduled: rescheduled.length, missingEvidence: assigned.filter((work) => !hasEvidence(work)).length,
-        installationPoints: installations.length, maintenancePoints: bpgoMaintenances.length,
-        points: installations.length + bpgoMaintenances.length,
+        installationPoints, maintenancePoints,
+        points: installationPoints + maintenancePoints + otherManualPoints,
         rate: assigned.length ? Math.round((closed.length / assigned.length) * 100) : 0
       };
     }).sort((a, b) => b.points - a.points || b.closed - a.closed || b.assigned - a.assigned);
@@ -171,8 +187,7 @@
   function detailPanel(filter, title, works, data) {
     const sorted = works.slice().sort((a, b) => (activityDate(b, filter)?.getTime() || 0) - (activityDate(a, filter)?.getTime() || 0));
     const rows = sorted.map((work) => {
-      const kind = classification(work);
-      const point = isClosed(work) && (kind === "installation" || isBpgoMaintenance(work)) ? 1 : 0;
+      const point = pointsFor(work);
       const technicians = assignedTechnicianNames(work, data.users);
       return `<tr class="bpgo-clickable-work" data-bpgo-work-id="${escapeHtml(workKey(work))}" tabindex="0"><td><strong>${escapeHtml(work.code || "Sin código")}</strong><small>${escapeHtml(work.client || work.customerName || "Sin cliente")}</small></td><td>${escapeHtml(activityLabel(work))}</td><td><span class="bpgo-status-chip">${escapeHtml(work.status || "Sin estado")}</span></td><td>${escapeHtml(technicians)}</td><td>${escapeHtml(formatDate(activityDate(work, filter)))}</td><td><span class="bpgo-points-pill ${point ? "earned" : "zero"}">${point} pt</span></td></tr>`;
     }).join("");
@@ -187,7 +202,7 @@
     const otherClosed = data.closedInPeriod.filter((work) => classification(work) === "other");
     const rescheduled = data.periodWork.filter(isRescheduled);
     const pending = data.periodWork.filter((work) => !isClosed(work) && normalize(work.status) !== "cancelada");
-    const totalPoints = installations.length + bpgoMaintenances.length;
+    const totalPoints = data.closedInPeriod.reduce((sum, work) => sum + pointsFor(work), 0);
     const completion = data.periodWork.length ? Math.round((data.periodWork.filter(isClosed).length / data.periodWork.length) * 100) : 0;
     const pointWork = data.closedInPeriod.filter((work) => classification(work) === "installation" || isBpgoMaintenance(work));
     const closedPeriodWork = data.periodWork.filter(isClosed);
@@ -205,10 +220,12 @@
     const details = data.closedInPeriod.slice().sort((a, b) => (closeDate(b)?.getTime() || 0) - (closeDate(a)?.getTime() || 0));
     const detailRows = details.map((work) => {
       const kind = classification(work);
-      const point = kind === "installation" || isBpgoMaintenance(work) ? 1 : 0;
+      const point = pointsFor(work);
+      const manual = hasManualPoints(work);
       const names = assignedTechnicianNames(work, data.users);
-      const reason = point ? (kind === "installation" ? "Instalación cerrada" : "Mantención BPGO cerrada") : "Actividad cerrada sin puntaje";
-      return `<tr class="bpgo-clickable-work" data-bpgo-work-id="${escapeHtml(workKey(work))}" tabindex="0"><td><strong>${escapeHtml(work.code || "Sin código")}</strong><small>${escapeHtml(work.client || "Sin cliente")}</small></td><td>${escapeHtml(activityLabel(work))}</td><td>${escapeHtml(names)}</td><td>${escapeHtml(formatDate(closeDate(work)))}</td><td><span class="bpgo-points-pill ${point ? "earned" : "zero"}">${point} pt</span><small>${escapeHtml(reason)}</small></td></tr>`;
+      const reason = manual ? "Puntaje asignado manualmente" : point ? (kind === "installation" ? "Instalación cerrada" : "Mantención BPGO cerrada") : "Actividad cerrada sin puntaje";
+      const options = MANUAL_POINT_OPTIONS.map((value) => `<option value="${value}"${value === point ? " selected" : ""}>${value === 0 ? "0 pt" : value + " pt"}</option>`).join("");
+      return `<tr class="bpgo-clickable-work" data-bpgo-work-id="${escapeHtml(workKey(work))}" tabindex="0"><td><strong>${escapeHtml(work.code || "Sin código")}</strong><small>${escapeHtml(work.client || "Sin cliente")}</small></td><td>${escapeHtml(activityLabel(work))}</td><td>${escapeHtml(names)}</td><td>${escapeHtml(formatDate(closeDate(work)))}</td><td><select class="bpgo-points-select" data-bpgo-points-work="${escapeHtml(workKey(work))}" onclick="event.stopPropagation()">${options}</select><small class="bpgo-points-reason">${escapeHtml(reason)}</small></td></tr>`;
     }).join("");
 
     const techCards = data.rows.map((row) => `<article class="bpgo-tech-card"><header><div><span>Técnico</span><h3>${escapeHtml(row.name)}</h3></div><strong>${row.points} pts</strong></header><div class="bpgo-tech-metrics"><span><b>${row.installations}</b> instalaciones</span><span><b>${row.bpgoMaintenances}</b> mant. BPGO</span><span><b>${row.maintenances}</b> mant. totales</span><span><b>${row.rescheduled}</b> reagendadas</span><span><b>${row.closed}</b> finalizadas</span><span><b>${row.rate}%</b> avance</span></div></article>`).join("");
@@ -232,7 +249,7 @@
       <section class="bpgo-analysis-panel"><div class="bpgo-section-head"><div><h2>Productividad detallada por técnico</h2><p>El puntaje se asigna individualmente a cada técnico responsable de una actividad válida.</p></div><span class="bpgo-rule-badge">Regla: cierre obligatorio</span></div><div class="bpgo-tech-grid">${techCards || '<div class="empty">Sin técnicos con actividad en el periodo.</div>'}</div></section>
       <section class="bpgo-analysis-panel"><div class="bpgo-section-head"><div><h2>Resumen completo por técnico</h2><p>Asignaciones, tipos de cierre, incidencias operativas y puntos para liquidación mensual.</p></div></div><div class="bpgo-table-wrap"><table class="bpgo-analysis-table"><thead><tr><th>Técnico</th><th>Asignadas</th><th>Finalizadas</th><th>Instal.</th><th>Mant.</th><th>Mant. BPGO</th><th>Otras</th><th>Reagend.</th><th>Sin evidencia</th><th>Pts. instal.</th><th>Pts. mant.</th><th>Total pts.</th><th>Avance</th></tr></thead><tbody>${techRows || '<tr><td colspan="13">Sin técnicos registrados.</td></tr>'}</tbody></table></div></section>
       <section class="bpgo-analysis-panel"><div class="bpgo-section-head"><div><h2>Actividades finalizadas del periodo</h2><p>Detalle auditable de qué se cerró, quién lo realizó y por qué obtuvo —o no— puntaje.</p></div><span class="bpgo-rule-badge">${details.length} cierres</span></div><div class="bpgo-table-wrap"><table class="bpgo-analysis-table bpgo-detail-table"><thead><tr><th>Orden / cliente</th><th>Actividad</th><th>Técnico(s)</th><th>Fecha cierre</th><th>Puntaje</th></tr></thead><tbody>${detailRows || '<tr><td colspan="5">No hay actividades finalizadas en este periodo.</td></tr>'}</tbody></table></div></section>
-      <section class="bpgo-method-panel"><h3>Criterio automático de puntaje</h3><ul><li><strong>Instalación:</strong> 1 punto al quedar cerrada.</li><li><strong>Mantención BPGO:</strong> 1 punto al quedar cerrada y tener BPGO como cliente.</li><li><strong>Otras actividades:</strong> se informan en el análisis, pero no suman puntos.</li><li><strong>Reagendadas o abiertas:</strong> no generan puntos hasta su cierre definitivo.</li></ul></section>`;
+      <section class="bpgo-method-panel"><h3>Criterio automático de puntaje</h3><ul><li><strong>Instalación:</strong> 1 punto al quedar cerrada.</li><li><strong>Mantención BPGO:</strong> 1 punto al quedar cerrada y tener BPGO como cliente.</li><li><strong>Otras actividades:</strong> se informan en el análisis, pero no suman puntos por defecto.</li><li><strong>Reagendadas o abiertas:</strong> no generan puntos hasta su cierre definitivo.</li><li><strong>Asignación manual:</strong> en "Actividades finalizadas del periodo" puedes elegir un puntaje de 0.1 a 0.5, o 1, para cualquier cierre.</li></ul></section>`;
 
     const slot = container.querySelector(".bpgo-card-detail-slot");
     const closeDetail = () => {
@@ -289,6 +306,38 @@
       });
     }
     bindWorkRows(container);
+
+    async function saveManualPoints(work, value, select) {
+      const reasonEl = select.parentElement.querySelector(".bpgo-points-reason");
+      const previousText = reasonEl ? reasonEl.textContent : "";
+      select.disabled = true;
+      if (reasonEl) reasonEl.textContent = "Guardando...";
+      try {
+        const response = await fetch("/api/state", { cache: "no-store" });
+        if (!response.ok) throw new Error("No se pudo leer el estado actual.");
+        const fresh = unwrapState(await response.json());
+        const freshWork = (fresh.workOrders || []).find((item) => workKey(item) === workKey(work));
+        if (!freshWork) throw new Error("No se encontró la actividad en el estado actual.");
+        freshWork.manualPoints = value;
+        work.manualPoints = value;
+        const saved = await fetch("/api/state", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ data: fresh }) });
+        if (!saved.ok) throw new Error("No autorizado o error al guardar.");
+        state.workOrders = fresh.workOrders;
+        render(container, state, range);
+      } catch (error) {
+        select.disabled = false;
+        if (reasonEl) reasonEl.textContent = "Error al guardar: " + error.message;
+        window.setTimeout(() => { if (reasonEl) reasonEl.textContent = previousText; }, 3000);
+      }
+    }
+
+    container.querySelectorAll(".bpgo-points-select").forEach((select) => {
+      select.addEventListener("change", () => {
+        const work = data.allWork.find((item) => workKey(item) === select.dataset.bpgoPointsWork);
+        if (!work) return;
+        saveManualPoints(work, Number(select.value), select);
+      });
+    });
   }
 
   let statePromise;
