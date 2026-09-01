@@ -239,6 +239,7 @@ function showMapContextMenu(latLng,domEvent,cableId){
   contextPoint={lng:typeof latLng.lng==="function"?latLng.lng():latLng.lng,lat:typeof latLng.lat==="function"?latLng.lat():latLng.lat};contextCableId=cableId;
   const menu=$("mapContextMenu"),x=domEvent?.clientX??window.innerWidth/2,y=domEvent?.clientY??window.innerHeight/2;
   $("contextInsertMuf").classList.toggle("hidden",!cableId);
+  $("contextInsertBox").classList.toggle("hidden",!cableId);
   menu.classList.remove("hidden");const width=menu.offsetWidth||220,height=menu.offsetHeight||250;menu.style.left=`${Math.max(8,Math.min(x,window.innerWidth-width-8))}px`;menu.style.top=`${Math.max(8,Math.min(y,window.innerHeight-height-8))}px`
 }
 function hideMapContextMenu(){$("mapContextMenu").classList.add("hidden");contextPoint=null;contextCableId=null}
@@ -252,19 +253,19 @@ function splitLineAtPoint(coords,point){
   if(!best||best.t<.001||best.t>.999)return null;
   return{point:best.q,parts:[[...coords.slice(0,best.i+1),best.q],[best.q,...coords.slice(best.i+1)]]}
 }
-function insertMufAtPoint(cableId,point){
+function insertCabinetAtPoint(cableId,point,type="MUF"){
   const cable=get(cableId);if(!cable||cable.type!=="TRK")return;
   const split=splitLineAtPoint(cable.geometry.coordinates,point);if(!split){toast("Elige un punto del cable alejado de sus extremos");return}
   pushUndo();ensureCableFibers(cable);const original=JSON.parse(JSON.stringify(cable)),oldDestId=original.destId;
-  const muf={id:crypto.randomUUID(),type:"MUF",code:nextAvailableCode("MUF"),name:`Intervención ${original.code}`,sector:original.sector||"",status:"Operativo",pon:"",capacity:"",oltPower:"",reference:"Insertada sobre cable existente",notes:`Mufa insertada sobre ${original.code}; continuidad automática de filamentos.`,geometry:{type:"Point",coordinates:split.point},internals:{pons:[],splitters:[],splices:[]},history:[{at:now(),action:`Insertada sobre ${original.code}`}]};
-  db.features.push(muf);cable.destId=muf.id;cable.geometry.coordinates=split.parts[0];cable.history.push({at:now(),action:`Cable intervenido con ${muf.code}`});
-  const right={...JSON.parse(JSON.stringify(original)),id:crypto.randomUUID(),code:nextCableCode(original.cableClass||"TRK"),sourceId:muf.id,destId:oldDestId,geometry:{type:"LineString",coordinates:split.parts[1]},fibers:JSON.parse(JSON.stringify(original.fibers)),history:[{at:now(),action:`Tramo creado al insertar ${muf.code}`}]};db.features.push(right);
+  const label=type==="CAJ"?"Caja":"Mufa",asset={id:crypto.randomUUID(),type,code:nextAvailableCode(type),name:`Intervención ${original.code}`,sector:original.sector||"",status:"Operativo",pon:"",capacity:"",oltPower:"",reference:"Insertada sobre cable existente",notes:`${label} insertada sobre ${original.code}; continuidad automática de filamentos.`,geometry:{type:"Point",coordinates:split.point},internals:{pons:[],splitters:[],splices:[]},history:[{at:now(),action:`Insertada sobre ${original.code}`}]};
+  db.features.push(asset);cable.destId=asset.id;cable.geometry.coordinates=split.parts[0];cable.history.push({at:now(),action:`Cable intervenido con ${asset.code}`});
+  const right={...JSON.parse(JSON.stringify(original)),id:crypto.randomUUID(),code:nextCableCode(original.cableClass||"TRK"),sourceId:asset.id,destId:oldDestId,geometry:{type:"LineString",coordinates:split.parts[1]},fibers:JSON.parse(JSON.stringify(original.fibers)),history:[{at:now(),action:`Tramo creado al insertar ${asset.code}`}]};db.features.push(right);
   const oldDest=get(oldDestId);if(oldDest?.internals?.splices)oldDest.internals.splices.forEach(sp=>{if(sp.cableId===original.id)sp.cableId=right.id;if(sp.targetCableId===original.id)sp.targetCableId=right.id});
-  original.fibers.forEach((fiber,fiberIndex)=>{const fusionId=crypto.randomUUID();muf.internals.splices.push(
-    {id:crypto.randomUUID(),fusionId,assetId:muf.id,cableId:cable.id,fiberIndex,targetType:"FIBER",targetCableId:right.id,targetFiberIndex:fiberIndex},
-    {id:crypto.randomUUID(),fusionId,assetId:muf.id,cableId:right.id,fiberIndex,targetType:"FIBER",targetCableId:cable.id,targetFiberIndex:fiberIndex}
-  )});muf.history.push({at:now(),action:`${original.fibers.length} fibras fusionadas para mantener continuidad`});
-  selectedId=muf.id;save();select(muf.id);toast(`${muf.code} insertada; ${original.fibers.length} fibras con continuidad`)
+  original.fibers.forEach((fiber,fiberIndex)=>{const fusionId=crypto.randomUUID();asset.internals.splices.push(
+    {id:crypto.randomUUID(),fusionId,assetId:asset.id,cableId:cable.id,fiberIndex,targetType:"FIBER",targetCableId:right.id,targetFiberIndex:fiberIndex},
+    {id:crypto.randomUUID(),fusionId,assetId:asset.id,cableId:right.id,fiberIndex,targetType:"FIBER",targetCableId:cable.id,targetFiberIndex:fiberIndex}
+  )});asset.history.push({at:now(),action:`${original.fibers.length} fibras fusionadas para mantener continuidad`});
+  selectedId=asset.id;save();select(asset.id);toast(`${asset.code} insertada; ${original.fibers.length} fibras con continuidad`)
 }
 function splitLineEvenly(coords,count){
   const lengths=coords.slice(1).map((p,i)=>distance([coords[i],p])),total=lengths.reduce((a,b)=>a+b,0);
@@ -653,7 +654,8 @@ $("addIncidentBtn").onclick=()=>{const f=get($("featureId").value),description=$
 document.querySelectorAll("[data-context-asset]").forEach(button=>button.onclick=()=>{if(!contextPoint)return;const point={...contextPoint},type=button.dataset.contextAsset;hideMapContextMenu();createAssetAt(type,point.lng,point.lat)});
 $("addAssetBtn").onclick=()=>setTool(tool==="asset"?"select":"asset");
 $("assetType").onchange=()=>setTool("asset");
-$("contextInsertMuf").onclick=()=>{if(!contextPoint||!contextCableId)return;const point={...contextPoint},cableId=contextCableId;hideMapContextMenu();insertMufAtPoint(cableId,point)};
+$("contextInsertMuf").onclick=()=>{if(!contextPoint||!contextCableId)return;const point={...contextPoint},cableId=contextCableId;hideMapContextMenu();insertCabinetAtPoint(cableId,point,"MUF")};
+$("contextInsertBox").onclick=()=>{if(!contextPoint||!contextCableId)return;const point={...contextPoint},cableId=contextCableId;hideMapContextMenu();insertCabinetAtPoint(cableId,point,"CAJ")};
 $("mapContextMenu").addEventListener("pointerdown",event=>event.stopPropagation());
 $("mapContextMenu").addEventListener("contextmenu",event=>{event.preventDefault();event.stopPropagation()});
 document.addEventListener("click",e=>{if(!$("mapContextMenu").contains(e.target))hideMapContextMenu()});
