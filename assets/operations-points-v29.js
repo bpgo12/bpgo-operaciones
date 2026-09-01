@@ -46,16 +46,27 @@
     return /(^|\s)bpgo($|\s)/.test(client);
   }
 
+  function isBpgoInternal(work) {
+    if (classification(work) === "installation") return false;
+    const client = normalize([work.client, work.customerName, work.customer, work.accountName].filter(Boolean).join(" "));
+    const text = workText(work);
+    return /(^|\s)bpgo($|\s)/.test(client) && (classification(work) === "maintenance" || text.includes("interna") || text.includes("interno") || text.includes("actividad"));
+  }
+
   const MANUAL_POINT_OPTIONS = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 1];
 
   function hasManualPoints(work) {
     return work.manualPoints !== undefined && work.manualPoints !== null && work.manualPoints !== "" && Number.isFinite(Number(work.manualPoints));
   }
 
+  function automaticPointsFor(work) {
+    const kind = classification(work);
+    return isClosed(work) && (kind === "installation" || isBpgoInternal(work)) ? 1 : 0;
+  }
+
   function pointsFor(work) {
     if (hasManualPoints(work)) return Number(work.manualPoints);
-    const kind = classification(work);
-    return isClosed(work) && (kind === "installation" || isBpgoMaintenance(work)) ? 1 : 0;
+    return automaticPointsFor(work);
   }
 
   function isClosed(work) { return CLOSED.has(normalize(work.status)); }
@@ -114,6 +125,21 @@
     if (!user || user.active === false || normalize(user.role) !== "technician") return false;
     const name = normalize(user.name);
     return !name.includes("carlos pena") && !name.includes("eduardo bustamante");
+  }
+
+  function currentViewer(users) {
+    const profile = document.querySelector(".sidebar-footer .profile");
+    const name = normalize(profile && profile.querySelector("strong") && profile.querySelector("strong").textContent);
+    return users.find((user) => normalize(user.name) === name) || null;
+  }
+
+  function formatCurrency(value) {
+    return new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", maximumFractionDigits: 0 }).format(Number(value) || 0);
+  }
+
+  function bonusSummary(row) {
+    if (!window.BPGOMonthlyBonus) throw new Error("No se cargaron las reglas del bono mensual.");
+    return window.BPGOMonthlyBonus.calculateMonthlyBonus({ points: row.points, installations: row.installations });
   }
 
   function assignedTechnicianNames(work, users) {
@@ -196,6 +222,17 @@
 
   function render(container, state, range) {
     const data = calculate(state, range);
+    const viewer = currentViewer(data.users);
+    const isAdmin = Boolean(viewer && viewer.role === "super_admin");
+    const visibleRows = isAdmin ? data.rows : data.rows.filter((row) => viewer && String(row.id) === String(viewer.id));
+    const now = new Date();
+    const bonusRange = forcedMonth ? range : {
+      start: new Date(now.getFullYear(), now.getMonth(), 1),
+      end: new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999),
+      label: new Intl.DateTimeFormat("es-CL", { month: "long", year: "numeric" }).format(now)
+    };
+    const bonusData = calculate(state, bonusRange);
+    const visibleBonusRows = isAdmin ? bonusData.rows : bonusData.rows.filter((row) => viewer && String(row.id) === String(viewer.id));
     const installations = data.closedInPeriod.filter((work) => classification(work) === "installation");
     const maintenances = data.closedInPeriod.filter((work) => classification(work) === "maintenance");
     const bpgoMaintenances = maintenances.filter(isBpgoMaintenance);
@@ -204,7 +241,7 @@
     const pending = data.periodWork.filter((work) => !isClosed(work) && normalize(work.status) !== "cancelada");
     const totalPoints = data.closedInPeriod.reduce((sum, work) => sum + pointsFor(work), 0);
     const completion = data.periodWork.length ? Math.round((data.periodWork.filter(isClosed).length / data.periodWork.length) * 100) : 0;
-    const pointWork = data.closedInPeriod.filter((work) => classification(work) === "installation" || isBpgoMaintenance(work));
+    const pointWork = data.closedInPeriod.filter((work) => pointsFor(work) > 0);
     const closedPeriodWork = data.periodWork.filter(isClosed);
     const filters = {
       period: { title: "Actividades del periodo", works: data.periodWork },
@@ -224,13 +261,21 @@
       const manual = hasManualPoints(work);
       const names = assignedTechnicianNames(work, data.users);
       const reason = manual ? "Puntaje asignado manualmente" : point ? (kind === "installation" ? "Instalación cerrada" : "Mantención BPGO cerrada") : "Actividad cerrada sin puntaje";
-      const options = MANUAL_POINT_OPTIONS.map((value) => `<option value="${value}"${value === point ? " selected" : ""}>${value === 0 ? "0 pt" : value + " pt"}</option>`).join("");
-      return `<tr class="bpgo-clickable-work" data-bpgo-work-id="${escapeHtml(workKey(work))}" tabindex="0"><td><strong>${escapeHtml(work.code || "Sin código")}</strong><small>${escapeHtml(work.client || "Sin cliente")}</small></td><td>${escapeHtml(activityLabel(work))}</td><td>${escapeHtml(names)}</td><td>${escapeHtml(formatDate(closeDate(work)))}</td><td><select class="bpgo-points-select" data-bpgo-points-work="${escapeHtml(workKey(work))}" onclick="event.stopPropagation()">${options}</select><small class="bpgo-points-reason">${escapeHtml(reason)}</small></td></tr>`;
+      const options = `<option value="auto"${manual ? "" : " selected"}>Automático (${automaticPointsFor(work)} pt)</option>` + MANUAL_POINT_OPTIONS.map((value) => `<option value="${value}"${manual && value === point ? " selected" : ""}>${value === 0 ? "Rechazar (0 pt)" : "Aprobar / ajustar a " + value + " pt"}</option>`).join("");
+      const control = isAdmin ? `<select class="bpgo-points-select" data-bpgo-points-work="${escapeHtml(workKey(work))}" onclick="event.stopPropagation()">${options}</select>` : `<span class="bpgo-points-pill ${point ? "earned" : "zero"}">${point} pt</span>`;
+      return `<tr class="bpgo-clickable-work" data-bpgo-work-id="${escapeHtml(workKey(work))}" tabindex="0"><td><strong>${escapeHtml(work.code || "Sin código")}</strong><small>${escapeHtml(work.client || "Sin cliente")}</small></td><td>${escapeHtml(activityLabel(work))}</td><td>${escapeHtml(names)}</td><td>${escapeHtml(formatDate(closeDate(work)))}</td><td>${control}<small class="bpgo-points-reason">${escapeHtml(work.manualPointsReason || reason)}</small></td></tr>`;
     }).join("");
 
-    const techCards = data.rows.map((row) => `<article class="bpgo-tech-card"><header><div><span>Técnico</span><h3>${escapeHtml(row.name)}</h3></div><strong>${row.points} pts</strong></header><div class="bpgo-tech-metrics"><span><b>${row.installations}</b> instalaciones</span><span><b>${row.bpgoMaintenances}</b> mant. BPGO</span><span><b>${row.maintenances}</b> mant. totales</span><span><b>${row.rescheduled}</b> reagendadas</span><span><b>${row.closed}</b> finalizadas</span><span><b>${row.rate}%</b> avance</span></div></article>`).join("");
+    const techCards = visibleRows.map((row) => `<article class="bpgo-tech-card"><header><div><span>Técnico</span><h3>${escapeHtml(row.name)}</h3></div><strong>${row.points} pts</strong></header><div class="bpgo-tech-metrics"><span><b>${row.installations}</b> instalaciones</span><span><b>${row.bpgoMaintenances}</b> mant. BPGO</span><span><b>${row.maintenances}</b> mant. totales</span><span><b>${row.rescheduled}</b> reagendadas</span><span><b>${row.closed}</b> finalizadas</span><span><b>${row.rate}%</b> avance</span></div></article>`).join("");
 
-    const techRows = data.rows.map((row) => `<tr><td><strong>${escapeHtml(row.name)}</strong></td><td>${row.assigned}</td><td>${row.closed}</td><td>${row.installations}</td><td>${row.maintenances}</td><td>${row.bpgoMaintenances}</td><td>${row.other}</td><td>${row.rescheduled}</td><td>${row.missingEvidence}</td><td>${row.installationPoints}</td><td>${row.maintenancePoints}</td><td><strong class="bpgo-total-points">${row.points}</strong></td><td>${row.rate}%</td></tr>`).join("");
+    const techRows = visibleRows.map((row) => `<tr><td><strong>${escapeHtml(row.name)}</strong></td><td>${row.assigned}</td><td>${row.closed}</td><td>${row.installations}</td><td>${row.maintenances}</td><td>${row.bpgoMaintenances}</td><td>${row.other}</td><td>${row.rescheduled}</td><td>${row.missingEvidence}</td><td>${row.installationPoints}</td><td>${row.maintenancePoints}</td><td><strong class="bpgo-total-points">${row.points}</strong></td><td>${row.rate}%</td></tr>`).join("");
+
+    const bonusCards = visibleBonusRows.map((row) => {
+      const bonus = bonusSummary(row);
+      const requirement = bonus.installationRequirementMet ? `Cumplido: ${bonus.installations}/${bonus.minimumInstallations}` : `Faltan ${bonus.installationsMissing}: ${bonus.installations}/${bonus.minimumInstallations}`;
+      const amountDetail = bonus.installationRequirementMet ? "Monto según puntaje actual" : `${formatCurrency(bonus.scheduleAmount)} según puntos, retenido hasta 19 instalaciones`;
+      return `<article class="bpgo-bonus-card ${bonus.eligible ? "eligible" : "pending"}"><header><div><span>Bono mensual · ${escapeHtml(bonusRange.label)}</span><h3>${escapeHtml(row.name)}</h3></div><strong>${formatCurrency(bonus.estimatedBonus)}</strong></header><div class="bpgo-bonus-metrics"><span><small>Puntos actuales</small><b>${bonus.points}</b></span><span><small>Faltan para 25</small><b>${bonus.pointsMissingToTarget}</b></span><span><small>19 instalaciones</small><b>${escapeHtml(requirement)}</b></span><span><small>Próximo tramo</small><b>${bonus.nextTier.points} pts · ${formatCurrency(bonus.nextTier.amount)}</b></span></div><footer>${escapeHtml(amountDetail)}</footer></article>`;
+    }).join("");
 
     container.innerHTML = `
       <section class="bpgo-points-hero"><div><span class="eyebrow">Productividad y bonos · ${escapeHtml(range.label)}</span><h2>Puntos validados por cierre</h2><p>1 punto por instalación cerrada y 1 punto por mantención cerrada cuyo cliente sea BPGO. Las actividades abiertas no generan puntaje.</p></div><div class="bpgo-points-total"><span>Total periodo</span><strong>${totalPoints}</strong><small>puntos validados</small></div></section>
@@ -245,11 +290,12 @@
         ${card("Avance operativo", `${completion}%`, `${closedPeriodWork.length} cerradas de ${data.periodWork.length}`, "", "closed")}
         ${card("Otros cierres", otherClosed.length, "Finalizados sin puntaje", "", "other")}
       </section>
+      <section class="bpgo-analysis-panel bpgo-bonus-panel"><div class="bpgo-section-head"><div><h2>${isAdmin ? "Bono mensual por técnico" : "Mi bono mensual"}</h2><p>Meta base: 25 puntos y mínimo 19 instalaciones cerradas en el mes. El cálculo usa únicamente cierres válidos del periodo.</p></div><span class="bpgo-rule-badge">Actualización automática</span></div><div class="bpgo-bonus-grid">${bonusCards || '<div class="empty">Sin datos de productividad para este usuario.</div>'}</div></section>
       <div class="bpgo-card-detail-slot"></div>
       <section class="bpgo-analysis-panel"><div class="bpgo-section-head"><div><h2>Productividad detallada por técnico</h2><p>El puntaje se asigna individualmente a cada técnico responsable de una actividad válida.</p></div><span class="bpgo-rule-badge">Regla: cierre obligatorio</span></div><div class="bpgo-tech-grid">${techCards || '<div class="empty">Sin técnicos con actividad en el periodo.</div>'}</div></section>
       <section class="bpgo-analysis-panel"><div class="bpgo-section-head"><div><h2>Resumen completo por técnico</h2><p>Asignaciones, tipos de cierre, incidencias operativas y puntos para liquidación mensual.</p></div></div><div class="bpgo-table-wrap"><table class="bpgo-analysis-table"><thead><tr><th>Técnico</th><th>Asignadas</th><th>Finalizadas</th><th>Instal.</th><th>Mant.</th><th>Mant. BPGO</th><th>Otras</th><th>Reagend.</th><th>Sin evidencia</th><th>Pts. instal.</th><th>Pts. mant.</th><th>Total pts.</th><th>Avance</th></tr></thead><tbody>${techRows || '<tr><td colspan="13">Sin técnicos registrados.</td></tr>'}</tbody></table></div></section>
       <section class="bpgo-analysis-panel"><div class="bpgo-section-head"><div><h2>Actividades finalizadas del periodo</h2><p>Detalle auditable de qué se cerró, quién lo realizó y por qué obtuvo —o no— puntaje.</p></div><span class="bpgo-rule-badge">${details.length} cierres</span></div><div class="bpgo-table-wrap"><table class="bpgo-analysis-table bpgo-detail-table"><thead><tr><th>Orden / cliente</th><th>Actividad</th><th>Técnico(s)</th><th>Fecha cierre</th><th>Puntaje</th></tr></thead><tbody>${detailRows || '<tr><td colspan="5">No hay actividades finalizadas en este periodo.</td></tr>'}</tbody></table></div></section>
-      <section class="bpgo-method-panel"><h3>Criterio automático de puntaje</h3><ul><li><strong>Instalación:</strong> 1 punto al quedar cerrada.</li><li><strong>Mantención BPGO:</strong> 1 punto al quedar cerrada y tener BPGO como cliente.</li><li><strong>Otras actividades:</strong> se informan en el análisis, pero no suman puntos por defecto.</li><li><strong>Reagendadas o abiertas:</strong> no generan puntos hasta su cierre definitivo.</li><li><strong>Asignación manual:</strong> en "Actividades finalizadas del periodo" puedes elegir un puntaje de 0.1 a 0.5, o 1, para cualquier cierre.</li></ul></section>`;
+      <section class="bpgo-method-panel"><h3>Criterio automático de puntaje y bono</h3><ul><li><strong>Instalación:</strong> 1 punto al quedar cerrada.</li><li><strong>Actividad interna o mantención BPGO:</strong> 1 punto al quedar cerrada y tener BPGO como cliente/nombre.</li><li><strong>Mantención de cliente:</strong> 0 puntos.</li><li><strong>Reagendadas o abiertas:</strong> no generan puntos hasta su cierre definitivo.</li><li><strong>Bono:</strong> exige 25 puntos y al menos 19 instalaciones cerradas en el mes.</li><li><strong>Control administrador:</strong> puede aprobar, rechazar o ajustar un cierre; toda modificación exige justificación y queda en auditoría. El técnico solo puede consultar.</li></ul></section>`;
 
     const slot = container.querySelector(".bpgo-card-detail-slot");
     const closeDetail = () => {
@@ -307,9 +353,13 @@
     }
     bindWorkRows(container);
 
-    async function saveManualPoints(work, value, select) {
+    async function saveManualPoints(work, rawValue, select) {
       const reasonEl = select.parentElement.querySelector(".bpgo-points-reason");
       const previousText = reasonEl ? reasonEl.textContent : "";
+      const value = rawValue === "auto" ? null : Number(rawValue);
+      const action = rawValue === "auto" ? "restaurar cálculo automático" : value === 0 ? "rechazar el puntaje" : `aprobar/ajustar a ${value} punto(s)`;
+      const justification = window.prompt(`Justificación obligatoria para ${action}:`);
+      if (!justification || !justification.trim()) { select.value = hasManualPoints(work) ? String(work.manualPoints) : "auto"; return; }
       select.disabled = true;
       if (reasonEl) reasonEl.textContent = "Guardando...";
       try {
@@ -318,8 +368,11 @@
         const fresh = unwrapState(await response.json());
         const freshWork = (fresh.workOrders || []).find((item) => workKey(item) === workKey(work));
         if (!freshWork) throw new Error("No se encontró la actividad en el estado actual.");
-        freshWork.manualPoints = value;
-        work.manualPoints = value;
+        if (value === null) delete freshWork.manualPoints;
+        else freshWork.manualPoints = value;
+        freshWork.manualPointsReason = justification.trim();
+        freshWork.manualPointsAudit = [{ actorId: viewer.id, actorName: viewer.name, previousPoints: pointsFor(work), newPoints: value === null ? automaticPointsFor(work) : value, justification: justification.trim(), createdAt: new Date().toISOString() }, ...(freshWork.manualPointsAudit || [])].slice(0, 100);
+        fresh.auditLogs = [{ id: `points-${Date.now()}`, actorId: viewer.id, action: "Ajustar puntaje", entity: "work_order", entityId: workKey(work), detail: `${work.code || workKey(work)}: ${action}. Motivo: ${justification.trim()}`, createdAt: new Date().toISOString() }, ...(fresh.auditLogs || [])].slice(0, 500);
         const saved = await fetch("/api/state", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ data: fresh }) });
         if (!saved.ok) throw new Error("No autorizado o error al guardar.");
         state.workOrders = fresh.workOrders;
@@ -335,7 +388,7 @@
       select.addEventListener("change", () => {
         const work = data.allWork.find((item) => workKey(item) === select.dataset.bpgoPointsWork);
         if (!work) return;
-        saveManualPoints(work, Number(select.value), select);
+        saveManualPoints(work, select.value, select);
       });
     });
   }
