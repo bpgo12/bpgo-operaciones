@@ -12,6 +12,8 @@ header .brand{font-size:20px}
 header small{color:#8fa1b4}
 .back-to-operations{display:inline-flex;align-items:center;min-height:38px;padding:0 12px;border:1px solid #294052;border-radius:7px;color:#d9e7f3;text-decoration:none;background:#0d1c29;white-space:nowrap}
 .back-to-operations:hover{border-color:#18d75b;color:#fff}
+.feasibility-tab{border-color:#e15a3f;color:#ffd7ce}
+.feasibility-tab:hover{border-color:#ff765c}
 header input{width:220px}
 .power-summary{margin-left:auto;color:#20d34a;border:1px solid #294052;border-radius:6px;padding:9px;background:#09141f}
 .layout{height:calc(100% - 58px);display:grid;grid-template-columns:240px 1fr 320px}
