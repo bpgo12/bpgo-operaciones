@@ -40,6 +40,7 @@
     const url = typeof input === "string" ? input : input && input.url;
     const method = String((init && init.method) || (input && input.method) || "GET").toUpperCase();
     if (url && ((url.includes("/api/state") && (method === "PUT" || method === "GET")) ||
+      (url.includes("/api/billing/cortados") && method === "GET") ||
       (url.includes("/api/whatsapp/send-billing") && method === "POST") ||
       (url.includes("/api/whatsapp/inbox") && method === "GET") ||
       (url.includes("/api/whatsapp/reply") && method === "POST") ||

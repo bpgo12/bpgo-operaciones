@@ -460,6 +460,18 @@ export default {
       return Response.json({ data: state });
     }
 
+    if (url.pathname === "/api/billing/cortados" && request.method === "GET") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      const syncUrl = "https://script.google.com/macros/s/AKfycbxQWG6fkP1_V8quAUCGN0q2kDtHq5nT4kmOXjTtqdkP9kBaEx_KoE0KAwnG39QhxJvd/exec?cortados=1&token=bpgo_sheets_sync_2026_seguro";
+      const upstream = await fetch(syncUrl, { cache: "no-store" }).catch(() => null);
+      const payload = await upstream?.json().catch(() => null);
+      if (!upstream?.ok || !payload?.ok) {
+        return Response.json({ ok: false, error: "No se pudo consultar la planilla de clientes cortados." }, { status: 502 });
+      }
+      return Response.json({ ok: true, phones: Array.isArray(payload.cortados) ? payload.cortados : [] });
+    }
+
     if (url.pathname === "/api/whatsapp/webhook" && request.method === "GET") {
       const mode = url.searchParams.get("hub.mode");
       const token = url.searchParams.get("hub.verify_token");
