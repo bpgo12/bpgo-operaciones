@@ -137,6 +137,9 @@
     var existing = document.querySelector("#technician-shifts-page");
     if (existing) existing.remove();
     shell.classList.add("shifts-page-open");
+    document.querySelectorAll(".sidebar .nav > button, nav.mobile-nav > button").forEach(function (button) {
+      if (!button.classList.contains("bpgo-shifts-nav")) button.classList.remove("active");
+    });
     document.querySelectorAll(".bpgo-shifts-nav").forEach(function (button) { button.classList.add("active"); });
     var mount = document.createElement("div");
     mount.id = "technician-shifts-page";

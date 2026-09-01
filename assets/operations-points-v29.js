@@ -304,7 +304,8 @@
     const activeSection = [...document.querySelectorAll(".sidebar .nav > button")].find((button) => button.classList.contains("active"));
     const isDashboard = activeSection && normalize(activeSection.textContent) === "dashboard ops";
     const heading = [...document.querySelectorAll("h1")].find((element) => normalize(element.textContent).includes("control operativo de tecnicos"));
-    if (!isDashboard || !heading) {
+    const shiftsPageOpen = !!document.querySelector("#technician-shifts-page");
+    if (!isDashboard || !heading || shiftsPageOpen) {
       document.querySelectorAll("#bpgo-points-dashboard").forEach((element) => element.remove());
       document.querySelectorAll(".bpgo-original-dashboard-hidden").forEach((element) => element.classList.remove("bpgo-original-dashboard-hidden"));
       return;
