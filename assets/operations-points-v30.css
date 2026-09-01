@@ -63,3 +63,19 @@
 .bpgo-work-copy p { margin:6px 0;color:#455955; }
 .bpgo-work-modal footer { display:flex;align-items:center;justify-content:space-between;gap:14px;padding:16px 24px 22px;color:#60716e; }
 @media(max-width:720px) { .bpgo-period-toolbar { align-items:stretch;flex-direction:column; }.bpgo-month-review { display:grid;grid-template-columns:38px 1fr 38px;align-items:end; }.bpgo-month-review label { min-width:0; }.bpgo-month-review input { width:100%!important;min-width:0; }.bpgo-current-period { grid-column:1/-1;width:100%!important; }.bpgo-work-modal-backdrop { padding:8px; }.bpgo-work-modal { max-height:96vh;border-radius:15px; }.bpgo-work-modal>header { padding:18px; }.bpgo-work-modal header h2 { font-size:19px; }.bpgo-work-detail-grid { grid-template-columns:1fr 1fr;padding:14px; }.bpgo-work-copy { margin:8px 14px;padding:14px; }.bpgo-work-modal footer { padding:14px; } }
+
+.bpgo-bonus-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px; }
+.bpgo-bonus-card { overflow:hidden;border:1px solid #d9e7e3;border-radius:16px;background:linear-gradient(145deg,#fff,#f3faf8); }
+.bpgo-bonus-card.eligible { border-color:#62b49d; }
+.bpgo-bonus-card.pending { border-color:#e9c36c; }
+.bpgo-bonus-card header { display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:18px; }
+.bpgo-bonus-card header span,.bpgo-bonus-card header h3 { display:block;margin:0; }
+.bpgo-bonus-card header span { color:#60736e;font-size:12px;font-weight:700;text-transform:uppercase; }
+.bpgo-bonus-card header h3 { margin-top:4px; }
+.bpgo-bonus-card header>strong { color:#087f6b;font-size:clamp(22px,4vw,32px);white-space:nowrap; }
+.bpgo-bonus-metrics { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1px;background:#dce9e5; }
+.bpgo-bonus-metrics span { display:flex;flex-direction:column;gap:4px;padding:14px;background:#fff; }
+.bpgo-bonus-metrics small { color:#63756f; }
+.bpgo-bonus-metrics b { overflow-wrap:anywhere; }
+.bpgo-bonus-card footer { padding:12px 18px;color:#546761;font-size:13px; }
+@media(max-width:560px) { .bpgo-bonus-grid { grid-template-columns:1fr; }.bpgo-bonus-card header { flex-direction:column; }.bpgo-bonus-metrics { grid-template-columns:1fr; } }
