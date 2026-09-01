@@ -1,3 +1,7 @@
+.billing-duplicate-search[hidden] {
+  display: none;
+}
+
 .billing-duplicate-search {
   margin-top: 6px;
   border: 1px solid #f0c419;

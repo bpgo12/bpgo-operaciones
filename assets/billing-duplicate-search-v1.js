@@ -67,7 +67,9 @@
       return;
     }
     var field = input.closest(".billing-search-field");
-    var panel = field.querySelector(".billing-duplicate-search");
+    var panel = field.nextElementSibling && field.nextElementSibling.classList.contains("billing-duplicate-search")
+      ? field.nextElementSibling
+      : null;
     if (!panel) {
       panel = document.createElement("div");
       panel.className = "billing-duplicate-search";
