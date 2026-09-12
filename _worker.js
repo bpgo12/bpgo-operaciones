@@ -72,10 +72,6 @@ function normalizeWhatsAppPhone(value) {
   return phone;
 }
 
-function isValidWhatsAppRegistrationPin(value) {
-  return /^\d{6}$/.test(String(value || "").trim());
-}
-
 async function getMetaPhoneConnection(credentials) {
   if (!credentials.accessToken || !credentials.phoneNumberId) {
     return { ok: false, connected: false, status: "UNCONFIGURED", error: "Configuracion incompleta" };
@@ -682,7 +678,7 @@ export default {
         ok: true,
         readyToStart: Boolean(appId && configId && featureType && env.META_APP_SECRET),
         connected: hasEmbeddedCredentials && metaPhone.connected,
-        readyToRegister: hasEmbeddedCredentials && metaPhone.ok && !metaPhone.connected,
+        needsCompletion: hasEmbeddedCredentials && !metaPhone.connected,
         metaPhoneStatus: metaPhone.status,
         appId,
         configId,
@@ -812,24 +808,7 @@ export default {
     }
 
     if (url.pathname === "/api/whatsapp/register" && request.method === "POST") {
-      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
-      if (!session || session.role !== "super_admin") return Response.json({ ok: false, error: "Solo un superadministrador puede registrar el número." }, { status: 403 });
-      const credentials = await getWhatsAppCredentials(env);
-      if (!credentials.accessToken || !credentials.phoneNumberId) return Response.json({ ok: false, error: "WhatsApp todavía no está conectado." }, { status: 409 });
-      const body = await request.json().catch(() => ({}));
-      const pin = String(body.pin || "").trim();
-      if (!isValidWhatsAppRegistrationPin(pin)) return Response.json({ ok: false, error: "El PIN de registro debe tener exactamente 6 dígitos." }, { status: 400 });
-      const registerResponse = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/register`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
-        body: JSON.stringify({ messaging_product: "whatsapp", pin }),
-      });
-      const registerPayload = await registerResponse.json().catch(() => ({}));
-      if (!registerResponse.ok || registerPayload.success !== true) {
-        return Response.json({ ok: false, error: registerPayload.error?.message || "Meta no pudo registrar el número.", errorCode: registerPayload.error?.code, errorSubcode: registerPayload.error?.error_subcode }, { status: 422 });
-      }
-      const connection = await getMetaPhoneConnection(credentials);
-      return Response.json({ ok: true, connected: connection.connected, status: connection.status });
+      return Response.json({ ok: false, error: "Los números con WhatsApp Business deben completar el registro dentro del flujo oficial de Meta." }, { status: 409 });
     }
 
     if (url.pathname === "/api/whatsapp/status" && request.method === "GET") {
