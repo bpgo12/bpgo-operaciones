@@ -44,6 +44,7 @@
       (url.includes("/api/whatsapp/send-billing") && method === "POST") ||
       (url.includes("/api/whatsapp/inbox") && method === "GET") ||
       (url.includes("/api/whatsapp/reply") && method === "POST") ||
+      (url.includes("/api/whatsapp/register") && method === "POST") ||
       (url.includes("/api/whatsapp/onboarding") && (method === "GET" || method === "POST")))) {
       const headers = new Headers(init && init.headers || {});
       const token = sessionStorage.getItem(TOKEN_KEY);
@@ -167,4 +168,3 @@
   observer.observe(document.documentElement, { childList: true, subtree: true });
   document.addEventListener("DOMContentLoaded", installButtons);
 })();
-
