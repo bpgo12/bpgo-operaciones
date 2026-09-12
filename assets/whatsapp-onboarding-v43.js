@@ -21,13 +21,14 @@
 
   function render(panel, data) {
     onboarding = data;
+    var configSuffix = data.configId ? String(data.configId).slice(-6) : "";
     var checks = (data.checks || []).map(function (check) {
       return '<li class="' + (check.configured ? "ready" : "pending") + '"><span>' + (check.configured ? "✓" : "○") + '</span><div><strong>' + escapeHtml(check.label) + '</strong><small>' + (check.configured ? "Configurado" : "Pendiente de configurar") + '</small></div></li>';
     }).join("");
     var badge = data.connected ? "Conectado" : data.needsCompletion ? "Falta confirmar en el teléfono" : data.readyToStart ? "Listo para vincular" : "Configuración pendiente";
     panel.innerHTML = '<header><div><p class="eyebrow">Integración propia BPGO · Meta</p><h3>Coexistencia y registro integrado</h3><p>El negocio ya está verificado. El número continuará en WhatsApp Business y se conectará con operaciones.bpgo.cl mediante el flujo oficial de Meta.</p></div><span class="onboarding-badge ' + (data.connected ? "connected" : "review") + '">' + badge + '</span></header>' +
       '<ul class="onboarding-checks">' + checks + '</ul>' +
-      '<div class="onboarding-action"><div><strong>' + (data.connected ? "Integración oficial activa" : data.needsCompletion ? "Falta completar la coexistencia en Meta" : data.readyToStart ? "Todo preparado para vincular el número" : "Falta cargar el Config ID de coexistencia") + '</strong><p>' + (data.connected ? "La credencial está cifrada, el webhook quedó suscrito y la plataforma puede recibir y responder mensajes." : data.needsCompletion ? "Abre nuevamente Meta y completa todos sus pasos. Cuando aparezca el código o QR, confírmalo desde WhatsApp Business en el teléfono y vuelve a la ventana de Meta." : "No se modificará el número ni la aplicación móvil hasta iniciar el registro integrado oficial.") + '</p></div>' +
+      '<div class="onboarding-action"><div><strong>' + (data.connected ? "Integración oficial activa" : data.needsCompletion ? "Falta completar la coexistencia en Meta" : data.readyToStart ? "Todo preparado para vincular el número" : "Falta cargar el Config ID de coexistencia") + '</strong><p>' + (data.connected ? "La credencial está cifrada, el webhook quedó suscrito y la plataforma puede recibir y responder mensajes." : data.needsCompletion ? "Abre nuevamente Meta y completa todos sus pasos. Cuando aparezca el código o QR, confírmalo desde WhatsApp Business en el teléfono y vuelve a la ventana de Meta." : "No se modificará el número ni la aplicación móvil hasta iniciar el registro integrado oficial.") + (configSuffix ? " Configuración activa: …" + escapeHtml(configSuffix) + "." : "") + '</p></div>' +
       '<button type="button" class="btn" data-start-embedded-signup ' + (!data.readyToStart || data.connected ? "disabled" : "") + '>' + (data.connected ? "Número conectado" : data.needsCompletion ? "Completar en Meta" : "Conectar con Meta") + '</button></div>' +
       '<div class="whatsapp-test-status" data-onboarding-status hidden></div>';
   }
@@ -190,8 +191,8 @@
         override_default_response_type: true,
         extras: {
           setup: {},
-          featureType: "whatsapp_business_app_onboarding",
-          sessionInfoVersion: "3"
+          version: "v4",
+          featureType: "whatsapp_business_app_onboarding"
         }
       });
       signupTimeout = window.setTimeout(function () {
