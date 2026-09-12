@@ -72,6 +72,40 @@ function normalizeWhatsAppPhone(value) {
   return phone;
 }
 
+function isValidWhatsAppRegistrationPin(value) {
+  return /^\d{6}$/.test(String(value || "").trim());
+}
+
+async function getMetaPhoneConnection(credentials) {
+  if (!credentials.accessToken || !credentials.phoneNumberId) {
+    return { ok: false, connected: false, status: "UNCONFIGURED", error: "Configuracion incompleta" };
+  }
+  const useAccountEdge = /^\d+$/.test(String(credentials.wabaId || ""));
+  const endpoint = useAccountEdge
+    ? `https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.wabaId)}/phone_numbers?fields=id,verified_name,display_phone_number,quality_rating,status&limit=100`
+    : `https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}?fields=verified_name,display_phone_number,quality_rating,status`;
+  const response = await fetch(endpoint, {
+    headers: { authorization: `Bearer ${credentials.accessToken}` },
+  });
+  const responsePayload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    return { ok: false, connected: false, status: "ERROR", error: responsePayload.error?.message || "Meta rechazo la conexion", errorCode: responsePayload.error?.code };
+  }
+  const payload = useAccountEdge
+    ? (Array.isArray(responsePayload.data) ? responsePayload.data.find((item) => String(item.id) === String(credentials.phoneNumberId)) : null)
+    : responsePayload;
+  if (!payload) return { ok: false, connected: false, status: "NOT_FOUND", error: "El número no pertenece a la cuenta de WhatsApp autorizada." };
+  const status = String(payload.status || "UNKNOWN").toUpperCase();
+  return {
+    ok: true,
+    connected: status === "CONNECTED",
+    status,
+    verifiedName: payload.verified_name,
+    displayPhoneNumber: payload.display_phone_number,
+    qualityRating: payload.quality_rating,
+  };
+}
+
 function equalBytes(left, right) {
   if (left.length !== right.length) return false;
   let difference = 0;
@@ -642,10 +676,14 @@ export default {
       const appId = String(env.META_APP_ID || "").trim();
       const configId = String(env.META_EMBEDDED_SIGNUP_CONFIG_ID || "").trim();
       const featureType = String(env.META_EMBEDDED_SIGNUP_FEATURE || "").trim();
+      const metaPhone = await getMetaPhoneConnection(credentials);
+      const hasEmbeddedCredentials = Boolean(credentials.accessToken && credentials.phoneNumberId && credentials.wabaId && credentials.source === "embedded-signup");
       return Response.json({
         ok: true,
         readyToStart: Boolean(appId && configId && featureType && env.META_APP_SECRET),
-        connected: Boolean(credentials.accessToken && credentials.phoneNumberId && credentials.wabaId && credentials.source === "embedded-signup"),
+        connected: hasEmbeddedCredentials && metaPhone.connected,
+        readyToRegister: hasEmbeddedCredentials && metaPhone.ok && !metaPhone.connected,
+        metaPhoneStatus: metaPhone.status,
         appId,
         configId,
         featureType,
@@ -769,7 +807,8 @@ export default {
         ON CONFLICT(id) DO UPDATE SET waba_id = excluded.waba_id, phone_number_id = excluded.phone_number_id,
           access_token_encrypted = excluded.access_token_encrypted, connected_at = excluded.connected_at, updated_at = datetime('now')`)
         .bind(wabaId, phoneNumberId, encryptedToken).run();
-      return Response.json({ ok: true, connected: true, displayPhoneNumber: selectedNumber.display_phone_number, verifiedName: selectedNumber.verified_name });
+      const connection = await getMetaPhoneConnection({ accessToken, phoneNumberId, wabaId });
+      return Response.json({ ok: true, connected: connection.connected, status: connection.status, displayPhoneNumber: selectedNumber.display_phone_number, verifiedName: selectedNumber.verified_name });
     }
 
     if (url.pathname === "/api/whatsapp/register" && request.method === "POST") {
@@ -777,7 +816,9 @@ export default {
       if (!session || session.role !== "super_admin") return Response.json({ ok: false, error: "Solo un superadministrador puede registrar el número." }, { status: 403 });
       const credentials = await getWhatsAppCredentials(env);
       if (!credentials.accessToken || !credentials.phoneNumberId) return Response.json({ ok: false, error: "WhatsApp todavía no está conectado." }, { status: 409 });
-      const pin = String(Math.floor(100000 + Math.random() * 900000));
+      const body = await request.json().catch(() => ({}));
+      const pin = String(body.pin || "").trim();
+      if (!isValidWhatsAppRegistrationPin(pin)) return Response.json({ ok: false, error: "El PIN de registro debe tener exactamente 6 dígitos." }, { status: 400 });
       const registerResponse = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/register`, {
         method: "POST",
         headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
@@ -787,7 +828,8 @@ export default {
       if (!registerResponse.ok || registerPayload.success !== true) {
         return Response.json({ ok: false, error: registerPayload.error?.message || "Meta no pudo registrar el número.", errorCode: registerPayload.error?.code, errorSubcode: registerPayload.error?.error_subcode }, { status: 422 });
       }
-      return Response.json({ ok: true, pin });
+      const connection = await getMetaPhoneConnection(credentials);
+      return Response.json({ ok: true, connected: connection.connected, status: connection.status });
     }
 
     if (url.pathname === "/api/whatsapp/status" && request.method === "GET") {
@@ -801,14 +843,8 @@ export default {
       ];
       let metaConnection = { ok: false, error: "Configuracion incompleta" };
       if (checks[0].configured && checks[1].configured) {
-        const metaResponse = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}?fields=verified_name,display_phone_number,quality_rating`, {
-          headers: { authorization: `Bearer ${credentials.accessToken}` },
-        });
-        const meta = await metaResponse.json().catch(() => ({}));
-        metaConnection = metaResponse.ok
-          ? { ok: true, verifiedName: meta.verified_name, qualityRating: meta.quality_rating }
-          : { ok: false, error: meta.error?.message || "Meta rechazo la conexion", errorCode: meta.error?.code };
-        if (metaResponse.ok) {
+        metaConnection = await getMetaPhoneConnection(credentials);
+        if (metaConnection.ok) {
           const templatesResponse = credentials.wabaId ? await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.wabaId)}/message_templates?name=${encodeURIComponent(String(env.WHATSAPP_TEMPLATE_NAME || "").trim())}&fields=name,status,language,category`, {
             headers: { authorization: `Bearer ${credentials.accessToken}` },
           }) : null;
@@ -854,4 +890,3 @@ export default {
     return assetResponse;
   },
 };
-
