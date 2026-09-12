@@ -24,11 +24,11 @@
     var checks = (data.checks || []).map(function (check) {
       return '<li class="' + (check.configured ? "ready" : "pending") + '"><span>' + (check.configured ? "✓" : "○") + '</span><div><strong>' + escapeHtml(check.label) + '</strong><small>' + (check.configured ? "Configurado" : "Pendiente de configurar") + '</small></div></li>';
     }).join("");
-    var badge = data.connected ? "Conectado" : data.readyToStart ? "Listo para vincular" : "Configuración pendiente";
+    var badge = data.connected ? "Conectado" : data.readyToRegister ? "Falta activar el número" : data.readyToStart ? "Listo para vincular" : "Configuración pendiente";
     panel.innerHTML = '<header><div><p class="eyebrow">Integración propia BPGO · Meta</p><h3>Coexistencia y registro integrado</h3><p>El negocio ya está verificado. El número continuará en WhatsApp Business y se conectará con operaciones.bpgo.cl mediante el flujo oficial de Meta.</p></div><span class="onboarding-badge ' + (data.connected ? "connected" : "review") + '">' + badge + '</span></header>' +
       '<ul class="onboarding-checks">' + checks + '</ul>' +
-      '<div class="onboarding-action"><div><strong>' + (data.connected ? "Integración oficial activa" : data.readyToStart ? "Todo preparado para vincular el número" : "Falta cargar el Config ID de coexistencia") + '</strong><p>' + (data.connected ? "La credencial está cifrada, el webhook quedó suscrito y la plataforma puede recibir y responder mensajes." : "No se modificará el número ni la aplicación móvil hasta iniciar el registro integrado oficial.") + '</p></div>' +
-      '<button type="button" class="btn" data-start-embedded-signup ' + (!data.readyToStart || data.connected ? "disabled" : "") + '>' + (data.connected ? "Número conectado" : "Conectar con Meta") + '</button></div>' +
+      '<div class="onboarding-action"><div><strong>' + (data.connected ? "Integración oficial activa" : data.readyToRegister ? "Autorización guardada; falta registrar el teléfono" : data.readyToStart ? "Todo preparado para vincular el número" : "Falta cargar el Config ID de coexistencia") + '</strong><p>' + (data.connected ? "La credencial está cifrada, el webhook quedó suscrito y la plataforma puede recibir y responder mensajes." : data.readyToRegister ? "Meta reconoce la cuenta y el número, pero su estado todavía es " + escapeHtml(data.metaPhoneStatus || "DISCONNECTED") + ". Completa una sola vez el registro final." : "No se modificará el número ni la aplicación móvil hasta iniciar el registro integrado oficial.") + '</p></div>' +
+      (data.readyToRegister ? '<button type="button" class="btn" data-register-whatsapp>Activar número en Meta</button>' : '<button type="button" class="btn" data-start-embedded-signup ' + (!data.readyToStart || data.connected ? "disabled" : "") + '>' + (data.connected ? "Número conectado" : "Conectar con Meta") + '</button>') + '</div>' +
       '<div class="whatsapp-test-status" data-onboarding-status hidden></div>';
   }
 
@@ -136,7 +136,9 @@
       var data = await response.json().catch(function () { return {}; });
       if (!response.ok) throw new Error(data.error || "Meta no pudo completar la vinculación.");
       signupResult.completed = true;
-      showStatus(panel, "Conexión y recepción de mensajes activadas para " + (data.displayPhoneNumber || "el número BPGO") + ".", "success");
+      showStatus(panel, data.connected
+        ? "Conexión y recepción de mensajes activadas para " + (data.displayPhoneNumber || "el número BPGO") + "."
+        : "Autorización guardada para " + (data.displayPhoneNumber || "el número BPGO") + ". Falta completar el registro final en Meta.", data.connected ? "success" : "pending");
       window.setTimeout(function () { loadStatus(panel); }, 1800);
     } catch (error) {
       signupResult.saving = false;
@@ -211,6 +213,33 @@
     }
   }
 
+  async function registerNumber(panel) {
+    var pin = window.prompt("Ingresa el PIN de verificación en dos pasos de WhatsApp (6 dígitos). Si nunca configuraste uno, crea ahora un PIN de 6 dígitos y guárdalo:");
+    if (pin === null) return;
+    pin = String(pin).trim();
+    if (!/^\d{6}$/.test(pin)) {
+      showStatus(panel, "El PIN debe tener exactamente 6 dígitos.", "error");
+      return;
+    }
+    var button = panel.querySelector("[data-register-whatsapp]");
+    if (button) button.disabled = true;
+    showStatus(panel, "Registrando el número en WhatsApp Business Platform…", "pending");
+    try {
+      var response = await fetch("/api/whatsapp/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pin: pin })
+      });
+      var data = await response.json().catch(function () { return {}; });
+      if (!response.ok) throw new Error(data.error || "Meta no pudo registrar el número.");
+      showStatus(panel, data.connected ? "Número conectado correctamente en Meta." : "Meta aceptó el registro. Actualizando el estado del número…", "success");
+      window.setTimeout(function () { loadStatus(panel); }, 1800);
+    } catch (error) {
+      if (button) button.disabled = false;
+      showStatus(panel, error.message || "No se pudo registrar el número.", "error");
+    }
+  }
+
   window.addEventListener("message", function (event) {
     var hostname = "";
     try { hostname = new URL(event.origin).hostname; } catch (_) { return; }
@@ -257,10 +286,11 @@
   document.addEventListener("click", function (event) {
     var button = event.target.closest("[data-start-embedded-signup]");
     if (button) startSignup(button.closest("[data-whatsapp-onboarding]"));
+    var registerButton = event.target.closest("[data-register-whatsapp]");
+    if (registerButton) registerNumber(registerButton.closest("[data-whatsapp-onboarding]"));
   });
   function scan() { clearTimeout(timer); timer = window.setTimeout(install, 100); }
   new MutationObserver(scan).observe(document.documentElement, { childList: true, subtree: true });
   document.addEventListener("DOMContentLoaded", install);
   install();
 })();
-
