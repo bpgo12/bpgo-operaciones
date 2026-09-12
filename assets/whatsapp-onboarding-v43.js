@@ -179,6 +179,11 @@
         }
         signupResult.code = response.authResponse.code;
         showStatus(panel, "Autorización recibida. Completa el código o QR en WhatsApp Business y termina todos los pasos de la ventana de Meta…", "pending");
+        // Meta can emit the FINISH event before the OAuth callback. In that
+        // order the account and phone IDs are already stored, so complete the
+        // exchange now. If they are still missing, finishSignup safely waits
+        // for the message event instead.
+        finishSignup(panel);
       }, {
         config_id: onboarding.configId,
         response_type: "code",
@@ -195,7 +200,7 @@
         if (!signupResult.code) missing.push("autorización");
         if (!signupResult.wabaId || !signupResult.phoneNumberId) missing.push("selección del número");
         setStartButton(panel, false);
-        showStatus(panel, "Meta no completó " + missing.join(" y ") + ". Presiona nuevamente Conectar con Meta: se abrirá un registro nuevo.", "error");
+        showStatus(panel, "Meta no completó " + missing.join(" y ") + ". Presiona nuevamente Completar en Meta: se abrirá un registro nuevo.", "error");
       }, 180000);
     } catch (error) {
       clearSignupTimeout();
