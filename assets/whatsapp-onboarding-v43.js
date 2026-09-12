@@ -28,7 +28,7 @@
     panel.innerHTML = '<header><div><p class="eyebrow">Integración propia BPGO · Meta</p><h3>Coexistencia y registro integrado</h3><p>El negocio ya está verificado. El número continuará en WhatsApp Business y se conectará con operaciones.bpgo.cl mediante el flujo oficial de Meta.</p></div><span class="onboarding-badge ' + (data.connected ? "connected" : "review") + '">' + badge + '</span></header>' +
       '<ul class="onboarding-checks">' + checks + '</ul>' +
       '<div class="onboarding-action"><div><strong>' + (data.connected ? "Integración oficial activa" : data.readyToRegister ? "Autorización guardada; falta registrar el teléfono" : data.readyToStart ? "Todo preparado para vincular el número" : "Falta cargar el Config ID de coexistencia") + '</strong><p>' + (data.connected ? "La credencial está cifrada, el webhook quedó suscrito y la plataforma puede recibir y responder mensajes." : data.readyToRegister ? "Meta reconoce la cuenta y el número, pero su estado todavía es " + escapeHtml(data.metaPhoneStatus || "DISCONNECTED") + ". Completa una sola vez el registro final." : "No se modificará el número ni la aplicación móvil hasta iniciar el registro integrado oficial.") + '</p></div>' +
-      (data.readyToRegister ? '<button type="button" class="btn" data-register-whatsapp>Activar número en Meta</button>' : '<button type="button" class="btn" data-start-embedded-signup ' + (!data.readyToStart || data.connected ? "disabled" : "") + '>' + (data.connected ? "Número conectado" : "Conectar con Meta") + '</button>') + '</div>' +
+      (data.readyToRegister ? '<div class="whatsapp-register-controls"><label><span>PIN de verificación en dos pasos</span><input type="password" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="off" placeholder="6 dígitos" aria-label="PIN de verificación en dos pasos de WhatsApp" data-whatsapp-registration-pin></label><button type="button" class="btn" data-register-whatsapp disabled>Activar número en Meta</button><small>Escribe aquí el PIN de 6 dígitos configurado en WhatsApp Business. No es el código recibido por SMS.</small></div>' : '<button type="button" class="btn" data-start-embedded-signup ' + (!data.readyToStart || data.connected ? "disabled" : "") + '>' + (data.connected ? "Número conectado" : "Conectar con Meta") + '</button>') + '</div>' +
       '<div class="whatsapp-test-status" data-onboarding-status hidden></div>';
   }
 
@@ -214,11 +214,11 @@
   }
 
   async function registerNumber(panel) {
-    var pin = window.prompt("Ingresa el PIN de verificación en dos pasos de WhatsApp (6 dígitos). Si nunca configuraste uno, crea ahora un PIN de 6 dígitos y guárdalo:");
-    if (pin === null) return;
-    pin = String(pin).trim();
+    var input = panel.querySelector("[data-whatsapp-registration-pin]");
+    var pin = input ? String(input.value || "").replace(/\D/g, "") : "";
     if (!/^\d{6}$/.test(pin)) {
       showStatus(panel, "El PIN debe tener exactamente 6 dígitos.", "error");
+      if (input) input.focus();
       return;
     }
     var button = panel.querySelector("[data-register-whatsapp]");
@@ -232,6 +232,7 @@
       });
       var data = await response.json().catch(function () { return {}; });
       if (!response.ok) throw new Error(data.error || "Meta no pudo registrar el número.");
+      if (input) input.value = "";
       showStatus(panel, data.connected ? "Número conectado correctamente en Meta." : "Meta aceptó el registro. Actualizando el estado del número…", "success");
       window.setTimeout(function () { loadStatus(panel); }, 1800);
     } catch (error) {
@@ -288,6 +289,14 @@
     if (button) startSignup(button.closest("[data-whatsapp-onboarding]"));
     var registerButton = event.target.closest("[data-register-whatsapp]");
     if (registerButton) registerNumber(registerButton.closest("[data-whatsapp-onboarding]"));
+  });
+  document.addEventListener("input", function (event) {
+    var input = event.target.closest("[data-whatsapp-registration-pin]");
+    if (!input) return;
+    input.value = String(input.value || "").replace(/\D/g, "").slice(0, 6);
+    var panel = input.closest("[data-whatsapp-onboarding]");
+    var button = panel && panel.querySelector("[data-register-whatsapp]");
+    if (button) button.disabled = !/^\d{6}$/.test(input.value);
   });
   function scan() { clearTimeout(timer); timer = window.setTimeout(install, 100); }
   new MutationObserver(scan).observe(document.documentElement, { childList: true, subtree: true });
