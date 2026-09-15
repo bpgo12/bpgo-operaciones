@@ -212,8 +212,9 @@
         return;
       }
       list.innerHTML = cases.map(function (item) {
-        var identified = item.customer_id ? escapeHtml(item.customer_name || item.customer_id) : "Cliente por identificar";
+        var identified = escapeHtml(item.reported_name || item.customer_name || item.customer_id || "Titular sin identificar");
         var details = [];
+        if (item.reported_name && item.customer_name && item.reported_name !== item.customer_name) details.push("En sistema: " + escapeHtml(item.customer_name));
         if (item.service_month) details.push("Período " + escapeHtml(item.service_month));
         if (item.amount) details.push("$" + Number(item.amount).toLocaleString("es-CL"));
         return '<article class="automation-case ' + escapeHtml(item.case_type) + '"><header><div><span class="automation-kind">' + escapeHtml(automationLabel(item.case_type)) + '</span><strong>' + identified + '</strong><small>+' + escapeHtml(item.phone) + ' · confianza ' + escapeHtml(item.confidence) + '%</small></div><span class="automation-state">' + escapeHtml(item.status) + '</span></header><p>' + escapeHtml(item.summary || "Pendiente de revisión") + '</p>' + (details.length ? '<p class="automation-details">' + details.join(" · ") + '</p>' : '') + '<footer><button type="button" class="btn secondary small" data-case-action="dismissed" data-case-id="' + escapeHtml(item.id) + '">Descartar</button><button type="button" class="btn small" data-case-action="reviewing" data-case-id="' + escapeHtml(item.id) + '">Revisar</button></footer></article>';
