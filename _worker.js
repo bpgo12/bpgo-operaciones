@@ -239,6 +239,218 @@ async function findCustomerForWhatsApp(env, phone, fallbackName) {
   return { id: null, name: fallbackName || null };
 }
 
+async function ensureWhatsAppBotTables(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_bot_sessions (
+    phone TEXT PRIMARY KEY,
+    mode TEXT NOT NULL DEFAULT 'bot',
+    escalation_reason TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_visit_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    phone TEXT NOT NULL,
+    customer_id TEXT,
+    customer_name TEXT,
+    preferred_date TEXT,
+    reason TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS bpgo_bot_faq (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
+}
+
+async function getBotSessionMode(env, phone) {
+  await ensureWhatsAppBotTables(env);
+  const row = await env.DB.prepare("SELECT mode FROM whatsapp_bot_sessions WHERE phone = ?").bind(phone).first();
+  return row?.mode === "human" ? "human" : "bot";
+}
+
+async function setBotSessionMode(env, phone, mode, reason) {
+  await ensureWhatsAppBotTables(env);
+  await env.DB.prepare(`INSERT INTO whatsapp_bot_sessions (phone, mode, escalation_reason, updated_at)
+    VALUES (?, ?, ?, datetime('now'))
+    ON CONFLICT(phone) DO UPDATE SET mode = excluded.mode, escalation_reason = excluded.escalation_reason, updated_at = datetime('now')`)
+    .bind(phone, mode, reason || null).run();
+}
+
+const DEFAULT_BOT_FAQ = [
+  "BPGO es un proveedor de internet y TV cable.",
+  "Horario de atención: lunes a viernes de 9:00 a 18:00, sábados de 9:00 a 13:00.",
+  "Para enviar un comprobante de pago, el cliente puede mandar la foto o PDF directamente por este chat.",
+  "Este contenido es un ejemplo por defecto: edítalo desde el panel de operaciones (Solicitudes de visita / FAQ del bot) con la información real de BPGO (planes, direcciones, políticas).",
+].join("\n");
+
+async function getBotFaqText(env) {
+  await ensureWhatsAppBotTables(env);
+  const rows = await env.DB.prepare("SELECT key, value FROM bpgo_bot_faq ORDER BY key ASC").all();
+  const items = rows.results || [];
+  if (!items.length) return DEFAULT_BOT_FAQ;
+  return items.map((item) => `${item.key}: ${item.value}`).join("\n");
+}
+
+async function buildBotContext(env, phone, fallbackName) {
+  await ensureWhatsAppInboxTable(env);
+  const historyRows = await env.DB.prepare(`SELECT direction, message_type, message_text, created_at
+    FROM whatsapp_inbox_messages WHERE phone = ? ORDER BY created_at DESC LIMIT 10`).bind(phone).all();
+  const history = (historyRows.results || []).reverse();
+  const customer = await findCustomerForWhatsApp(env, phone, fallbackName);
+  const faq = await getBotFaqText(env);
+  return { history, customer, faq };
+}
+
+async function fetchWhatsAppMediaBase64(credentials, mediaId) {
+  const metadataResponse = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(mediaId)}`, {
+    headers: { authorization: `Bearer ${credentials.accessToken}` },
+  });
+  const metadata = await metadataResponse.json().catch(() => ({}));
+  if (!metadataResponse.ok || !metadata.url) return null;
+  const mediaResponse = await fetch(metadata.url, { headers: { authorization: `Bearer ${credentials.accessToken}` } });
+  if (!mediaResponse.ok) return null;
+  const buffer = new Uint8Array(await mediaResponse.arrayBuffer());
+  let binary = "";
+  for (let index = 0; index < buffer.length; index += 1) binary += String.fromCharCode(buffer[index]);
+  return { base64: btoa(binary), mimeType: metadata.mime_type || mediaResponse.headers.get("content-type") || "application/octet-stream" };
+}
+
+async function sendWhatsAppText(env, credentials, phone, text) {
+  const endpoint = `https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/messages`;
+  const metaResponse = await fetch(endpoint, {
+    method: "POST",
+    headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ messaging_product: "whatsapp", recipient_type: "individual", to: phone, type: "text", text: { body: text } }),
+  });
+  const meta = await metaResponse.json().catch(() => ({}));
+  const messageId = meta.messages?.[0]?.id;
+  if (metaResponse.ok && messageId) {
+    await ensureWhatsAppInboxTable(env);
+    await env.DB.prepare(`INSERT OR IGNORE INTO whatsapp_inbox_messages
+      (message_id, phone, direction, message_type, message_text, created_at, raw_json)
+      VALUES (?, ?, 'outbound', 'text', ?, ?, ?)`)
+      .bind(messageId, phone, text, new Date().toISOString(), JSON.stringify(meta)).run();
+  }
+  return { ok: metaResponse.ok, messageId, error: meta.error?.message };
+}
+
+const BOT_SYSTEM_PROMPT = `Eres el asistente de WhatsApp de BPGO, un proveedor de internet/TV cable en Chile. Respondes en español, tono cercano y breve (2-4 frases, sin inventar información que no tengas).
+
+Reglas duras, nunca las rompas:
+- NUNCA confirmes ni marques un pago como "recibido" o "verificado" en el sistema. Si el cliente dice que pagó o envía un comprobante, solo agradece la recepción y explica que el equipo lo va a revisar (usa la acción "payment_ack").
+- Si el cliente pide agendar/reagendar una visita técnica, usa la acción "visit_request" con la fecha/motivo que indique (o null si no la dio); nunca confirmes un horario exacto, solo di que quedó registrada la solicitud.
+- Si el cliente pide hablar con una persona, insulta, hace un reclamo grave, o preguntas algo que no sabes con certeza (fuera de las FAQs dadas), usa la acción "escalate" y no inventes una respuesta.
+- Para todo lo demás (preguntas frecuentes, saludos, consultas generales que sí puedes responder con las FAQs dadas), usa la acción "reply".
+
+Debes responder SIEMPRE llamando a la herramienta bpgo_bot_action con una única acción.`;
+
+async function callClaudeResponder(env, context, inboundMessage, media) {
+  if (!env.ANTHROPIC_API_KEY) return { action: "escalate", reason: "bot_not_configured" };
+  const customerLine = context.customer?.name
+    ? `Cliente identificado: ${context.customer.name}.`
+    : "No se pudo identificar al cliente en el sistema por su número.";
+  const historyLines = context.history
+    .map((item) => `${item.direction === "inbound" ? "Cliente" : "BPGO"}: ${item.message_text || `[${item.message_type}]`}`)
+    .join("\n");
+  const userContent = [];
+  if (media) {
+    userContent.push(media.mimeType === "application/pdf"
+      ? { type: "document", source: { type: "base64", media_type: media.mimeType, data: media.base64 } }
+      : { type: "image", source: { type: "base64", media_type: media.mimeType, data: media.base64 } });
+  }
+  userContent.push({
+    type: "text",
+    text: `FAQs de BPGO:\n${context.faq}\n\n${customerLine}\n\nÚltimos mensajes de la conversación:\n${historyLines || "(sin historial previo)"}\n\nNuevo mensaje del cliente (${inboundMessage.type}): ${inboundMessage.text || "(sin texto, ver adjunto)"}`,
+  });
+
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: String(env.ANTHROPIC_MODEL || "claude-sonnet-5"),
+      max_tokens: 600,
+      system: BOT_SYSTEM_PROMPT,
+      messages: [{ role: "user", content: userContent }],
+      tools: [{
+        name: "bpgo_bot_action",
+        description: "Acción que el bot de WhatsApp debe ejecutar en respuesta al mensaje del cliente.",
+        input_schema: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["reply", "payment_ack", "visit_request", "escalate"] },
+            text: { type: "string", description: "Texto a enviar al cliente por WhatsApp (no aplica para escalate)." },
+            preferred_date: { type: "string", description: "Fecha u horario preferido que dio el cliente para la visita, si aplica." },
+            reason: { type: "string", description: "Motivo de la visita o de la escalación." },
+          },
+          required: ["action"],
+        },
+      }],
+      tool_choice: { type: "tool", name: "bpgo_bot_action" },
+    }),
+  }).catch(() => null);
+  if (!response || !response.ok) return { action: "escalate", reason: "bot_api_error" };
+  const payload = await response.json().catch(() => null);
+  const toolUse = payload?.content?.find((block) => block.type === "tool_use");
+  if (!toolUse?.input?.action) return { action: "escalate", reason: "bot_parse_error" };
+  return toolUse.input;
+}
+
+async function executeBotAction(env, credentials, phone, action, message) {
+  if (action.action === "reply" && action.text) {
+    await sendWhatsAppText(env, credentials, phone, action.text);
+    return;
+  }
+  if (action.action === "payment_ack") {
+    await sendWhatsAppText(env, credentials, phone, action.text || "Recibimos tu comprobante, en breve lo revisamos. ¡Gracias! 🙏");
+    return;
+  }
+  if (action.action === "visit_request") {
+    await ensureWhatsAppBotTables(env);
+    const customer = await findCustomerForWhatsApp(env, phone, message.customerName);
+    await env.DB.prepare(`INSERT INTO whatsapp_visit_requests (phone, customer_id, customer_name, preferred_date, reason, status, created_at)
+      VALUES (?, ?, ?, ?, ?, 'pending', datetime('now'))`)
+      .bind(phone, customer.id, customer.name, action.preferred_date || null, action.reason || null).run();
+    await sendWhatsAppText(env, credentials, phone, action.text || "Registramos tu solicitud de visita técnica, un agente te confirmará el horario. 🙌");
+    return;
+  }
+  if (action.action === "escalate") {
+    await setBotSessionMode(env, phone, "human", action.reason || "bot_escalated");
+    if (action.text) await sendWhatsAppText(env, credentials, phone, action.text);
+    return;
+  }
+}
+
+async function runBotForInboundMessages(env, changes) {
+  if (String(env.WHATSAPP_BOT_ENABLED || "").toLowerCase() !== "true") return;
+  const credentials = await getWhatsAppCredentials(env);
+  if (!credentials.accessToken || !credentials.phoneNumberId) return;
+  for (const change of changes) {
+    const value = change.value || {};
+    const name = value.contacts?.[0]?.profile?.name || null;
+    for (const message of (Array.isArray(value.messages) ? value.messages : [])) {
+      const phone = message.from;
+      try {
+        const mode = await getBotSessionMode(env, phone);
+        if (mode === "human") continue;
+        const text = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || null;
+        const mediaId = message.image?.id || message.document?.id || null;
+        let media = null;
+        if (mediaId) media = await fetchWhatsAppMediaBase64(credentials, mediaId).catch(() => null);
+        const context = await buildBotContext(env, phone, name);
+        const action = await callClaudeResponder(env, context, { type: message.type || "unknown", text }, media);
+        await executeBotAction(env, credentials, phone, action, { customerName: name });
+      } catch {
+        await setBotSessionMode(env, phone, "human", "bot_exception").catch(() => null);
+      }
+    }
+  }
+}
+
 async function createAutomationCase(env, message) {
   await ensureWhatsAppAutomationTable(env);
   const classification = classifyInboundMessage(message);
@@ -379,7 +591,7 @@ async function readSession(request, secret) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     if (url.pathname === "/api/auth" && request.method === "POST") {
@@ -541,6 +753,8 @@ export default {
         }).catch(() => null);
       }
       const messagesSaved = await saveInboundWhatsAppMessages(env, changes).catch(() => 0);
+      const botTask = runBotForInboundMessages(env, changes).catch(() => null);
+      if (ctx?.waitUntil) ctx.waitUntil(botTask); else await botTask;
       return Response.json({ ok: true, received: statuses.length, messagesSaved });
     }
 
@@ -809,6 +1023,73 @@ export default {
 
     if (url.pathname === "/api/whatsapp/register" && request.method === "POST") {
       return Response.json({ ok: false, error: "Los números con WhatsApp Business deben completar el registro dentro del flujo oficial de Meta." }, { status: 409 });
+    }
+
+    if (url.pathname === "/api/whatsapp/bot-sessions" && request.method === "GET") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      await ensureWhatsAppBotTables(env);
+      const rows = await env.DB.prepare(`SELECT phone, mode, escalation_reason, updated_at FROM whatsapp_bot_sessions
+        WHERE mode = 'human' ORDER BY updated_at DESC LIMIT 200`).all();
+      return Response.json({ ok: true, sessions: rows.results || [] });
+    }
+
+    if (url.pathname === "/api/whatsapp/bot-sessions" && request.method === "PATCH") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      const body = await request.json().catch(() => ({}));
+      const phone = normalizeWhatsAppPhone(body.phone);
+      const mode = String(body.mode || "").trim();
+      if (!phone || !["bot", "human"].includes(mode)) return Response.json({ ok: false, error: "Teléfono o modo inválido." }, { status: 400 });
+      await setBotSessionMode(env, phone, mode, mode === "human" ? "manual" : null);
+      return Response.json({ ok: true, phone, mode });
+    }
+
+    if (url.pathname === "/api/whatsapp/visit-requests" && request.method === "GET") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      await ensureWhatsAppBotTables(env);
+      const rows = await env.DB.prepare(`SELECT id, phone, customer_id, customer_name, preferred_date, reason, status, created_at
+        FROM whatsapp_visit_requests ORDER BY created_at DESC LIMIT 200`).all();
+      return Response.json({ ok: true, requests: rows.results || [] });
+    }
+
+    if (url.pathname === "/api/whatsapp/visit-requests" && request.method === "PATCH") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      const body = await request.json().catch(() => ({}));
+      const id = Number(body.id);
+      const status = String(body.status || "").trim();
+      if (!id || !["pending", "scheduled", "dismissed"].includes(status)) return Response.json({ ok: false, error: "Solicitud o estado inválido." }, { status: 400 });
+      await ensureWhatsAppBotTables(env);
+      const result = await env.DB.prepare("UPDATE whatsapp_visit_requests SET status = ? WHERE id = ?").bind(status, id).run();
+      if (!result.meta?.changes) return Response.json({ ok: false, error: "Solicitud no encontrada." }, { status: 404 });
+      return Response.json({ ok: true, id, status });
+    }
+
+    if (url.pathname === "/api/whatsapp/bot-faq" && request.method === "GET") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      await ensureWhatsAppBotTables(env);
+      const rows = await env.DB.prepare("SELECT key, value, updated_at FROM bpgo_bot_faq ORDER BY key ASC").all();
+      return Response.json({ ok: true, items: rows.results || [], defaultText: DEFAULT_BOT_FAQ });
+    }
+
+    if (url.pathname === "/api/whatsapp/bot-faq" && request.method === "PUT") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      const body = await request.json().catch(() => ({}));
+      const key = String(body.key || "").trim().slice(0, 100);
+      const value = String(body.value || "").trim().slice(0, 4000);
+      if (!key) return Response.json({ ok: false, error: "Falta la clave del FAQ." }, { status: 400 });
+      await ensureWhatsAppBotTables(env);
+      if (!value) {
+        await env.DB.prepare("DELETE FROM bpgo_bot_faq WHERE key = ?").bind(key).run();
+        return Response.json({ ok: true, deleted: true, key });
+      }
+      await env.DB.prepare(`INSERT INTO bpgo_bot_faq (key, value, updated_at) VALUES (?, ?, datetime('now'))
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`).bind(key, value).run();
+      return Response.json({ ok: true, key, value });
     }
 
     if (url.pathname === "/api/whatsapp/status" && request.method === "GET") {

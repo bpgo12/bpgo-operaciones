@@ -259,6 +259,106 @@
     }
   }
 
+  async function loadEscalations(panel) {
+    var list = panel.querySelector("[data-escalation-list]");
+    list.innerHTML = '<div class="whatsapp-test-status pending">Buscando conversaciones escaladas…</div>';
+    try {
+      var response = await fetch("/api/whatsapp/bot-sessions", { cache: "no-store" });
+      var data = await response.json().catch(function () { return {}; });
+      if (!response.ok) throw new Error(data.error || "No se pudo abrir la cola de escalados.");
+      var sessions = data.sessions || [];
+      if (!sessions.length) {
+        list.innerHTML = '<div class="whatsapp-inbox-empty">No hay conversaciones esperando a un agente. El bot está respondiendo normalmente.</div>';
+        return;
+      }
+      list.innerHTML = sessions.map(function (item) {
+        return '<article class="automation-case general"><header><div><strong>+' + escapeHtml(item.phone) + '</strong><small>' + escapeHtml(item.escalation_reason || "Motivo no especificado") + ' · ' + escapeHtml(new Date(item.updated_at).toLocaleString("es-CL")) + '</small></div></header><footer><button type="button" class="btn secondary small" data-reply-phone="' + escapeHtml(item.phone) + '">Responder</button><button type="button" class="btn small" data-reactivate-bot="' + escapeHtml(item.phone) + '">Reactivar bot</button></footer></article>';
+      }).join("");
+    } catch (error) {
+      list.innerHTML = '<div class="whatsapp-test-status error">' + escapeHtml(error.message || "Error al cargar escalados") + '</div>';
+    }
+  }
+
+  async function reactivateBot(panel, phone) {
+    var response = await fetch("/api/whatsapp/bot-sessions", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ phone: phone, mode: "bot" }) });
+    var data = await response.json().catch(function () { return {}; });
+    if (!response.ok) window.alert(data.error || "No se pudo reactivar el bot.");
+    await loadEscalations(panel);
+  }
+
+  function visitStatusLabel(value) {
+    return ({ pending: "Pendiente", scheduled: "Agendada", dismissed: "Descartada" })[value] || value;
+  }
+
+  async function loadVisitRequests(panel) {
+    var list = panel.querySelector("[data-visit-requests-list]");
+    list.innerHTML = '<div class="whatsapp-test-status pending">Buscando solicitudes de visita…</div>';
+    try {
+      var response = await fetch("/api/whatsapp/visit-requests", { cache: "no-store" });
+      var data = await response.json().catch(function () { return {}; });
+      if (!response.ok) throw new Error(data.error || "No se pudo abrir las solicitudes de visita.");
+      var pending = (data.requests || []).filter(function (item) { return item.status !== "dismissed"; });
+      if (!pending.length) {
+        list.innerHTML = '<div class="whatsapp-inbox-empty">Todavía no hay solicitudes de visita generadas por el bot.</div>';
+        return;
+      }
+      list.innerHTML = pending.map(function (item) {
+        var identified = item.customer_id ? escapeHtml(item.customer_name || item.customer_id) : "Cliente por identificar";
+        var extra = [];
+        if (item.preferred_date) extra.push("Prefiere: " + escapeHtml(item.preferred_date));
+        if (item.reason) extra.push(escapeHtml(item.reason));
+        return '<article class="automation-case technical_fault"><header><div><strong>' + identified + '</strong><small>+' + escapeHtml(item.phone) + ' · ' + escapeHtml(new Date(item.created_at).toLocaleString("es-CL")) + '</small></div><span class="automation-state">' + escapeHtml(visitStatusLabel(item.status)) + '</span></header>' + (extra.length ? '<p class="automation-details">' + extra.join(" · ") + '</p>' : '') + '<footer><button type="button" class="btn secondary small" data-visit-action="dismissed" data-visit-id="' + item.id + '">Descartar</button><button type="button" class="btn small" data-visit-action="scheduled" data-visit-id="' + item.id + '">Marcar agendada</button></footer></article>';
+      }).join("");
+    } catch (error) {
+      list.innerHTML = '<div class="whatsapp-test-status error">' + escapeHtml(error.message || "Error al cargar solicitudes") + '</div>';
+    }
+  }
+
+  async function updateVisitRequest(panel, id, statusValue) {
+    var response = await fetch("/api/whatsapp/visit-requests", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: Number(id), status: statusValue }) });
+    var data = await response.json().catch(function () { return {}; });
+    if (!response.ok) window.alert(data.error || "No se pudo actualizar la solicitud.");
+    await loadVisitRequests(panel);
+  }
+
+  async function loadFaq(panel) {
+    var list = panel.querySelector("[data-faq-list]");
+    list.innerHTML = '<div class="whatsapp-test-status pending">Cargando FAQ del bot…</div>';
+    try {
+      var response = await fetch("/api/whatsapp/bot-faq", { cache: "no-store" });
+      var data = await response.json().catch(function () { return {}; });
+      if (!response.ok) throw new Error(data.error || "No se pudo abrir la FAQ del bot.");
+      var items = data.items || [];
+      var defaultNote = !items.length ? '<p class="automation-details">Sin FAQ personalizada, el bot está usando este texto por defecto:<br>' + escapeHtml(data.defaultText || "").replace(/\n/g, "<br>") + '</p>' : "";
+      list.innerHTML = defaultNote + items.map(function (item) {
+        return '<article class="automation-case general"><header><div><strong>' + escapeHtml(item.key) + '</strong></div></header><p>' + escapeHtml(item.value) + '</p><footer><button type="button" class="btn secondary small" data-delete-faq="' + escapeHtml(item.key) + '">Eliminar</button></footer></article>';
+      }).join("");
+    } catch (error) {
+      list.innerHTML = '<div class="whatsapp-test-status error">' + escapeHtml(error.message || "Error al cargar la FAQ") + '</div>';
+    }
+  }
+
+  async function saveFaq(panel) {
+    var keyInput = panel.querySelector("[data-faq-key]");
+    var valueInput = panel.querySelector("[data-faq-value]");
+    var key = String(keyInput.value || "").trim();
+    var value = String(valueInput.value || "").trim();
+    if (!key || !value) { window.alert("Completa la clave y el contenido del FAQ."); return; }
+    var response = await fetch("/api/whatsapp/bot-faq", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ key: key, value: value }) });
+    var data = await response.json().catch(function () { return {}; });
+    if (!response.ok) { window.alert(data.error || "No se pudo guardar el FAQ."); return; }
+    keyInput.value = "";
+    valueInput.value = "";
+    await loadFaq(panel);
+  }
+
+  async function deleteFaq(panel, key) {
+    var response = await fetch("/api/whatsapp/bot-faq", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ key: key, value: "" }) });
+    var data = await response.json().catch(function () { return {}; });
+    if (!response.ok) window.alert(data.error || "No se pudo eliminar el FAQ.");
+    await loadFaq(panel);
+  }
+
   function markup() {
     return '<section class="whatsapp-test-panel" data-whatsapp-test-panel>' +
       '<div><p class="eyebrow">Validación segura</p><h3>Prueba controlada</h3>' +
@@ -272,7 +372,11 @@
       '<button type="button" class="btn secondary" data-number-change-button>Preparar alerta de cambio de número</button>' +
       '<div class="whatsapp-test-status" data-number-change-status hidden></div></div>' +
       '<div class="whatsapp-inbox" data-whatsapp-inbox><header><div><p class="eyebrow">Atención al cliente</p><h3>Bandeja de mensajes</h3><p>Conversaciones recibidas en el número oficial BPGO.</p></div><button type="button" class="btn secondary" data-refresh-inbox>Actualizar</button></header><div data-inbox-list><div class="whatsapp-inbox-empty">Presiona Actualizar para revisar los mensajes.</div></div></div>' +
-      '<div class="whatsapp-automation" data-whatsapp-automation><header><div><p class="eyebrow">Preparación del bot</p><h3>Casos detectados</h3><p>Pagos y fallas sugeridos automáticamente. Ningún caso modifica Cobranza ni crea órdenes sin revisión.</p></div><button type="button" class="btn secondary" data-refresh-automation>Actualizar casos</button></header><div class="automation-list" data-automation-list><div class="whatsapp-inbox-empty">Presiona Actualizar casos para revisar las sugerencias.</div></div></div></section>';
+      '<div class="whatsapp-automation" data-whatsapp-automation><header><div><p class="eyebrow">Preparación del bot</p><h3>Casos detectados</h3><p>Pagos y fallas sugeridos automáticamente. Ningún caso modifica Cobranza ni crea órdenes sin revisión.</p></div><button type="button" class="btn secondary" data-refresh-automation>Actualizar casos</button></header><div class="automation-list" data-automation-list><div class="whatsapp-inbox-empty">Presiona Actualizar casos para revisar las sugerencias.</div></div></div>' +
+      '<div class="whatsapp-automation" data-whatsapp-escalations><header><div><p class="eyebrow">Bot autónomo</p><h3>Conversaciones escaladas</h3><p>El bot dejó de responder estos números porque pidieron un humano, no entendió o falló. Reactívalo cuando lo resuelvas.</p></div><button type="button" class="btn secondary" data-refresh-escalations>Actualizar</button></header><div class="automation-list" data-escalation-list><div class="whatsapp-inbox-empty">Presiona Actualizar para revisar.</div></div></div>' +
+      '<div class="whatsapp-automation" data-whatsapp-visit-requests><header><div><p class="eyebrow">Bot autónomo</p><h3>Solicitudes de visita técnica</h3><p>El bot solo registra la solicitud; un agente debe crear la visita real en Agenda.</p></div><button type="button" class="btn secondary" data-refresh-visit-requests>Actualizar</button></header><div class="automation-list" data-visit-requests-list><div class="whatsapp-inbox-empty">Presiona Actualizar para revisar.</div></div></div>' +
+      '<div class="whatsapp-automation" data-whatsapp-faq><header><div><p class="eyebrow">Bot autónomo</p><h3>FAQ del bot</h3><p>Información que el bot usa para responder preguntas de clientes (horarios, planes, direcciones, políticas).</p></div><button type="button" class="btn secondary" data-refresh-faq>Actualizar</button></header><div class="automation-list" data-faq-list><div class="whatsapp-inbox-empty">Presiona Actualizar para revisar.</div></div>' +
+      '<div class="whatsapp-test-controls"><label><span>Clave (ej: horario_atencion)</span><input type="text" data-faq-key placeholder="clave_corta"></label><label><span>Contenido</span><input type="text" data-faq-value placeholder="Texto que el bot debe saber"></label><button type="button" class="btn" data-save-faq>Guardar</button></div></div></section>';
   }
 
   function install() {
@@ -311,6 +415,41 @@
     var replyButton = event.target.closest("[data-reply-phone]");
     if (replyButton) {
       replyTo(replyButton.closest("[data-whatsapp-test-panel]"), replyButton.dataset.replyPhone);
+      return;
+    }
+    var refreshEscalations = event.target.closest("[data-refresh-escalations]");
+    if (refreshEscalations) {
+      loadEscalations(refreshEscalations.closest("[data-whatsapp-test-panel]"));
+      return;
+    }
+    var reactivateButton = event.target.closest("[data-reactivate-bot]");
+    if (reactivateButton) {
+      reactivateBot(reactivateButton.closest("[data-whatsapp-test-panel]"), reactivateButton.dataset.reactivateBot);
+      return;
+    }
+    var refreshVisitRequests = event.target.closest("[data-refresh-visit-requests]");
+    if (refreshVisitRequests) {
+      loadVisitRequests(refreshVisitRequests.closest("[data-whatsapp-test-panel]"));
+      return;
+    }
+    var visitAction = event.target.closest("[data-visit-action]");
+    if (visitAction) {
+      updateVisitRequest(visitAction.closest("[data-whatsapp-test-panel]"), visitAction.dataset.visitId, visitAction.dataset.visitAction);
+      return;
+    }
+    var refreshFaq = event.target.closest("[data-refresh-faq]");
+    if (refreshFaq) {
+      loadFaq(refreshFaq.closest("[data-whatsapp-test-panel]"));
+      return;
+    }
+    var saveFaqButton = event.target.closest("[data-save-faq]");
+    if (saveFaqButton) {
+      saveFaq(saveFaqButton.closest("[data-whatsapp-test-panel]"));
+      return;
+    }
+    var deleteFaqButton = event.target.closest("[data-delete-faq]");
+    if (deleteFaqButton) {
+      deleteFaq(deleteFaqButton.closest("[data-whatsapp-test-panel]"), deleteFaqButton.dataset.deleteFaq);
       return;
     }
     var campaignButton = event.target.closest("[data-number-change-button]");
