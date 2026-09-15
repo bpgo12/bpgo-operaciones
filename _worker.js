@@ -423,6 +423,38 @@ async function sendWhatsAppAudio(env, credentials, phone, audioBytes) {
   return { ok: metaResponse.ok, messageId };
 }
 
+async function notifyStaff(env, credentials, role, caseType, customerName, customerPhone, summary) {
+  const staffPhone = role === "carlos" ? env.STAFF_PHONE_CARLOS : role === "eduardo" ? env.STAFF_PHONE_EDUARDO : null;
+  const normalized = normalizeWhatsAppPhone(staffPhone);
+  if (!normalized || !credentials.accessToken || !credentials.phoneNumberId) return;
+  const endpoint = `https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/messages`;
+  await fetch(endpoint, {
+    method: "POST",
+    headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: normalized,
+      type: "template",
+      template: {
+        name: "aviso_nuevo_caso",
+        language: { code: "es_CL" },
+        components: [{
+          type: "body",
+          parameters: [
+            { type: "text", text: caseType },
+            { type: "text", text: customerName || "Sin identificar" },
+            { type: "text", text: customerPhone || "" },
+            { type: "text", text: (summary || "Sin detalle").slice(0, 300) },
+          ],
+        }],
+      },
+    }),
+  }).catch(() => null);
+  // No revisamos la respuesta a propósito: si la plantilla aún no está aprobada o falla el envío,
+  // nunca debe interrumpir la respuesta al cliente ni la creación del caso.
+}
+
 async function sendBotReply(env, credentials, phone, text, preferAudio) {
   if (preferAudio) {
     const audioBytes = await synthesizeSpeech(env, text).catch(() => null);
@@ -593,6 +625,7 @@ async function executeBotAction(env, credentials, phone, action, message) {
         await env.DB.prepare("UPDATE whatsapp_automation_cases SET reported_name = ? WHERE id = ?").bind(known, caseRow.id).run();
       }
       await sendBotReply(env, credentials, phone, action.text || "Recibimos tu comprobante, en breve lo revisamos. ¡Gracias! 🙏", preferAudio);
+      await notifyStaff(env, credentials, "carlos", "Comprobante de pago", known, phone, "Cliente envió comprobante de pago para revisión.");
       return;
     }
     if (caseRow) {
@@ -616,6 +649,7 @@ async function executeBotAction(env, credentials, phone, action, message) {
         VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`)
         .bind(phone, customer.id, customer.name, known, action.preferred_date || null, action.reason || null).run();
       await sendBotReply(env, credentials, phone, action.text || "Registramos tu solicitud de visita técnica, un agente te confirmará el horario. 🙌", preferAudio);
+      await notifyStaff(env, credentials, "eduardo", "Incidencia técnica", known, phone, action.reason || "Cliente reportó una falla técnica.");
       return;
     }
     await env.DB.prepare(`INSERT INTO whatsapp_pending_visits (phone, reason, preferred_date, created_at)
@@ -637,6 +671,7 @@ async function executeBotAction(env, credentials, phone, action, message) {
         VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`)
         .bind(phone, customer.id, customer.name, known, days, action.reason || null).run();
       await sendBotReply(env, credentials, phone, "Registramos tu solicitud de revisión por los días sin servicio. Un agente calculará el ajuste correspondiente y te confirmará. 🙏", preferAudio);
+      await notifyStaff(env, credentials, "carlos", "Descuento por corte", known, phone, days ? `${days} día(s) sin servicio. ${action.reason || ""}` : (action.reason || "Cliente pide revisión por corte de servicio."));
       return;
     }
     await env.DB.prepare(`INSERT INTO whatsapp_pending_billing (phone, days_without_service, reason, created_at)
@@ -649,6 +684,8 @@ async function executeBotAction(env, credentials, phone, action, message) {
   if (action.action === "escalate") {
     await setBotSessionMode(env, phone, "human", action.reason || "bot_escalated");
     await sendBotReply(env, credentials, phone, action.text || "Ya te comunico con un agente de BPGO, en breve te responde por acá. 🙌", preferAudio);
+    const escalatedName = await getKnownAccountName(env, phone);
+    await notifyStaff(env, credentials, "carlos", "Conversación escalada", escalatedName, phone, action.reason || "El bot no pudo resolver la consulta.");
     return;
   }
   // Acción desconocida o el modelo no devolvió texto en "reply": nunca dejar al cliente sin respuesta.
@@ -699,6 +736,7 @@ async function runBotForInboundMessages(env, changes) {
             .bind(phone, customer.id, customer.name, reportedName, pendingVisit.preferred_date, pendingVisit.reason).run();
           await env.DB.prepare("DELETE FROM whatsapp_pending_visits WHERE phone = ?").bind(phone).run();
           await sendBotReply(env, credentials, phone, `Gracias, registramos la solicitud a nombre de ${reportedName}. Un agente te confirmará el horario. 🙌`, preferAudio);
+          await notifyStaff(env, credentials, "eduardo", "Incidencia técnica", reportedName, phone, pendingVisit.reason || "Cliente reportó una falla técnica.");
           continue;
         }
         const pendingPayment = await env.DB.prepare("SELECT case_id FROM whatsapp_pending_payments WHERE phone = ?").bind(phone).first();
@@ -713,6 +751,7 @@ async function runBotForInboundMessages(env, changes) {
           }
           await env.DB.prepare("DELETE FROM whatsapp_pending_payments WHERE phone = ?").bind(phone).run();
           await sendBotReply(env, credentials, phone, `Gracias, dejamos tu comprobante asociado a nombre de ${reportedName}. El equipo lo confirmará pronto. 🙏`, preferAudio);
+          await notifyStaff(env, credentials, "carlos", "Comprobante de pago", reportedName, phone, "Cliente envió comprobante de pago para revisión.");
           continue;
         }
         const pendingBilling = await env.DB.prepare("SELECT days_without_service, reason FROM whatsapp_pending_billing WHERE phone = ?").bind(phone).first();
@@ -726,6 +765,7 @@ async function runBotForInboundMessages(env, changes) {
             .bind(phone, customer.id, customer.name, reportedName, pendingBilling.days_without_service, pendingBilling.reason).run();
           await env.DB.prepare("DELETE FROM whatsapp_pending_billing WHERE phone = ?").bind(phone).run();
           await sendBotReply(env, credentials, phone, `Gracias, registramos la solicitud a nombre de ${reportedName}. Un agente calculará el ajuste y te confirmará. 🙏`, preferAudio);
+          await notifyStaff(env, credentials, "carlos", "Descuento por corte", reportedName, phone, pendingBilling.days_without_service ? `${pendingBilling.days_without_service} día(s) sin servicio. ${pendingBilling.reason || ""}` : (pendingBilling.reason || "Cliente pide revisión por corte de servicio."));
           continue;
         }
         const mediaId = message.image?.id || message.document?.id || null;
