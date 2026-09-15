@@ -418,7 +418,6 @@ async function callBotResponder(env, context, inboundMessage, media) {
               text: { type: "string", description: "Texto a enviar al cliente por WhatsApp (no aplica para escalate)." },
               preferred_date: { type: "string", description: "Fecha u horario preferido que dio el cliente para la visita, si aplica." },
               reason: { type: "string", description: "Motivo de la visita/incidencia o de la escalación." },
-              account_name: { type: "string", description: "Nombre a cuyo nombre está contratado el servicio, si el cliente lo indicó (puede diferir de quien escribe)." },
             },
             required: ["action"],
           },
@@ -436,13 +435,6 @@ async function callBotResponder(env, context, inboundMessage, media) {
   return parsed;
 }
 
-async function getKnownAccountName(env, phone) {
-  await ensureWhatsAppBotTables(env);
-  const row = await env.DB.prepare(`SELECT reported_name FROM whatsapp_visit_requests
-    WHERE phone = ? AND reported_name IS NOT NULL ORDER BY created_at DESC LIMIT 1`).bind(phone).first();
-  return row?.reported_name || null;
-}
-
 async function executeBotAction(env, credentials, phone, action, message) {
   if (action.action === "reply" && action.text) {
     await sendWhatsAppText(env, credentials, phone, action.text);
@@ -453,24 +445,15 @@ async function executeBotAction(env, credentials, phone, action, message) {
     return;
   }
   if (action.action === "visit_request") {
+    // El nombre del titular SIEMPRE se pide y se captura por código en el próximo mensaje
+    // (ver whatsapp_pending_visits en runBotForInboundMessages) -- nunca se confía en que el
+    // modelo lo haya preguntado o lo recuerde, para que esto sea 100% predecible.
     await ensureWhatsAppBotTables(env);
-    const customer = await findCustomerForWhatsApp(env, phone, message.customerName);
-    const knownName = action.account_name || await getKnownAccountName(env, phone);
-    if (!knownName) {
-      // No sabemos a nombre de quién está el servicio: no registrar todavía, preguntar y
-      // recordar la solicitud pendiente para completarla con la próxima respuesta del cliente
-      // (decisión determinística en código, no depende de que el modelo lo recuerde).
-      await env.DB.prepare(`INSERT INTO whatsapp_pending_visits (phone, reason, preferred_date, created_at)
-        VALUES (?, ?, ?, datetime('now'))
-        ON CONFLICT(phone) DO UPDATE SET reason = excluded.reason, preferred_date = excluded.preferred_date, created_at = datetime('now')`)
-        .bind(phone, action.reason || null, action.preferred_date || null).run();
-      await sendWhatsAppText(env, credentials, phone, "Para registrar la visita, ¿a nombre de quién está contratado el servicio?");
-      return;
-    }
-    await env.DB.prepare(`INSERT INTO whatsapp_visit_requests (phone, customer_id, customer_name, reported_name, preferred_date, reason, status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`)
-      .bind(phone, customer.id, customer.name, knownName, action.preferred_date || null, action.reason || null).run();
-    await sendWhatsAppText(env, credentials, phone, action.text || "Registramos tu solicitud de visita técnica, un agente te confirmará el horario. 🙌");
+    await env.DB.prepare(`INSERT INTO whatsapp_pending_visits (phone, reason, preferred_date, created_at)
+      VALUES (?, ?, ?, datetime('now'))
+      ON CONFLICT(phone) DO UPDATE SET reason = excluded.reason, preferred_date = excluded.preferred_date, created_at = datetime('now')`)
+      .bind(phone, action.reason || null, action.preferred_date || null).run();
+    await sendWhatsAppText(env, credentials, phone, "Para registrar la visita, ¿a nombre de quién está contratado el servicio?");
     return;
   }
   if (action.action === "escalate") {
