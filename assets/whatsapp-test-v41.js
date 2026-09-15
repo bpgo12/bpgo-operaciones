@@ -332,6 +332,42 @@
     await loadVisitRequests(panel);
   }
 
+  function billingStatusLabel(value) {
+    return ({ pending: "Pendiente", resolved: "Resuelta", dismissed: "Descartada" })[value] || value;
+  }
+
+  async function loadBillingRequests(panel) {
+    var list = panel.querySelector("[data-billing-requests-list]");
+    list.innerHTML = '<div class="whatsapp-test-status pending">Buscando solicitudes de descuento…</div>';
+    try {
+      var response = await fetch("/api/whatsapp/billing-requests", { cache: "no-store" });
+      var data = await response.json().catch(function () { return {}; });
+      if (!response.ok) throw new Error(data.error || "No se pudo abrir las solicitudes de descuento.");
+      var pending = (data.requests || []).filter(function (item) { return item.status !== "dismissed"; });
+      if (!pending.length) {
+        list.innerHTML = '<div class="whatsapp-inbox-empty">Todavía no hay solicitudes de descuento por corte generadas por el bot.</div>';
+        return;
+      }
+      list.innerHTML = pending.map(function (item) {
+        var identified = escapeHtml(item.reported_name || item.customer_name || item.customer_id || "Titular sin identificar");
+        var extra = [];
+        if (item.reported_name && item.customer_name && item.reported_name !== item.customer_name) extra.push("En sistema: " + escapeHtml(item.customer_name));
+        if (item.days_without_service) extra.push(item.days_without_service + " día(s) sin servicio");
+        if (item.reason) extra.push(escapeHtml(item.reason));
+        return '<article class="automation-case technical_fault"><header><div><strong>' + identified + '</strong><small>+' + escapeHtml(item.phone) + ' · ' + escapeHtml(new Date(item.created_at).toLocaleString("es-CL")) + '</small></div><span class="automation-state">' + escapeHtml(billingStatusLabel(item.status)) + '</span></header>' + (extra.length ? '<p class="automation-details">' + extra.join(" · ") + '</p>' : '') + '<footer><button type="button" class="btn secondary small" data-billing-action="dismissed" data-billing-id="' + item.id + '">Descartar</button><button type="button" class="btn small" data-billing-action="resolved" data-billing-id="' + item.id + '">Marcar resuelta</button></footer></article>';
+      }).join("");
+    } catch (error) {
+      list.innerHTML = '<div class="whatsapp-test-status error">' + escapeHtml(error.message || "Error al cargar solicitudes") + '</div>';
+    }
+  }
+
+  async function updateBillingRequest(panel, id, statusValue) {
+    var response = await fetch("/api/whatsapp/billing-requests", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: Number(id), status: statusValue }) });
+    var data = await response.json().catch(function () { return {}; });
+    if (!response.ok) window.alert(data.error || "No se pudo actualizar la solicitud.");
+    await loadBillingRequests(panel);
+  }
+
   async function loadFaq(panel) {
     var list = panel.querySelector("[data-faq-list]");
     list.innerHTML = '<div class="whatsapp-test-status pending">Cargando FAQ del bot…</div>';
@@ -386,6 +422,7 @@
       '<div class="whatsapp-automation" data-whatsapp-automation><header><div><p class="eyebrow">Preparación del bot</p><h3>Casos detectados</h3><p>Pagos y fallas sugeridos automáticamente. Ningún caso modifica Cobranza ni crea órdenes sin revisión.</p></div><button type="button" class="btn secondary" data-refresh-automation>Actualizar casos</button></header><div class="automation-list" data-automation-list><div class="whatsapp-inbox-empty">Presiona Actualizar casos para revisar las sugerencias.</div></div></div>' +
       '<div class="whatsapp-automation" data-whatsapp-escalations><header><div><p class="eyebrow">Bot autónomo</p><h3>Conversaciones escaladas</h3><p>El bot dejó de responder estos números porque pidieron un humano, no entendió o falló. Reactívalo cuando lo resuelvas.</p></div><button type="button" class="btn secondary" data-refresh-escalations>Actualizar</button></header><div class="automation-list" data-escalation-list><div class="whatsapp-inbox-empty">Presiona Actualizar para revisar.</div></div></div>' +
       '<div class="whatsapp-automation" data-whatsapp-visit-requests><header><div><p class="eyebrow">Bot autónomo</p><h3>Incidencias y solicitudes de visita</h3><p>El bot solo registra la incidencia con el nombre del titular; un agente debe crear la visita real en Agenda.</p></div><button type="button" class="btn secondary" data-refresh-visit-requests>Actualizar</button></header><div class="automation-list" data-visit-requests-list><div class="whatsapp-inbox-empty">Presiona Actualizar para revisar.</div></div></div>' +
+      '<div class="whatsapp-automation" data-whatsapp-billing-requests><header><div><p class="eyebrow">Bot autónomo</p><h3>Solicitudes de descuento por corte</h3><p>El bot nunca calcula ni menciona un monto: solo junta los días sin servicio y el nombre del titular. Un agente debe calcular el ajuste real.</p></div><button type="button" class="btn secondary" data-refresh-billing-requests>Actualizar</button></header><div class="automation-list" data-billing-requests-list><div class="whatsapp-inbox-empty">Presiona Actualizar para revisar.</div></div></div>' +
       '<div class="whatsapp-automation" data-whatsapp-faq><header><div><p class="eyebrow">Bot autónomo</p><h3>FAQ del bot</h3><p>Información que el bot usa para responder preguntas de clientes (horarios, planes, direcciones, políticas).</p></div><button type="button" class="btn secondary" data-refresh-faq>Actualizar</button></header><div class="automation-list" data-faq-list><div class="whatsapp-inbox-empty">Presiona Actualizar para revisar.</div></div>' +
       '<div class="whatsapp-test-controls"><label><span>Clave (ej: horario_atencion)</span><input type="text" data-faq-key placeholder="clave_corta"></label><label><span>Contenido</span><input type="text" data-faq-value placeholder="Texto que el bot debe saber"></label><button type="button" class="btn" data-save-faq>Guardar</button></div></div></section>';
   }
@@ -450,6 +487,16 @@
     var visitAction = event.target.closest("[data-visit-action]");
     if (visitAction) {
       updateVisitRequest(visitAction.closest("[data-whatsapp-test-panel]"), visitAction.dataset.visitId, visitAction.dataset.visitAction);
+      return;
+    }
+    var refreshBillingRequests = event.target.closest("[data-refresh-billing-requests]");
+    if (refreshBillingRequests) {
+      loadBillingRequests(refreshBillingRequests.closest("[data-whatsapp-test-panel]"));
+      return;
+    }
+    var billingAction = event.target.closest("[data-billing-action]");
+    if (billingAction) {
+      updateBillingRequest(billingAction.closest("[data-whatsapp-test-panel]"), billingAction.dataset.billingId, billingAction.dataset.billingAction);
       return;
     }
     var refreshFaq = event.target.closest("[data-refresh-faq]");
