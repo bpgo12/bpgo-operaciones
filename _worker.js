@@ -299,6 +299,20 @@ async function ensureWhatsAppBotTables(env) {
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_sales_leads (
+    id TEXT PRIMARY KEY,
+    phone TEXT NOT NULL,
+    customer_name TEXT,
+    sector TEXT,
+    plan_group TEXT,
+    latitude REAL,
+    longitude REAL,
+    status TEXT NOT NULL DEFAULT 'awaiting_sector',
+    chosen_plan TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_sales_leads_phone ON whatsapp_sales_leads(phone)").run();
 }
 
 async function getBotSessionMode(env, phone) {
@@ -432,7 +446,7 @@ async function ensureStaffNotificationsLogTable(env) {
   )`).run();
 }
 
-async function notifyStaff(env, credentials, role, caseType, customerName, customerPhone, summary) {
+async function notifyStaff(env, credentials, role, caseType, customerName, customerPhone, summary, options) {
   const staffPhone = role === "carlos" ? env.STAFF_PHONE_CARLOS : role === "eduardo" ? env.STAFF_PHONE_EDUARDO : null;
   const normalized = normalizeWhatsAppPhone(staffPhone);
   await ensureStaffNotificationsLogTable(env).catch(() => null);
@@ -444,6 +458,34 @@ async function notifyStaff(env, credentials, role, caseType, customerName, custo
       .run().catch(() => null);
     return;
   }
+  // Los casos de pago y las solicitudes de factibilidad usan plantillas con botones de respuesta
+  // rápida que cargan el id del caso/lead en el payload, para que el webhook pueda resolverlos en
+  // cuanto Carlos/Eduardo confirmen desde WhatsApp, sin pasos extra ni tocar el panel.
+  const templateName = options?.factibilidadLeadId ? "aviso_factibilidad" : options?.caseId ? "aviso_nuevo_pago" : "aviso_nuevo_caso";
+  const components = [{
+    type: "body",
+    parameters: [
+      { type: "text", text: caseType },
+      { type: "text", text: customerName || "Sin identificar" },
+      { type: "text", text: customerPhone || "" },
+      { type: "text", text: (summary || "Sin detalle").slice(0, 300) },
+    ],
+  }];
+  if (options?.caseId) {
+    components.push({
+      type: "button", sub_type: "quick_reply", index: 0,
+      parameters: [{ type: "payload", payload: `confirm_payment:${options.caseId}` }],
+    });
+  } else if (options?.factibilidadLeadId) {
+    components.push({
+      type: "button", sub_type: "quick_reply", index: 0,
+      parameters: [{ type: "payload", payload: `factibilidad_yes:${options.factibilidadLeadId}` }],
+    });
+    components.push({
+      type: "button", sub_type: "quick_reply", index: 1,
+      parameters: [{ type: "payload", payload: `factibilidad_no:${options.factibilidadLeadId}` }],
+    });
+  }
   const endpoint = `https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/messages`;
   const result = await fetch(endpoint, {
     method: "POST",
@@ -453,19 +495,7 @@ async function notifyStaff(env, credentials, role, caseType, customerName, custo
       recipient_type: "individual",
       to: normalized,
       type: "template",
-      template: {
-        name: "aviso_nuevo_caso",
-        language: { code: "es_CL" },
-        components: [{
-          type: "body",
-          parameters: [
-            { type: "text", text: caseType },
-            { type: "text", text: customerName || "Sin identificar" },
-            { type: "text", text: customerPhone || "" },
-            { type: "text", text: (summary || "Sin detalle").slice(0, 300) },
-          ],
-        }],
-      },
+      template: { name: templateName, language: { code: "es_CL" }, components },
     }),
   }).then(async (response) => ({ status: response.status, ok: response.ok, body: await response.json().catch(() => null) }))
     .catch((error) => ({ status: 0, ok: false, body: { error: String(error && error.message || error) } }));
@@ -509,6 +539,57 @@ async function sendWhatsAppText(env, credentials, phone, text) {
   return { ok: metaResponse.ok, messageId, error: meta.error?.message };
 }
 
+// Catálogo de planes por zona para solicitudes de contratación nueva. El bot NUNCA decide a qué
+// grupo pertenece un sector -- eso lo fija el cliente al escribirlo y Carlos al confirmar
+// factibilidad; el bot solo intenta reconocer nombres de sector ya conocidos (ver matchPlanGroup).
+const PLAN_GROUPS = {
+  cayucupil: {
+    label: "Cayucupil",
+    plans: [
+      { speed: "100mb/s", price: 18000 },
+      { speed: "300mb/s", price: 25000 },
+      { speed: "500mb/s", price: 30000 },
+    ],
+  },
+  otros: {
+    label: "Peleco, Lanalhue, Trangilboro, Llenquehue",
+    plans: [
+      { speed: "30mb/s", price: 18000 },
+      { speed: "50mb/s", price: 25000 },
+    ],
+  },
+};
+const INSTALLATION_COST = 25000;
+
+function matchPlanGroup(sectorText) {
+  const norm = String(sectorText || "").toLowerCase();
+  if (norm.includes("cayucupil")) return "cayucupil";
+  if (["peleco", "lanalhue", "trangilboro", "llenquehue"].some((s) => norm.includes(s))) return "otros";
+  return null;
+}
+
+function formatPlansMessage(groupKey) {
+  const group = PLAN_GROUPS[groupKey];
+  if (!group) return null;
+  const lines = group.plans.map((p) => `• ${p.speed} — $${p.price.toLocaleString("es-CL")}/mes`).join("\n");
+  return `¡Buenas noticias! Sí tenemos factibilidad en tu sector. 🎉\n\nEstos son los planes disponibles:\n${lines}\n\nCosto de instalación (pago único): $${INSTALLATION_COST.toLocaleString("es-CL")}\n\n¿Cuál plan te gustaría contratar?`;
+}
+
+function matchChosenPlan(groupKey, text) {
+  const group = PLAN_GROUPS[groupKey];
+  if (!group) return null;
+  const match = String(text || "").match(/(\d+)/);
+  if (!match) return null;
+  const n = Number(match[1]);
+  return group.plans.find((p) => parseInt(p.speed, 10) === n) || null;
+}
+
+function planConfirmationMessage(plan) {
+  return `¡Excelente decisión! Con el plan ${plan.speed} ($${plan.price.toLocaleString("es-CL")}/mes) puedes realizar todo lo necesario para navegar. 🎉\n\n📌 Al momento de la instalación se debe pagar el costo de instalación 🔧 ($${INSTALLATION_COST.toLocaleString("es-CL")}), más el valor del servicio del mes por adelantado 📆, el cual se calcula de forma proporcional según los días que resten del mes ⏳.\n\nQuedamos atentos a cualquier consulta.\nBP GO 💻⚡`;
+}
+
+const NO_FACTIBILIDAD_MESSAGE = "Lamentablemente por el momento no contamos con factibilidad técnica en tu sector 😔. Dejamos registrada tu solicitud y, apenas ampliemos cobertura en tu zona, te avisaremos de inmediato. ¡Gracias por tu interés en BPGO! 💙";
+
 const BOT_SYSTEM_PROMPT = `Eres el asistente de WhatsApp de BPGO, un proveedor de internet/TV cable en Chile. Respondes en español, tono cercano y breve (2-4 frases, sin inventar información que no tengas).
 
 Reglas duras, nunca las rompas:
@@ -517,6 +598,7 @@ Reglas duras, nunca las rompas:
 - Si el cliente menciona que estuvo sin internet/servicio y pregunta o reclama por el cobro, un descuento, o cuánto debe pagar por esos días: NUNCA calcules ni menciones ningún monto, descuento o total ajustado, bajo ninguna circunstancia, aunque el cliente insista o tú creas saber calcularlo. Eso solo lo decide un humano. En vez de eso, pregúntale con "reply" cuántos días exactos estuvo sin servicio (y desde cuándo, si no lo sabes). Cuando tengas esa cantidad de días, usa la acción "billing_review_request" con "days_without_service" (número) y un resumen en "reason" — nunca en "text" va un monto.
 - Si el cliente reporta una falla técnica (sin internet, lento, intermitente, etc.) y NO pidió una visita todavía, NO uses "visit_request" de inmediato. Primero hace diagnóstico progresivo con la acción "reply", preguntando UNA cosa a la vez (color/estado de la luz del router, si ya reinició el equipo, si afecta a todos los dispositivos o solo uno, hace cuánto empezó). Sigue así hasta que el cliente confirme que afecta a todos los dispositivos, ya respondió 2-3 preguntas y el problema sigue, o pida explícitamente una visita/técnico. En ese momento usa "visit_request" con un resumen del motivo en "reason" (el sistema se encarga por su cuenta de pedir el nombre del titular si hace falta, no necesitas preguntarlo tú). Nunca confirmes un horario exacto, solo di que quedó registrada la solicitud.
 - Si el cliente pide hablar con una persona, insulta, hace un reclamo grave, o preguntas algo que no sabes con certeza (fuera de las FAQs y de los datos de cliente dados), usa la acción "escalate" y no inventes una respuesta.
+- Si el cliente escribe porque quiere CONTRATAR internet por primera vez (no es cliente ya identificado, o pide un nuevo punto/dirección), usa la acción "new_customer_request" y no digas nada más tú: el sistema se encarga de preguntar el sector, pedir la ubicación, revisar factibilidad con el equipo y mostrar los planes, todo por su cuenta.
 - Para todo lo demás (preguntas frecuentes, saludos, consultas generales que sí puedes responder con las FAQs dadas), usa la acción "reply".
 
 Debes responder SIEMPRE llamando a la herramienta bpgo_bot_action con una única acción.`;
@@ -574,7 +656,7 @@ async function callBotResponder(env, context, inboundMessage, media) {
           parameters: {
             type: "object",
             properties: {
-              action: { type: "string", enum: ["reply", "payment_ack", "visit_request", "billing_review_request", "escalate"] },
+              action: { type: "string", enum: ["reply", "payment_ack", "visit_request", "billing_review_request", "escalate", "new_customer_request"] },
               text: { type: "string", description: "Texto a enviar al cliente por WhatsApp (no aplica para escalate). Nunca debe incluir un monto de dinero cuando la acción es billing_review_request." },
               preferred_date: { type: "string", description: "Fecha u horario preferido que dio el cliente para la visita, si aplica." },
               reason: { type: "string", description: "Motivo de la visita/incidencia/revisión de cobro o de la escalación." },
@@ -596,6 +678,36 @@ async function callBotResponder(env, context, inboundMessage, media) {
   const parsed = (() => { try { return JSON.parse(toolCall.function.arguments); } catch { return null; } })();
   if (!parsed?.action) return { action: "escalate", reason: "bot_parse_error" };
   return parsed;
+}
+
+const SPANISH_MONTH_NAMES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+
+function currentBillingMonthEs() {
+  return SPANISH_MONTH_NAMES[new Date().getMonth()];
+}
+
+// Aplica un pago confirmado por un humano (Carlos/Eduardo tocando el botón de WhatsApp) directamente
+// en la facturación real. Solo se llama tras confirmación humana explícita -- nunca desde el bot --
+// y solo si hay exactamente un registro de cobranza candidato, para no adivinar a cuál mes/servicio
+// corresponde el pago cuando hay ambigüedad.
+async function applyPaymentToBillingRecord(env, phone, extractedAmount) {
+  const row = await env.DB.prepare("SELECT data FROM app_state WHERE id = 'main'").first();
+  const state = row ? JSON.parse(row.data) : null;
+  if (!state || !Array.isArray(state.billingRecords)) return { ok: false, reason: "no_state" };
+  const pending = state.billingRecords.filter((record) => normalizeWhatsAppPhone(record.phone) === phone && record.status === "Pendiente");
+  if (!pending.length) return { ok: false, reason: "no_pending_record" };
+  let target = pending.length === 1 ? pending[0] : pending.find((record) => record.billingMonth === currentBillingMonthEs());
+  if (!target && Number.isFinite(Number(extractedAmount))) {
+    target = pending.find((record) => Number(record.amount) === Math.round(Number(extractedAmount)));
+  }
+  if (!target) return { ok: false, reason: "ambiguous_record", candidates: pending.length };
+  target.status = "Pagado";
+  target.followUpStatus = "Pago confirmado";
+  target.notes = `Pago confirmado por el equipo BPGO vía WhatsApp el ${new Date().toLocaleString("es-CL")}.`;
+  target.lastMessageAt = new Date().toISOString();
+  await env.DB.prepare("UPDATE app_state SET data = ?, updated_at = datetime('now') WHERE id = 'main'")
+    .bind(JSON.stringify(state)).run();
+  return { ok: true, record: target };
 }
 
 async function getKnownAccountName(env, phone) {
@@ -647,7 +759,7 @@ async function executeBotAction(env, credentials, phone, action, message) {
         await env.DB.prepare("UPDATE whatsapp_automation_cases SET reported_name = ? WHERE id = ?").bind(known, caseRow.id).run();
       }
       await sendBotReply(env, credentials, phone, action.text || "Recibimos tu comprobante, en breve lo revisamos. ¡Gracias! 🙏", preferAudio);
-      await notifyStaff(env, credentials, "carlos", "Comprobante de pago", known, phone, "Cliente envió comprobante de pago para revisión.");
+      await notifyStaff(env, credentials, "carlos", "Comprobante de pago", known, phone, "Cliente envió comprobante de pago para revisión.", { caseId: caseRow?.id || null });
       return;
     }
     if (caseRow) {
@@ -710,6 +822,17 @@ async function executeBotAction(env, credentials, phone, action, message) {
     await notifyStaff(env, credentials, "carlos", "Conversación escalada", escalatedName, phone, action.reason || "El bot no pudo resolver la consulta.");
     return;
   }
+  if (action.action === "new_customer_request") {
+    // Todo el flujo de contratación (sector, ubicación, factibilidad, planes) es determinístico
+    // desde acá en adelante -- nunca se vuelve a llamar al modelo mientras haya una solicitud
+    // en curso (ver el chequeo de whatsapp_sales_leads en runBotForInboundMessages).
+    await ensureWhatsAppBotTables(env);
+    await env.DB.prepare(`INSERT INTO whatsapp_sales_leads (id, phone, customer_name, status, created_at, updated_at)
+      VALUES (?, ?, ?, 'awaiting_sector', datetime('now'), datetime('now'))`)
+      .bind(crypto.randomUUID(), phone, message.customerName || null).run();
+    await sendBotReply(env, credentials, phone, "¡Hola! Para revisar disponibilidad, cuéntanos ¿de qué sector nos escribes?", preferAudio);
+    return;
+  }
   // Acción desconocida o el modelo no devolvió texto en "reply": nunca dejar al cliente sin respuesta.
   await setBotSessionMode(env, phone, "human", "bot_unhandled_action");
   await sendBotReply(env, credentials, phone, "Ya te comunico con un agente de BPGO, en breve te responde por acá. 🙌", preferAudio);
@@ -725,6 +848,79 @@ async function runBotForInboundMessages(env, changes) {
     for (const message of (Array.isArray(value.messages) ? value.messages : [])) {
       const phone = message.from;
       try {
+        await ensureWhatsAppBotTables(env);
+        const staffButtonPayload = message.button?.payload || null;
+        const isStaffPhone = phone === normalizeWhatsAppPhone(env.STAFF_PHONE_CARLOS) || phone === normalizeWhatsAppPhone(env.STAFF_PHONE_EDUARDO);
+        if (isStaffPhone && staffButtonPayload?.startsWith("confirm_payment:")) {
+          // Carlos/Eduardo confirmaron el pago tocando el botón del aviso -- esto SÍ puede aplicar
+          // el pago a la facturación real porque lo dispara una persona, no el bot (la regla de
+          // "el bot nunca marca pagado solo" sigue intacta).
+          const caseId = staffButtonPayload.slice("confirm_payment:".length);
+          await ensureWhatsAppAutomationTable(env);
+          const caseRow = await env.DB.prepare("SELECT id, phone, reported_name, customer_name, amount FROM whatsapp_automation_cases WHERE id = ?").bind(caseId).first();
+          if (!caseRow) {
+            await sendWhatsAppText(env, credentials, phone, "No encontré ese caso (puede que ya haya sido procesado). Revísalo en el panel.");
+            continue;
+          }
+          const applied = await applyPaymentToBillingRecord(env, normalizeWhatsAppPhone(caseRow.phone), caseRow.amount).catch((error) => ({ ok: false, reason: String(error?.message || error) }));
+          if (applied.ok) {
+            await env.DB.prepare("UPDATE whatsapp_automation_cases SET status = 'approved', decision_note = ?, updated_at = datetime('now') WHERE id = ?")
+              .bind("Pago confirmado y aplicado a facturación vía botón de WhatsApp.", caseId).run();
+            const who = caseRow.reported_name || caseRow.customer_name || "el cliente";
+            await sendWhatsAppText(env, credentials, phone, `✅ Listo, pago registrado para ${who} (${applied.record.reference || applied.record.billingMonth}). Saldo actualizado en facturación.`);
+          } else {
+            const reasonText = applied.reason === "no_pending_record"
+              ? "no encontré un cobro pendiente para ese teléfono en facturación"
+              : applied.reason === "ambiguous_record"
+                ? "hay más de un cobro pendiente para ese cliente y no pude saber cuál es, revísalo en el panel"
+                : "no pude aplicar el pago automáticamente, revísalo en el panel";
+            await sendWhatsAppText(env, credentials, phone, `⚠️ No pude registrar el pago solo: ${reasonText}.`);
+          }
+          continue;
+        }
+        if (isStaffPhone && (staffButtonPayload?.startsWith("factibilidad_yes:") || staffButtonPayload?.startsWith("factibilidad_no:"))) {
+          const isYes = staffButtonPayload.startsWith("factibilidad_yes:");
+          const leadId = staffButtonPayload.slice(staffButtonPayload.indexOf(":") + 1);
+          await ensureWhatsAppBotTables(env);
+          const lead = await env.DB.prepare("SELECT * FROM whatsapp_sales_leads WHERE id = ?").bind(leadId).first();
+          if (!lead) {
+            await sendWhatsAppText(env, credentials, phone, "No encontré esa solicitud (puede que ya haya sido procesada).");
+            continue;
+          }
+          if (!isYes) {
+            await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'no_factibilidad', updated_at = datetime('now') WHERE id = ?").bind(leadId).run();
+            await sendWhatsAppText(env, credentials, lead.phone, NO_FACTIBILIDAD_MESSAGE);
+            await sendWhatsAppText(env, credentials, phone, "Listo, le avisé al cliente que por ahora no hay factibilidad en su sector.");
+            continue;
+          }
+          const group = matchPlanGroup(lead.sector);
+          if (!group) {
+            await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'awaiting_group_clarification', updated_at = datetime('now') WHERE id = ?").bind(leadId).run();
+            await sendWhatsAppText(env, credentials, phone, `No reconozco el sector "${lead.sector}". Respóndeme "cayucupil" o "otros" para saber qué planes ofrecerle.`);
+            continue;
+          }
+          await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'awaiting_plan', plan_group = ?, updated_at = datetime('now') WHERE id = ?").bind(group, leadId).run();
+          await sendWhatsAppText(env, credentials, lead.phone, formatPlansMessage(group));
+          await sendWhatsAppText(env, credentials, phone, `Listo, le envié los planes de ${PLAN_GROUPS[group].label}.`);
+          continue;
+        }
+        if (isStaffPhone && staffButtonPayload === null) {
+          // Texto libre de un número de staff: puede ser la aclaración de zona que pedimos cuando
+          // el sector no se reconoció automáticamente (ver 'awaiting_group_clarification' arriba).
+          const clarifyingLead = await env.DB.prepare(
+            "SELECT * FROM whatsapp_sales_leads WHERE status = 'awaiting_group_clarification' ORDER BY updated_at DESC LIMIT 1"
+          ).first();
+          const staffText = String(message.text?.body || "").toLowerCase();
+          if (clarifyingLead && staffText) {
+            const group = staffText.includes("cayucupil") ? "cayucupil" : staffText.includes("otro") ? "otros" : null;
+            if (group) {
+              await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'awaiting_plan', plan_group = ?, updated_at = datetime('now') WHERE id = ?").bind(group, clarifyingLead.id).run();
+              await sendWhatsAppText(env, credentials, clarifyingLead.phone, formatPlansMessage(group));
+              await sendWhatsAppText(env, credentials, phone, `Listo, le envié los planes de ${PLAN_GROUPS[group].label}.`);
+              continue;
+            }
+          }
+        }
         const mode = await getBotSessionMode(env, phone);
         if (mode === "human") continue;
         const preferAudio = message.type === "audio";
@@ -747,6 +943,48 @@ async function runBotForInboundMessages(env, changes) {
           }
         }
         await ensureWhatsAppBotTables(env);
+        const salesLead = await env.DB.prepare(
+          "SELECT * FROM whatsapp_sales_leads WHERE phone = ? AND status NOT IN ('completed','cancelled','no_factibilidad') ORDER BY created_at DESC LIMIT 1"
+        ).bind(phone).first();
+        if (salesLead) {
+          if (salesLead.status === "awaiting_sector" && String(text || "").trim()) {
+            const sector = String(text).trim().slice(0, 200);
+            await env.DB.prepare("UPDATE whatsapp_sales_leads SET sector = ?, status = 'awaiting_location', updated_at = datetime('now') WHERE id = ?").bind(sector, salesLead.id).run();
+            await sendBotReply(env, credentials, phone, "Perfecto, ahora por favor envíanos tu ubicación desde WhatsApp (ícono 📎 > Ubicación) para revisar la factibilidad exacta. 📍", preferAudio);
+            continue;
+          }
+          if (salesLead.status === "awaiting_location") {
+            if (message.location?.latitude && message.location?.longitude) {
+              const { latitude, longitude } = message.location;
+              await env.DB.prepare("UPDATE whatsapp_sales_leads SET latitude = ?, longitude = ?, status = 'awaiting_factibilidad', updated_at = datetime('now') WHERE id = ?")
+                .bind(latitude, longitude, salesLead.id).run();
+              await sendBotReply(env, credentials, phone, "¡Gracias! Ya estamos revisando la factibilidad en tu zona, te avisamos apenas tengamos la confirmación. 🙏", preferAudio);
+              const mapsLink = `https://www.google.com/maps?q=${latitude},${longitude}`;
+              await notifyStaff(env, credentials, "carlos", "Solicitud de factibilidad", name || salesLead.customer_name, phone,
+                `Sector: ${salesLead.sector || "no indicado"}\nUbicación: ${mapsLink}`, { caseId: null, factibilidadLeadId: salesLead.id });
+            } else {
+              await sendBotReply(env, credentials, phone, "Necesitamos que nos compartas tu ubicación desde WhatsApp: toca el ícono 📎 (adjuntar) y elige \"Ubicación\". Así podemos revisar la factibilidad exacta.", preferAudio);
+            }
+            continue;
+          }
+          if (salesLead.status === "awaiting_factibilidad") {
+            await sendBotReply(env, credentials, phone, "Seguimos revisando la factibilidad en tu sector, en breve te contactamos. 🙏", preferAudio);
+            continue;
+          }
+          if (salesLead.status === "awaiting_plan" && String(text || "").trim()) {
+            const plan = matchChosenPlan(salesLead.plan_group, text);
+            if (plan) {
+              await env.DB.prepare("UPDATE whatsapp_sales_leads SET chosen_plan = ?, status = 'completed', updated_at = datetime('now') WHERE id = ?")
+                .bind(`${plan.speed} ($${plan.price})`, salesLead.id).run();
+              await sendBotReply(env, credentials, phone, planConfirmationMessage(plan), preferAudio);
+              await notifyStaff(env, credentials, "carlos", "Nueva contratación", name || salesLead.customer_name, phone,
+                `Sector: ${salesLead.sector || "no indicado"}. Eligió plan ${plan.speed} ($${plan.price}). Coordinar instalación.`);
+            } else {
+              await sendBotReply(env, credentials, phone, formatPlansMessage(salesLead.plan_group), preferAudio);
+            }
+            continue;
+          }
+        }
         const pendingVisit = await env.DB.prepare("SELECT reason, preferred_date FROM whatsapp_pending_visits WHERE phone = ?").bind(phone).first();
         if (pendingVisit && String(text || "").trim()) {
           // Estábamos esperando el nombre del titular para completar una visita/incidencia
@@ -773,7 +1011,7 @@ async function runBotForInboundMessages(env, changes) {
           }
           await env.DB.prepare("DELETE FROM whatsapp_pending_payments WHERE phone = ?").bind(phone).run();
           await sendBotReply(env, credentials, phone, `Gracias, dejamos tu comprobante asociado a nombre de ${reportedName}. El equipo lo confirmará pronto. 🙏`, preferAudio);
-          await notifyStaff(env, credentials, "carlos", "Comprobante de pago", reportedName, phone, "Cliente envió comprobante de pago para revisión.");
+          await notifyStaff(env, credentials, "carlos", "Comprobante de pago", reportedName, phone, "Cliente envió comprobante de pago para revisión.", { caseId: pendingPayment.case_id || null });
           continue;
         }
         const pendingBilling = await env.DB.prepare("SELECT days_without_service, reason FROM whatsapp_pending_billing WHERE phone = ?").bind(phone).first();
