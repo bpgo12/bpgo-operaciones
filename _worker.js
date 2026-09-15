@@ -462,13 +462,17 @@ async function notifyStaff(env, credentials, role, caseType, customerName, custo
   // rápida que cargan el id del caso/lead en el payload, para que el webhook pueda resolverlos en
   // cuanto Carlos/Eduardo confirmen desde WhatsApp, sin pasos extra ni tocar el panel.
   const templateName = options?.factibilidadLeadId ? "aviso_factibilidad" : options?.caseId ? "aviso_nuevo_pago" : "aviso_nuevo_caso";
+  // Meta rechaza cualquier parámetro de plantilla que tenga saltos de línea/tabs o más de 4
+  // espacios seguidos (error 132018) -- se sanea acá para no depender de que cada texto armado
+  // más arriba lo recuerde.
+  const sanitizeParam = (value) => String(value || "").replace(/[\n\t\r]+/g, " ").replace(/ {5,}/g, "    ").trim();
   const components = [{
     type: "body",
     parameters: [
-      { type: "text", text: caseType },
-      { type: "text", text: customerName || "Sin identificar" },
-      { type: "text", text: customerPhone || "" },
-      { type: "text", text: (summary || "Sin detalle").slice(0, 300) },
+      { type: "text", text: sanitizeParam(caseType) },
+      { type: "text", text: sanitizeParam(customerName) || "Sin identificar" },
+      { type: "text", text: sanitizeParam(customerPhone) },
+      { type: "text", text: sanitizeParam(summary).slice(0, 300) || "Sin detalle" },
     ],
   }];
   if (options?.caseId) {
@@ -961,7 +965,7 @@ async function runBotForInboundMessages(env, changes) {
               await sendBotReply(env, credentials, phone, "¡Gracias! Ya estamos revisando la factibilidad en tu zona, te avisamos apenas tengamos la confirmación. 🙏", preferAudio);
               const mapsLink = `https://www.google.com/maps?q=${latitude},${longitude}`;
               await notifyStaff(env, credentials, "carlos", "Solicitud de factibilidad", name || salesLead.customer_name, phone,
-                `Sector: ${salesLead.sector || "no indicado"}\nUbicación: ${mapsLink}`, { caseId: null, factibilidadLeadId: salesLead.id });
+                `Sector: ${salesLead.sector || "no indicado"}. Ubicación: ${mapsLink}`, { caseId: null, factibilidadLeadId: salesLead.id });
             } else {
               await sendBotReply(env, credentials, phone, "Necesitamos que nos compartas tu ubicación desde WhatsApp: toca el ícono 📎 (adjuntar) y elige \"Ubicación\". Así podemos revisar la factibilidad exacta.", preferAudio);
             }
