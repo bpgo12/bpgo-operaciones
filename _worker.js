@@ -423,12 +423,29 @@ async function sendWhatsAppAudio(env, credentials, phone, audioBytes) {
   return { ok: metaResponse.ok, messageId };
 }
 
+async function ensureStaffNotificationsLogTable(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS staff_notifications_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    role TEXT, staff_phone TEXT, case_type TEXT, customer_phone TEXT,
+    ok INTEGER, http_status INTEGER, response_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
+}
+
 async function notifyStaff(env, credentials, role, caseType, customerName, customerPhone, summary) {
   const staffPhone = role === "carlos" ? env.STAFF_PHONE_CARLOS : role === "eduardo" ? env.STAFF_PHONE_EDUARDO : null;
   const normalized = normalizeWhatsAppPhone(staffPhone);
-  if (!normalized || !credentials.accessToken || !credentials.phoneNumberId) return;
+  await ensureStaffNotificationsLogTable(env).catch(() => null);
+  if (!normalized || !credentials.accessToken || !credentials.phoneNumberId) {
+    await env.DB.prepare(`INSERT INTO staff_notifications_log (role, staff_phone, case_type, customer_phone, ok, http_status, response_json)
+      VALUES (?, ?, ?, ?, 0, NULL, ?)`)
+      .bind(role, staffPhone || null, caseType, customerPhone,
+        JSON.stringify({ error: "missing_config", hasNormalizedPhone: Boolean(normalized), hasAccessToken: Boolean(credentials.accessToken), hasPhoneNumberId: Boolean(credentials.phoneNumberId) }))
+      .run().catch(() => null);
+    return;
+  }
   const endpoint = `https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/messages`;
-  await fetch(endpoint, {
+  const result = await fetch(endpoint, {
     method: "POST",
     headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
     body: JSON.stringify({
@@ -450,9 +467,14 @@ async function notifyStaff(env, credentials, role, caseType, customerName, custo
         }],
       },
     }),
-  }).catch(() => null);
-  // No revisamos la respuesta a propósito: si la plantilla aún no está aprobada o falla el envío,
-  // nunca debe interrumpir la respuesta al cliente ni la creación del caso.
+  }).then(async (response) => ({ status: response.status, ok: response.ok, body: await response.json().catch(() => null) }))
+    .catch((error) => ({ status: 0, ok: false, body: { error: String(error && error.message || error) } }));
+  await env.DB.prepare(`INSERT INTO staff_notifications_log (role, staff_phone, case_type, customer_phone, ok, http_status, response_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?)`)
+    .bind(role, normalized, caseType, customerPhone, result.ok ? 1 : 0, result.status, JSON.stringify(result.body))
+    .run().catch(() => null);
+  // El resultado queda en staff_notifications_log para diagnóstico; nunca debe interrumpir
+  // la respuesta al cliente ni la creación del caso aunque el envío falle.
 }
 
 async function sendBotReply(env, credentials, phone, text, preferAudio) {
