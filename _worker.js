@@ -582,10 +582,21 @@ function formatPlansMessage(groupKey) {
 function matchChosenPlan(groupKey, text) {
   const group = PLAN_GROUPS[groupKey];
   if (!group) return null;
-  const match = String(text || "").match(/(\d+)/);
-  if (!match) return null;
-  const n = Number(match[1]);
-  return group.plans.find((p) => parseInt(p.speed, 10) === n) || null;
+  const normalized = String(text || "").toLowerCase();
+  const normalizedNoSep = normalized.replace(/[.,]/g, "");
+  // El cliente puede referirse al plan por velocidad ("el de 50mb") o por precio ("el de 25.000" /
+  // "25,000" / "25000") -- probamos precio primero porque es menos ambiguo (la velocidad "25" no
+  // existe en ningún grupo, pero conviene no depender de eso).
+  const byPrice = group.plans.find((p) => normalized.includes(p.price.toLocaleString("es-CL")) || normalizedNoSep.includes(String(p.price)));
+  if (byPrice) return byPrice;
+  const bySpeedWithUnit = normalizedNoSep.match(/(\d+)\s*mb/);
+  if (bySpeedWithUnit) {
+    const found = group.plans.find((p) => parseInt(p.speed, 10) === Number(bySpeedWithUnit[1]));
+    if (found) return found;
+  }
+  const anyNumber = normalizedNoSep.match(/(\d+)/);
+  if (!anyNumber) return null;
+  return group.plans.find((p) => parseInt(p.speed, 10) === Number(anyNumber[1])) || null;
 }
 
 function planConfirmationMessage(plan) {
