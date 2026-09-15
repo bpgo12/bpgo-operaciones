@@ -233,10 +233,17 @@ async function findCustomerForWhatsApp(env, phone, fallbackName) {
   for (const customer of collections.flat()) {
     const candidate = normalizeComparablePhone(customer.phone || customer.whatsapp || customer.telefono || "");
     if (wanted && candidate && wanted === candidate) {
-      return { id: String(customer.id || customer.rut || customer.name || ""), name: customer.name || customer.client || fallbackName || null };
+      return {
+        id: String(customer.id || customer.rut || customer.name || ""),
+        name: customer.name || customer.client || fallbackName || null,
+        address: customer.address || customer.direccion || null,
+        balance: customer.amount ?? customer.saldo ?? customer.deuda ?? null,
+        dueDate: customer.dueDate || customer.vencimiento || null,
+        paymentStatus: customer.status || null,
+      };
     }
   }
-  return { id: null, name: fallbackName || null };
+  return { id: null, name: fallbackName || null, address: null, balance: null, dueDate: null, paymentStatus: null };
 }
 
 async function ensureWhatsAppBotTables(env) {
@@ -339,17 +346,31 @@ const BOT_SYSTEM_PROMPT = `Eres el asistente de WhatsApp de BPGO, un proveedor d
 
 Reglas duras, nunca las rompas:
 - NUNCA confirmes ni marques un pago como "recibido" o "verificado" en el sistema. Si el cliente dice que pagó o envía un comprobante, solo agradece la recepción y explica que el equipo lo va a revisar (usa la acción "payment_ack").
-- Si el cliente pide agendar/reagendar una visita técnica, usa la acción "visit_request" con la fecha/motivo que indique (o null si no la dio); nunca confirmes un horario exacto, solo di que quedó registrada la solicitud.
-- Si el cliente pide hablar con una persona, insulta, hace un reclamo grave, o preguntas algo que no sabes con certeza (fuera de las FAQs dadas), usa la acción "escalate" y no inventes una respuesta.
+- Si el cliente pregunta cuánto debe, cuándo vence su pago, o el estado de su cuenta: usa EXCLUSIVAMENTE el dato de "Cliente identificado" (saldo/vencimiento) que te doy abajo, con la acción "reply". Nunca inventes un monto o fecha. Si ese dato no está disponible o el cliente no fue identificado, dilo claramente y usa "escalate".
+- Si el cliente reporta una falla técnica (sin internet, lento, intermitente, etc.), NO uses "visit_request" de inmediato. Primero hace diagnóstico progresivo con la acción "reply", preguntando UNA cosa a la vez (por ejemplo: color/estado de la luz del router, si ya reinició el equipo, si afecta a todos los dispositivos o solo uno, hace cuánto empezó). Revisa el historial de la conversación: si el cliente ya respondió 2-3 de estas preguntas y el problema sigue, o pide explícitamente una visita, recién ahí usa "visit_request" resumiendo el diagnóstico en "reason".
+- Si el cliente pide agendar/reagendar una visita técnica directamente, usa la acción "visit_request" con la fecha/motivo que indique (o null si no la dio); nunca confirmes un horario exacto, solo di que quedó registrada la solicitud.
+- Si el cliente pide hablar con una persona, insulta, hace un reclamo grave, o preguntas algo que no sabes con certeza (fuera de las FAQs y de los datos de cliente dados), usa la acción "escalate" y no inventes una respuesta.
 - Para todo lo demás (preguntas frecuentes, saludos, consultas generales que sí puedes responder con las FAQs dadas), usa la acción "reply".
 
 Debes responder SIEMPRE llamando a la herramienta bpgo_bot_action con una única acción.`;
 
+function formatCurrency(value) {
+  const amount = Number(value);
+  return Number.isFinite(amount) ? `$${amount.toLocaleString("es-CL")}` : null;
+}
+
 async function callBotResponder(env, context, inboundMessage, media) {
   if (!env.OPENAI_API_KEY) return { action: "escalate", reason: "bot_not_configured" };
-  const customerLine = context.customer?.name
-    ? `Cliente identificado: ${context.customer.name}.`
-    : "No se pudo identificar al cliente en el sistema por su número.";
+  let customerLine = "No se pudo identificar al cliente en el sistema por su número.";
+  if (context.customer?.name) {
+    const balanceText = formatCurrency(context.customer.balance);
+    const details = [
+      context.customer.address ? `dirección ${context.customer.address}` : null,
+      balanceText ? `saldo pendiente ${balanceText}` : "sin saldo pendiente registrado",
+      context.customer.dueDate ? `vencimiento ${context.customer.dueDate}` : null,
+    ].filter(Boolean).join(", ");
+    customerLine = `Cliente identificado: ${context.customer.name} (${details}).`;
+  }
   const historyLines = context.history
     .map((item) => `${item.direction === "inbound" ? "Cliente" : "BPGO"}: ${item.message_text || `[${item.message_type}]`}`)
     .join("\n");
