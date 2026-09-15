@@ -345,8 +345,8 @@ Reglas duras, nunca las rompas:
 
 Debes responder SIEMPRE llamando a la herramienta bpgo_bot_action con una única acción.`;
 
-async function callClaudeResponder(env, context, inboundMessage, media) {
-  if (!env.ANTHROPIC_API_KEY) return { action: "escalate", reason: "bot_not_configured" };
+async function callBotResponder(env, context, inboundMessage, media) {
+  if (!env.OPENAI_API_KEY) return { action: "escalate", reason: "bot_not_configured" };
   const customerLine = context.customer?.name
     ? `Cliente identificado: ${context.customer.name}.`
     : "No se pudo identificar al cliente en el sistema por su número.";
@@ -354,50 +354,57 @@ async function callClaudeResponder(env, context, inboundMessage, media) {
     .map((item) => `${item.direction === "inbound" ? "Cliente" : "BPGO"}: ${item.message_text || `[${item.message_type}]`}`)
     .join("\n");
   const userContent = [];
-  if (media) {
-    userContent.push(media.mimeType === "application/pdf"
-      ? { type: "document", source: { type: "base64", media_type: media.mimeType, data: media.base64 } }
-      : { type: "image", source: { type: "base64", media_type: media.mimeType, data: media.base64 } });
+  let mediaNote = "";
+  if (media && media.mimeType.startsWith("image/")) {
+    userContent.push({ type: "image_url", image_url: { url: `data:${media.mimeType};base64,${media.base64}` } });
+  } else if (media) {
+    mediaNote = "\n\n(El cliente adjuntó un documento, probablemente un comprobante en PDF, que no se puede visualizar aquí.)";
   }
   userContent.push({
     type: "text",
-    text: `FAQs de BPGO:\n${context.faq}\n\n${customerLine}\n\nÚltimos mensajes de la conversación:\n${historyLines || "(sin historial previo)"}\n\nNuevo mensaje del cliente (${inboundMessage.type}): ${inboundMessage.text || "(sin texto, ver adjunto)"}`,
+    text: `FAQs de BPGO:\n${context.faq}\n\n${customerLine}\n\nÚltimos mensajes de la conversación:\n${historyLines || "(sin historial previo)"}\n\nNuevo mensaje del cliente (${inboundMessage.type}): ${inboundMessage.text || "(sin texto, ver adjunto)"}${mediaNote}`,
   });
 
-  const response = await fetch("https://api.anthropic.com/v1/messages", {
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "x-api-key": env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
+      authorization: `Bearer ${env.OPENAI_API_KEY}`,
     },
     body: JSON.stringify({
-      model: String(env.ANTHROPIC_MODEL || "claude-sonnet-5"),
+      model: String(env.OPENAI_MODEL || "gpt-4o"),
       max_tokens: 600,
-      system: BOT_SYSTEM_PROMPT,
-      messages: [{ role: "user", content: userContent }],
+      messages: [
+        { role: "system", content: BOT_SYSTEM_PROMPT },
+        { role: "user", content: userContent },
+      ],
       tools: [{
-        name: "bpgo_bot_action",
-        description: "Acción que el bot de WhatsApp debe ejecutar en respuesta al mensaje del cliente.",
-        input_schema: {
-          type: "object",
-          properties: {
-            action: { type: "string", enum: ["reply", "payment_ack", "visit_request", "escalate"] },
-            text: { type: "string", description: "Texto a enviar al cliente por WhatsApp (no aplica para escalate)." },
-            preferred_date: { type: "string", description: "Fecha u horario preferido que dio el cliente para la visita, si aplica." },
-            reason: { type: "string", description: "Motivo de la visita o de la escalación." },
+        type: "function",
+        function: {
+          name: "bpgo_bot_action",
+          description: "Acción que el bot de WhatsApp debe ejecutar en respuesta al mensaje del cliente.",
+          parameters: {
+            type: "object",
+            properties: {
+              action: { type: "string", enum: ["reply", "payment_ack", "visit_request", "escalate"] },
+              text: { type: "string", description: "Texto a enviar al cliente por WhatsApp (no aplica para escalate)." },
+              preferred_date: { type: "string", description: "Fecha u horario preferido que dio el cliente para la visita, si aplica." },
+              reason: { type: "string", description: "Motivo de la visita o de la escalación." },
+            },
+            required: ["action"],
           },
-          required: ["action"],
         },
       }],
-      tool_choice: { type: "tool", name: "bpgo_bot_action" },
+      tool_choice: { type: "function", function: { name: "bpgo_bot_action" } },
     }),
   }).catch(() => null);
   if (!response || !response.ok) return { action: "escalate", reason: "bot_api_error" };
   const payload = await response.json().catch(() => null);
-  const toolUse = payload?.content?.find((block) => block.type === "tool_use");
-  if (!toolUse?.input?.action) return { action: "escalate", reason: "bot_parse_error" };
-  return toolUse.input;
+  const toolCall = payload?.choices?.[0]?.message?.tool_calls?.[0];
+  if (!toolCall?.function?.arguments) return { action: "escalate", reason: "bot_parse_error" };
+  const parsed = (() => { try { return JSON.parse(toolCall.function.arguments); } catch { return null; } })();
+  if (!parsed?.action) return { action: "escalate", reason: "bot_parse_error" };
+  return parsed;
 }
 
 async function executeBotAction(env, credentials, phone, action, message) {
@@ -442,7 +449,7 @@ async function runBotForInboundMessages(env, changes) {
         let media = null;
         if (mediaId) media = await fetchWhatsAppMediaBase64(credentials, mediaId).catch(() => null);
         const context = await buildBotContext(env, phone, name);
-        const action = await callClaudeResponder(env, context, { type: message.type || "unknown", text }, media);
+        const action = await callBotResponder(env, context, { type: message.type || "unknown", text }, media);
         await executeBotAction(env, credentials, phone, action, { customerName: name });
       } catch {
         await setBotSessionMode(env, phone, "human", "bot_exception").catch(() => null);
