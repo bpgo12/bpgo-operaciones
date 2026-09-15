@@ -393,7 +393,7 @@ async function callBotResponder(env, context, inboundMessage, media) {
       authorization: `Bearer ${env.OPENAI_API_KEY}`,
     },
     body: JSON.stringify({
-      model: String(env.OPENAI_MODEL || "gpt-4o"),
+      model: String(env.OPENAI_MODEL || "gpt-4o-mini"),
       max_tokens: 600,
       messages: [
         { role: "system", content: BOT_SYSTEM_PROMPT },
