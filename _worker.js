@@ -448,9 +448,12 @@ async function executeBotAction(env, credentials, phone, action, message) {
   }
   if (action.action === "escalate") {
     await setBotSessionMode(env, phone, "human", action.reason || "bot_escalated");
-    if (action.text) await sendWhatsAppText(env, credentials, phone, action.text);
+    await sendWhatsAppText(env, credentials, phone, action.text || "Ya te comunico con un agente de BPGO, en breve te responde por acá. 🙌");
     return;
   }
+  // Acción desconocida o el modelo no devolvió texto en "reply": nunca dejar al cliente sin respuesta.
+  await setBotSessionMode(env, phone, "human", "bot_unhandled_action");
+  await sendWhatsAppText(env, credentials, phone, "Ya te comunico con un agente de BPGO, en breve te responde por acá. 🙌");
 }
 
 async function runBotForInboundMessages(env, changes) {
