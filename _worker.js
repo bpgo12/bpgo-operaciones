@@ -323,7 +323,7 @@ async function buildBotContext(env, phone, fallbackName) {
   return { history, customer, faq };
 }
 
-async function fetchWhatsAppMediaBase64(credentials, mediaId) {
+async function fetchWhatsAppMediaBytes(credentials, mediaId) {
   const metadataResponse = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(mediaId)}`, {
     headers: { authorization: `Bearer ${credentials.accessToken}` },
   });
@@ -331,10 +331,92 @@ async function fetchWhatsAppMediaBase64(credentials, mediaId) {
   if (!metadataResponse.ok || !metadata.url) return null;
   const mediaResponse = await fetch(metadata.url, { headers: { authorization: `Bearer ${credentials.accessToken}` } });
   if (!mediaResponse.ok) return null;
-  const buffer = new Uint8Array(await mediaResponse.arrayBuffer());
+  return {
+    bytes: new Uint8Array(await mediaResponse.arrayBuffer()),
+    mimeType: metadata.mime_type || mediaResponse.headers.get("content-type") || "application/octet-stream",
+  };
+}
+
+async function fetchWhatsAppMediaBase64(credentials, mediaId) {
+  const media = await fetchWhatsAppMediaBytes(credentials, mediaId);
+  if (!media) return null;
   let binary = "";
-  for (let index = 0; index < buffer.length; index += 1) binary += String.fromCharCode(buffer[index]);
-  return { base64: btoa(binary), mimeType: metadata.mime_type || mediaResponse.headers.get("content-type") || "application/octet-stream" };
+  for (let index = 0; index < media.bytes.length; index += 1) binary += String.fromCharCode(media.bytes[index]);
+  return { base64: btoa(binary), mimeType: media.mimeType };
+}
+
+async function transcribeWhatsAppAudio(env, credentials, mediaId) {
+  if (!env.OPENAI_API_KEY) return null;
+  const media = await fetchWhatsAppMediaBytes(credentials, mediaId).catch(() => null);
+  if (!media) return null;
+  const extension = media.mimeType.includes("mp4") ? "m4a" : media.mimeType.includes("mpeg") ? "mp3" : "ogg";
+  const form = new FormData();
+  form.append("file", new Blob([media.bytes], { type: media.mimeType }), `audio.${extension}`);
+  form.append("model", "whisper-1");
+  form.append("language", "es");
+  const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { authorization: `Bearer ${env.OPENAI_API_KEY}` },
+    body: form,
+  }).catch(() => null);
+  if (!response || !response.ok) return null;
+  const payload = await response.json().catch(() => ({}));
+  return String(payload.text || "").trim() || null;
+}
+
+async function synthesizeSpeech(env, text) {
+  if (!env.OPENAI_API_KEY) return null;
+  const response = await fetch("https://api.openai.com/v1/audio/speech", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${env.OPENAI_API_KEY}` },
+    body: JSON.stringify({ model: "tts-1", voice: "nova", input: text.slice(0, 3000), response_format: "mp3" }),
+  }).catch(() => null);
+  if (!response || !response.ok) return null;
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+async function sendWhatsAppAudio(env, credentials, phone, audioBytes) {
+  const uploadForm = new FormData();
+  uploadForm.append("messaging_product", "whatsapp");
+  uploadForm.append("file", new Blob([audioBytes], { type: "audio/mpeg" }), "respuesta.mp3");
+  uploadForm.append("type", "audio/mpeg");
+  const uploadResponse = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/media`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${credentials.accessToken}` },
+    body: uploadForm,
+  }).catch(() => null);
+  const uploadPayload = uploadResponse ? await uploadResponse.json().catch(() => ({})) : {};
+  const mediaId = uploadPayload.id;
+  if (!uploadResponse?.ok || !mediaId) return { ok: false };
+  const endpoint = `https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/messages`;
+  const metaResponse = await fetch(endpoint, {
+    method: "POST",
+    headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ messaging_product: "whatsapp", recipient_type: "individual", to: phone, type: "audio", audio: { id: mediaId } }),
+  });
+  const meta = await metaResponse.json().catch(() => ({}));
+  const messageId = meta.messages?.[0]?.id;
+  if (metaResponse.ok && messageId) {
+    await ensureWhatsAppInboxTable(env);
+    await env.DB.prepare(`INSERT OR IGNORE INTO whatsapp_inbox_messages
+      (message_id, phone, direction, message_type, message_text, created_at, raw_json)
+      VALUES (?, ?, 'outbound', 'audio', NULL, ?, ?)`)
+      .bind(messageId, phone, new Date().toISOString(), JSON.stringify(meta)).run();
+  }
+  return { ok: metaResponse.ok, messageId };
+}
+
+async function sendBotReply(env, credentials, phone, text, preferAudio) {
+  if (preferAudio) {
+    const audioBytes = await synthesizeSpeech(env, text).catch(() => null);
+    if (audioBytes) {
+      const result = await sendWhatsAppAudio(env, credentials, phone, audioBytes).catch(() => null);
+      if (result?.ok) return result;
+    }
+    // Si la síntesis de voz o el envío del audio falla, nunca dejar al cliente sin respuesta:
+    // se cae de vuelta a texto en vez de fallar en silencio.
+  }
+  return sendWhatsAppText(env, credentials, phone, text);
 }
 
 async function sendWhatsAppText(env, credentials, phone, text) {
@@ -458,8 +540,9 @@ async function getKnownAccountName(env, phone) {
 }
 
 async function executeBotAction(env, credentials, phone, action, message) {
+  const preferAudio = Boolean(message.preferAudio);
   if (action.action === "reply" && action.text) {
-    await sendWhatsAppText(env, credentials, phone, action.text);
+    await sendBotReply(env, credentials, phone, action.text, preferAudio);
     return;
   }
   if (action.action === "payment_ack") {
@@ -479,7 +562,7 @@ async function executeBotAction(env, credentials, phone, action, message) {
       if (caseRow && !caseRow.reported_name) {
         await env.DB.prepare("UPDATE whatsapp_automation_cases SET reported_name = ? WHERE id = ?").bind(known, caseRow.id).run();
       }
-      await sendWhatsAppText(env, credentials, phone, action.text || "Recibimos tu comprobante, en breve lo revisamos. ¡Gracias! 🙏");
+      await sendBotReply(env, credentials, phone, action.text || "Recibimos tu comprobante, en breve lo revisamos. ¡Gracias! 🙏", preferAudio);
       return;
     }
     if (caseRow) {
@@ -488,7 +571,7 @@ async function executeBotAction(env, credentials, phone, action, message) {
         ON CONFLICT(phone) DO UPDATE SET case_id = excluded.case_id, created_at = datetime('now')`)
         .bind(phone, caseRow.id).run();
     }
-    await sendWhatsAppText(env, credentials, phone, "¡Gracias por tu comprobante! Para dejarlo asociado a tu cuenta, ¿a nombre de quién está contratado el servicio?");
+    await sendBotReply(env, credentials, phone, "¡Gracias por tu comprobante! Para dejarlo asociado a tu cuenta, ¿a nombre de quién está contratado el servicio?", preferAudio);
     return;
   }
   if (action.action === "visit_request") {
@@ -502,24 +585,24 @@ async function executeBotAction(env, credentials, phone, action, message) {
       await env.DB.prepare(`INSERT INTO whatsapp_visit_requests (phone, customer_id, customer_name, reported_name, preferred_date, reason, status, created_at)
         VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`)
         .bind(phone, customer.id, customer.name, known, action.preferred_date || null, action.reason || null).run();
-      await sendWhatsAppText(env, credentials, phone, action.text || "Registramos tu solicitud de visita técnica, un agente te confirmará el horario. 🙌");
+      await sendBotReply(env, credentials, phone, action.text || "Registramos tu solicitud de visita técnica, un agente te confirmará el horario. 🙌", preferAudio);
       return;
     }
     await env.DB.prepare(`INSERT INTO whatsapp_pending_visits (phone, reason, preferred_date, created_at)
       VALUES (?, ?, ?, datetime('now'))
       ON CONFLICT(phone) DO UPDATE SET reason = excluded.reason, preferred_date = excluded.preferred_date, created_at = datetime('now')`)
       .bind(phone, action.reason || null, action.preferred_date || null).run();
-    await sendWhatsAppText(env, credentials, phone, "Para registrar la visita, ¿a nombre de quién está contratado el servicio?");
+    await sendBotReply(env, credentials, phone, "Para registrar la visita, ¿a nombre de quién está contratado el servicio?", preferAudio);
     return;
   }
   if (action.action === "escalate") {
     await setBotSessionMode(env, phone, "human", action.reason || "bot_escalated");
-    await sendWhatsAppText(env, credentials, phone, action.text || "Ya te comunico con un agente de BPGO, en breve te responde por acá. 🙌");
+    await sendBotReply(env, credentials, phone, action.text || "Ya te comunico con un agente de BPGO, en breve te responde por acá. 🙌", preferAudio);
     return;
   }
   // Acción desconocida o el modelo no devolvió texto en "reply": nunca dejar al cliente sin respuesta.
   await setBotSessionMode(env, phone, "human", "bot_unhandled_action");
-  await sendWhatsAppText(env, credentials, phone, "Ya te comunico con un agente de BPGO, en breve te responde por acá. 🙌");
+  await sendBotReply(env, credentials, phone, "Ya te comunico con un agente de BPGO, en breve te responde por acá. 🙌", preferAudio);
 }
 
 async function runBotForInboundMessages(env, changes) {
@@ -534,7 +617,25 @@ async function runBotForInboundMessages(env, changes) {
       try {
         const mode = await getBotSessionMode(env, phone);
         if (mode === "human") continue;
-        const text = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || null;
+        const preferAudio = message.type === "audio";
+        let text = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || null;
+        if (preferAudio && message.audio?.id) {
+          text = await transcribeWhatsAppAudio(env, credentials, message.audio.id).catch(() => null);
+          if (text) {
+            await ensureWhatsAppInboxTable(env);
+            await env.DB.prepare("UPDATE whatsapp_inbox_messages SET message_text = ? WHERE message_id = ?")
+              .bind(`🎤 ${text}`, message.id).run().catch(() => null);
+            // El clasificador por reglas corrió con texto vacío cuando llegó el audio (antes de
+            // transcribir); ahora que sabemos qué dice, corregimos el caso ya creado para que el
+            // panel muestre el tipo/resumen correcto en vez de "Consulta general".
+            const reclass = classifyInboundMessage({ text, mediaId: null, type: "text", createdAt: new Date().toISOString() });
+            await ensureWhatsAppAutomationTable(env);
+            await env.DB.prepare(`UPDATE whatsapp_automation_cases SET case_type = ?, confidence = ?, summary = ?,
+              service_month = COALESCE(service_month, ?), amount = COALESCE(amount, ?), updated_at = datetime('now')
+              WHERE source_message_id = ?`)
+              .bind(reclass.type, reclass.confidence, reclass.summary, reclass.serviceMonth, reclass.amount, message.id).run().catch(() => null);
+          }
+        }
         await ensureWhatsAppBotTables(env);
         const pendingVisit = await env.DB.prepare("SELECT reason, preferred_date FROM whatsapp_pending_visits WHERE phone = ?").bind(phone).first();
         if (pendingVisit && String(text || "").trim()) {
@@ -546,7 +647,7 @@ async function runBotForInboundMessages(env, changes) {
             VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`)
             .bind(phone, customer.id, customer.name, reportedName, pendingVisit.preferred_date, pendingVisit.reason).run();
           await env.DB.prepare("DELETE FROM whatsapp_pending_visits WHERE phone = ?").bind(phone).run();
-          await sendWhatsAppText(env, credentials, phone, `Gracias, registramos la solicitud a nombre de ${reportedName}. Un agente te confirmará el horario. 🙌`);
+          await sendBotReply(env, credentials, phone, `Gracias, registramos la solicitud a nombre de ${reportedName}. Un agente te confirmará el horario. 🙌`, preferAudio);
           continue;
         }
         const pendingPayment = await env.DB.prepare("SELECT case_id FROM whatsapp_pending_payments WHERE phone = ?").bind(phone).first();
@@ -560,7 +661,7 @@ async function runBotForInboundMessages(env, changes) {
               .bind(reportedName, pendingPayment.case_id).run();
           }
           await env.DB.prepare("DELETE FROM whatsapp_pending_payments WHERE phone = ?").bind(phone).run();
-          await sendWhatsAppText(env, credentials, phone, `Gracias, dejamos tu comprobante asociado a nombre de ${reportedName}. El equipo lo confirmará pronto. 🙏`);
+          await sendBotReply(env, credentials, phone, `Gracias, dejamos tu comprobante asociado a nombre de ${reportedName}. El equipo lo confirmará pronto. 🙏`, preferAudio);
           continue;
         }
         const mediaId = message.image?.id || message.document?.id || null;
@@ -568,7 +669,7 @@ async function runBotForInboundMessages(env, changes) {
         if (mediaId) media = await fetchWhatsAppMediaBase64(credentials, mediaId).catch(() => null);
         const context = await buildBotContext(env, phone, name);
         const action = await callBotResponder(env, context, { type: message.type || "unknown", text }, media);
-        await executeBotAction(env, credentials, phone, action, { customerName: name, messageId: message.id });
+        await executeBotAction(env, credentials, phone, action, { customerName: name, messageId: message.id, preferAudio });
       } catch {
         await setBotSessionMode(env, phone, "human", "bot_exception").catch(() => null);
       }
