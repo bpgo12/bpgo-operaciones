@@ -313,6 +313,9 @@ async function ensureWhatsAppBotTables(env) {
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_sales_leads_phone ON whatsapp_sales_leads(phone)").run();
+  for (const column of ["installation_name", "installation_rut", "installation_phone", "installation_email", "installation_address"]) {
+    await env.DB.prepare(`ALTER TABLE whatsapp_sales_leads ADD COLUMN ${column} TEXT`).run().catch(() => null);
+  }
 }
 
 async function getBotSessionMode(env, phone) {
@@ -604,6 +607,45 @@ function planConfirmationMessage(plan) {
 }
 
 const NO_FACTIBILIDAD_MESSAGE = "Lamentablemente por el momento no contamos con factibilidad técnica en tu sector 😔. Dejamos registrada tu solicitud y, apenas ampliemos cobertura en tu zona, te avisaremos de inmediato. ¡Gracias por tu interés en BPGO! 💙";
+
+const INSTALLATION_DATA_REQUEST_MESSAGE = "Necesito los siguientes datos para realizar la instalación:\n\nNombre del titular:\nRut:\nNúmero de teléfono:\nCorreo:\nDirección:\n\nMe los puedes enviar todos juntos o uno por uno, como te acomode. 🙌";
+
+const INSTALLATION_FIELD_LABELS = { name: "nombre del titular", rut: "RUT", phone: "número de teléfono", email: "correo", address: "dirección" };
+
+// Algunos clientes no mandan el formulario completo en un solo mensaje, van completando los datos
+// de a poco -- este clasificador corre en CADA mensaje mientras falten datos y va llenando lo que
+// falta, sin depender de que llegue todo junto ni en un orden fijo. RUT/correo/teléfono son
+// fáciles de reconocer por formato; nombre y dirección (ambos texto libre) usan una heurística
+// simple (dígitos o palabras típicas de dirección) y, si es ambigua, se completa primero el nombre.
+function classifyInstallationFragment(text, current) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+  const rutMatch = raw.match(/\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b/);
+  if (rutMatch) return { field: "rut", value: rutMatch[0] };
+  const emailMatch = raw.match(/[^\s@]+@[^\s@]+\.[^\s@]+/);
+  if (emailMatch) return { field: "email", value: emailMatch[0].toLowerCase() };
+  const digitsOnly = raw.replace(/\D/g, "");
+  if (digitsOnly.length >= 8 && digitsOnly.length <= 12 && !/[a-zA-Z]/.test(raw)) return { field: "phone", value: raw };
+  const looksLikeAddress = /\d/.test(raw) || /\b(calle|avenida|av\.?|pasaje|camino|sector|km|villa|poblaci[oó]n|parcela|block|depto|casa)\b/i.test(raw);
+  if (looksLikeAddress) return { field: "address", value: current.address ? `${current.address} ${raw}`.trim() : raw };
+  // Texto libre sin dígitos ni palabras de dirección: mientras no haya aparecido ninguna señal de
+  // dirección todavía, se asume que sigue siendo parte del nombre (para no cortar nombres
+  // compuestos que el cliente manda palabra por palabra); una vez que la dirección ya empezó, el
+  // texto libre que sigue se suma ahí.
+  if (!current.address) return { field: "name", value: current.name ? `${current.name} ${raw}`.trim() : raw };
+  return { field: "address", value: `${current.address} ${raw}`.trim() };
+}
+
+function missingInstallationFields(lead) {
+  const fields = [
+    ["name", lead.installation_name],
+    ["rut", lead.installation_rut],
+    ["phone", lead.installation_phone],
+    ["email", lead.installation_email],
+    ["address", lead.installation_address],
+  ];
+  return fields.filter(([, value]) => !String(value || "").trim()).map(([field]) => INSTALLATION_FIELD_LABELS[field]);
+}
 
 const BOT_SYSTEM_PROMPT = `Eres el asistente de WhatsApp de BPGO, un proveedor de internet/TV cable en Chile. Respondes en español, tono cercano y breve (2-4 frases, sin inventar información que no tengas).
 
@@ -989,13 +1031,35 @@ async function runBotForInboundMessages(env, changes) {
           if (salesLead.status === "awaiting_plan" && String(text || "").trim()) {
             const plan = matchChosenPlan(salesLead.plan_group, text);
             if (plan) {
-              await env.DB.prepare("UPDATE whatsapp_sales_leads SET chosen_plan = ?, status = 'completed', updated_at = datetime('now') WHERE id = ?")
+              await env.DB.prepare("UPDATE whatsapp_sales_leads SET chosen_plan = ?, status = 'awaiting_installation_data', updated_at = datetime('now') WHERE id = ?")
                 .bind(`${plan.speed} ($${plan.price})`, salesLead.id).run();
               await sendBotReply(env, credentials, phone, planConfirmationMessage(plan), preferAudio);
-              await notifyStaff(env, credentials, "carlos", "Nueva contratación", name || salesLead.customer_name, phone,
-                `Sector: ${salesLead.sector || "no indicado"}. Eligió plan ${plan.speed} ($${plan.price}). Coordinar instalación.`);
+              await sendBotReply(env, credentials, phone, INSTALLATION_DATA_REQUEST_MESSAGE, preferAudio);
             } else {
               await sendBotReply(env, credentials, phone, formatPlansMessage(salesLead.plan_group), preferAudio);
+            }
+            continue;
+          }
+          if (salesLead.status === "awaiting_installation_data" && String(text || "").trim()) {
+            // El cliente puede mandar los datos todos juntos o de a poco, en cualquier orden -- se
+            // van completando campo por campo y recién cuando estén todos se avisa a Carlos, nunca
+            // antes (para no mandarle un caso a medio llenar).
+            const fragment = classifyInstallationFragment(text, {
+              name: salesLead.installation_name, address: salesLead.installation_address,
+            });
+            if (fragment) {
+              await env.DB.prepare(`UPDATE whatsapp_sales_leads SET installation_${fragment.field} = ?, updated_at = datetime('now') WHERE id = ?`)
+                .bind(fragment.value, salesLead.id).run();
+            }
+            const updatedLead = await env.DB.prepare("SELECT * FROM whatsapp_sales_leads WHERE id = ?").bind(salesLead.id).first();
+            const missing = missingInstallationFields(updatedLead);
+            if (!missing.length) {
+              await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'completed', updated_at = datetime('now') WHERE id = ?").bind(salesLead.id).run();
+              await sendBotReply(env, credentials, phone, "¡Perfecto, ya tenemos todos tus datos! Un agente coordinará la instalación contigo a la brevedad. 🙌", preferAudio);
+              await notifyStaff(env, credentials, "carlos", "Nueva contratación", updatedLead.installation_name || name || salesLead.customer_name, phone,
+                `Sector: ${salesLead.sector || "no indicado"}. Plan: ${salesLead.chosen_plan}. RUT: ${updatedLead.installation_rut}. Tel: ${updatedLead.installation_phone}. Correo: ${updatedLead.installation_email}. Dirección: ${updatedLead.installation_address}. Coordinar instalación.`);
+            } else {
+              await sendBotReply(env, credentials, phone, `Anotado ✅ Todavía me falta: ${missing.join(", ")}.`, preferAudio);
             }
             continue;
           }
