@@ -277,6 +277,23 @@ async function ensureWhatsAppBotTables(env) {
     case_id TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_billing_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    phone TEXT NOT NULL,
+    customer_id TEXT,
+    customer_name TEXT,
+    reported_name TEXT,
+    days_without_service INTEGER,
+    reason TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_pending_billing (
+    phone TEXT PRIMARY KEY,
+    days_without_service INTEGER,
+    reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS bpgo_bot_faq (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -443,6 +460,7 @@ const BOT_SYSTEM_PROMPT = `Eres el asistente de WhatsApp de BPGO, un proveedor d
 Reglas duras, nunca las rompas:
 - NUNCA confirmes ni marques un pago como "recibido" o "verificado" en el sistema. Si el cliente dice que pagó o envía un comprobante (imagen o PDF, en cualquier formato de banco/app, no todos se ven iguales), solo agradece la recepción y explica que el equipo lo va a revisar (usa la acción "payment_ack"). Si en la imagen del comprobante puedes leer CLARAMENTE el monto pagado y la fecha del pago, ponlos en "extracted_amount" (solo el número, sin $ ni puntos) y "extracted_date" (como aparezca, ej. "15-09-2026"). Si no los ves con certeza, déjalos vacíos: nunca inventes un monto o fecha.
 - Si el cliente pregunta cuánto debe, cuándo vence su pago, o el estado de su cuenta: usa EXCLUSIVAMENTE el dato de "Cliente identificado" (saldo/vencimiento) que te doy abajo, con la acción "reply". Nunca inventes un monto o fecha. Si ese dato no está disponible o el cliente no fue identificado, dilo claramente y usa "escalate".
+- Si el cliente menciona que estuvo sin internet/servicio y pregunta o reclama por el cobro, un descuento, o cuánto debe pagar por esos días: NUNCA calcules ni menciones ningún monto, descuento o total ajustado, bajo ninguna circunstancia, aunque el cliente insista o tú creas saber calcularlo. Eso solo lo decide un humano. En vez de eso, pregúntale con "reply" cuántos días exactos estuvo sin servicio (y desde cuándo, si no lo sabes). Cuando tengas esa cantidad de días, usa la acción "billing_review_request" con "days_without_service" (número) y un resumen en "reason" — nunca en "text" va un monto.
 - Si el cliente reporta una falla técnica (sin internet, lento, intermitente, etc.) y NO pidió una visita todavía, NO uses "visit_request" de inmediato. Primero hace diagnóstico progresivo con la acción "reply", preguntando UNA cosa a la vez (color/estado de la luz del router, si ya reinició el equipo, si afecta a todos los dispositivos o solo uno, hace cuánto empezó). Sigue así hasta que el cliente confirme que afecta a todos los dispositivos, ya respondió 2-3 preguntas y el problema sigue, o pida explícitamente una visita/técnico. En ese momento usa "visit_request" con un resumen del motivo en "reason" (el sistema se encarga por su cuenta de pedir el nombre del titular si hace falta, no necesitas preguntarlo tú). Nunca confirmes un horario exacto, solo di que quedó registrada la solicitud.
 - Si el cliente pide hablar con una persona, insulta, hace un reclamo grave, o preguntas algo que no sabes con certeza (fuera de las FAQs y de los datos de cliente dados), usa la acción "escalate" y no inventes una respuesta.
 - Para todo lo demás (preguntas frecuentes, saludos, consultas generales que sí puedes responder con las FAQs dadas), usa la acción "reply".
@@ -502,12 +520,13 @@ async function callBotResponder(env, context, inboundMessage, media) {
           parameters: {
             type: "object",
             properties: {
-              action: { type: "string", enum: ["reply", "payment_ack", "visit_request", "escalate"] },
-              text: { type: "string", description: "Texto a enviar al cliente por WhatsApp (no aplica para escalate)." },
+              action: { type: "string", enum: ["reply", "payment_ack", "visit_request", "billing_review_request", "escalate"] },
+              text: { type: "string", description: "Texto a enviar al cliente por WhatsApp (no aplica para escalate). Nunca debe incluir un monto de dinero cuando la acción es billing_review_request." },
               preferred_date: { type: "string", description: "Fecha u horario preferido que dio el cliente para la visita, si aplica." },
-              reason: { type: "string", description: "Motivo de la visita/incidencia o de la escalación." },
+              reason: { type: "string", description: "Motivo de la visita/incidencia/revisión de cobro o de la escalación." },
               extracted_amount: { type: "number", description: "Monto pagado, solo si se lee con certeza en la imagen del comprobante (payment_ack)." },
               extracted_date: { type: "string", description: "Fecha del pago, solo si se lee con certeza en la imagen del comprobante (payment_ack)." },
+              days_without_service: { type: "number", description: "Cantidad de días que el cliente dijo haber estado sin servicio (billing_review_request)." },
             },
             required: ["action"],
           },
@@ -532,7 +551,9 @@ async function getKnownAccountName(env, phone) {
     WHERE phone = ? AND reported_name IS NOT NULL ORDER BY created_at DESC LIMIT 1`).bind(phone).first();
   const payment = await env.DB.prepare(`SELECT reported_name, created_at FROM whatsapp_automation_cases
     WHERE phone = ? AND reported_name IS NOT NULL ORDER BY created_at DESC LIMIT 1`).bind(phone).first();
-  const candidates = [visit, payment].filter(Boolean).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  const billing = await env.DB.prepare(`SELECT reported_name, created_at FROM whatsapp_billing_requests
+    WHERE phone = ? AND reported_name IS NOT NULL ORDER BY created_at DESC LIMIT 1`).bind(phone).first();
+  const candidates = [visit, payment, billing].filter(Boolean).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
   return candidates[0]?.reported_name || null;
   // Nota: reported_name solo se llena en el flujo determinístico (el cliente respondiendo
   // directamente a nuestra pregunta fija), nunca a partir de un campo libre del modelo --
@@ -542,6 +563,15 @@ async function getKnownAccountName(env, phone) {
 async function executeBotAction(env, credentials, phone, action, message) {
   const preferAudio = Boolean(message.preferAudio);
   if (action.action === "reply" && action.text) {
+    // Nunca dejar que el bot mencione un monto/descuento cuando el cliente habla de días sin
+    // servicio, aunque el modelo lo intente: se reemplaza por la pregunta segura de días sin
+    // servicio en vez de confiar en que el prompt alcance para evitarlo siempre.
+    const mentionsOutage = /sin internet|sin servicio|sin conexi[oó]n|d[ií]as? sin|corte de (servicio|internet)/i.test(message.customerText || "");
+    const mentionsMoney = /\$\s?\d|\b\d{3,}\s*(pesos|clp)\b/i.test(action.text);
+    if (mentionsOutage && mentionsMoney) {
+      await sendBotReply(env, credentials, phone, "Para revisar el descuento por los días sin servicio, ¿cuántos días exactos estuviste sin internet?", preferAudio);
+      return;
+    }
     await sendBotReply(env, credentials, phone, action.text, preferAudio);
     return;
   }
@@ -593,6 +623,27 @@ async function executeBotAction(env, credentials, phone, action, message) {
       ON CONFLICT(phone) DO UPDATE SET reason = excluded.reason, preferred_date = excluded.preferred_date, created_at = datetime('now')`)
       .bind(phone, action.reason || null, action.preferred_date || null).run();
     await sendBotReply(env, credentials, phone, "Para registrar la visita, ¿a nombre de quién está contratado el servicio?", preferAudio);
+    return;
+  }
+  if (action.action === "billing_review_request") {
+    // Igual que en pagos: el bot NUNCA calcula ni menciona un monto de descuento, solo junta
+    // los días sin servicio y el nombre del titular para que un humano calcule el ajuste.
+    await ensureWhatsAppBotTables(env);
+    const days = Number.isFinite(Number(action.days_without_service)) ? Math.round(Number(action.days_without_service)) : null;
+    const known = await getKnownAccountName(env, phone);
+    if (known) {
+      const customer = await findCustomerForWhatsApp(env, phone, message.customerName);
+      await env.DB.prepare(`INSERT INTO whatsapp_billing_requests (phone, customer_id, customer_name, reported_name, days_without_service, reason, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`)
+        .bind(phone, customer.id, customer.name, known, days, action.reason || null).run();
+      await sendBotReply(env, credentials, phone, "Registramos tu solicitud de revisión por los días sin servicio. Un agente calculará el ajuste correspondiente y te confirmará. 🙏", preferAudio);
+      return;
+    }
+    await env.DB.prepare(`INSERT INTO whatsapp_pending_billing (phone, days_without_service, reason, created_at)
+      VALUES (?, ?, ?, datetime('now'))
+      ON CONFLICT(phone) DO UPDATE SET days_without_service = excluded.days_without_service, reason = excluded.reason, created_at = datetime('now')`)
+      .bind(phone, days, action.reason || null).run();
+    await sendBotReply(env, credentials, phone, "Para registrar la revisión, ¿a nombre de quién está contratado el servicio?", preferAudio);
     return;
   }
   if (action.action === "escalate") {
@@ -664,12 +715,25 @@ async function runBotForInboundMessages(env, changes) {
           await sendBotReply(env, credentials, phone, `Gracias, dejamos tu comprobante asociado a nombre de ${reportedName}. El equipo lo confirmará pronto. 🙏`, preferAudio);
           continue;
         }
+        const pendingBilling = await env.DB.prepare("SELECT days_without_service, reason FROM whatsapp_pending_billing WHERE phone = ?").bind(phone).first();
+        if (pendingBilling && String(text || "").trim()) {
+          // Mismo mecanismo: el nombre del titular se captura del próximo mensaje, nunca se le
+          // pide al modelo que calcule ni mencione un monto de descuento.
+          const reportedName = String(text).trim().slice(0, 200);
+          const customer = await findCustomerForWhatsApp(env, phone, reportedName);
+          await env.DB.prepare(`INSERT INTO whatsapp_billing_requests (phone, customer_id, customer_name, reported_name, days_without_service, reason, status, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`)
+            .bind(phone, customer.id, customer.name, reportedName, pendingBilling.days_without_service, pendingBilling.reason).run();
+          await env.DB.prepare("DELETE FROM whatsapp_pending_billing WHERE phone = ?").bind(phone).run();
+          await sendBotReply(env, credentials, phone, `Gracias, registramos la solicitud a nombre de ${reportedName}. Un agente calculará el ajuste y te confirmará. 🙏`, preferAudio);
+          continue;
+        }
         const mediaId = message.image?.id || message.document?.id || null;
         let media = null;
         if (mediaId) media = await fetchWhatsAppMediaBase64(credentials, mediaId).catch(() => null);
         const context = await buildBotContext(env, phone, name);
         const action = await callBotResponder(env, context, { type: message.type || "unknown", text }, media);
-        await executeBotAction(env, credentials, phone, action, { customerName: name, messageId: message.id, preferAudio });
+        await executeBotAction(env, credentials, phone, action, { customerName: name, messageId: message.id, preferAudio, customerText: text });
       } catch {
         await setBotSessionMode(env, phone, "human", "bot_exception").catch(() => null);
       }
@@ -1289,6 +1353,28 @@ export default {
       if (!id || !["pending", "scheduled", "dismissed"].includes(status)) return Response.json({ ok: false, error: "Solicitud o estado inválido." }, { status: 400 });
       await ensureWhatsAppBotTables(env);
       const result = await env.DB.prepare("UPDATE whatsapp_visit_requests SET status = ? WHERE id = ?").bind(status, id).run();
+      if (!result.meta?.changes) return Response.json({ ok: false, error: "Solicitud no encontrada." }, { status: 404 });
+      return Response.json({ ok: true, id, status });
+    }
+
+    if (url.pathname === "/api/whatsapp/billing-requests" && request.method === "GET") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      await ensureWhatsAppBotTables(env);
+      const rows = await env.DB.prepare(`SELECT id, phone, customer_id, customer_name, reported_name, days_without_service, reason, status, created_at
+        FROM whatsapp_billing_requests ORDER BY created_at DESC LIMIT 200`).all();
+      return Response.json({ ok: true, requests: rows.results || [] });
+    }
+
+    if (url.pathname === "/api/whatsapp/billing-requests" && request.method === "PATCH") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      const body = await request.json().catch(() => ({}));
+      const id = Number(body.id);
+      const status = String(body.status || "").trim();
+      if (!id || !["pending", "resolved", "dismissed"].includes(status)) return Response.json({ ok: false, error: "Solicitud o estado inválido." }, { status: 400 });
+      await ensureWhatsAppBotTables(env);
+      const result = await env.DB.prepare("UPDATE whatsapp_billing_requests SET status = ? WHERE id = ?").bind(status, id).run();
       if (!result.meta?.changes) return Response.json({ ok: false, error: "Solicitud no encontrada." }, { status: 404 });
       return Response.json({ ok: true, id, status });
     }
