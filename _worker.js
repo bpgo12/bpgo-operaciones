@@ -258,11 +258,13 @@ async function ensureWhatsAppBotTables(env) {
     phone TEXT NOT NULL,
     customer_id TEXT,
     customer_name TEXT,
+    reported_name TEXT,
     preferred_date TEXT,
     reason TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`).run();
+  await env.DB.prepare("ALTER TABLE whatsapp_visit_requests ADD COLUMN reported_name TEXT").run().catch(() => null);
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS bpgo_bot_faq (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -347,7 +349,7 @@ const BOT_SYSTEM_PROMPT = `Eres el asistente de WhatsApp de BPGO, un proveedor d
 Reglas duras, nunca las rompas:
 - NUNCA confirmes ni marques un pago como "recibido" o "verificado" en el sistema. Si el cliente dice que pagó o envía un comprobante, solo agradece la recepción y explica que el equipo lo va a revisar (usa la acción "payment_ack").
 - Si el cliente pregunta cuánto debe, cuándo vence su pago, o el estado de su cuenta: usa EXCLUSIVAMENTE el dato de "Cliente identificado" (saldo/vencimiento) que te doy abajo, con la acción "reply". Nunca inventes un monto o fecha. Si ese dato no está disponible o el cliente no fue identificado, dilo claramente y usa "escalate".
-- Si el cliente reporta una falla técnica (sin internet, lento, intermitente, etc.), NO uses "visit_request" de inmediato. Primero hace diagnóstico progresivo con la acción "reply", preguntando UNA cosa a la vez (por ejemplo: color/estado de la luz del router, si ya reinició el equipo, si afecta a todos los dispositivos o solo uno, hace cuánto empezó). Revisa el historial de la conversación: si el cliente ya respondió 2-3 de estas preguntas y el problema sigue, o pide explícitamente una visita, recién ahí usa "visit_request" resumiendo el diagnóstico en "reason".
+- Si el cliente reporta una falla técnica (sin internet, lento, intermitente, etc.), NO uses "visit_request" de inmediato. Primero hace diagnóstico progresivo con la acción "reply", preguntando UNA cosa a la vez (por ejemplo: color/estado de la luz del router, si ya reinició el equipo, si afecta a todos los dispositivos o solo uno, hace cuánto empezó). Revisa el historial: en cuanto el cliente confirme que afecta a todos los dispositivos (o ya respondió 2-3 preguntas y el problema sigue), antes de registrar el caso pregúntale UNA vez "¿A nombre de quién está contratado el servicio?" (puede no coincidir con quien escribe). Cuando tengas ese nombre (o el cliente ya lo dio antes, o insiste en que no lo tiene), usa "visit_request": pon ese nombre en "account_name" y un resumen del diagnóstico en "reason".
 - Si el cliente pide agendar/reagendar una visita técnica directamente, usa la acción "visit_request" con la fecha/motivo que indique (o null si no la dio); nunca confirmes un horario exacto, solo di que quedó registrada la solicitud.
 - Si el cliente pide hablar con una persona, insulta, hace un reclamo grave, o preguntas algo que no sabes con certeza (fuera de las FAQs y de los datos de cliente dados), usa la acción "escalate" y no inventes una respuesta.
 - Para todo lo demás (preguntas frecuentes, saludos, consultas generales que sí puedes responder con las FAQs dadas), usa la acción "reply".
@@ -410,7 +412,8 @@ async function callBotResponder(env, context, inboundMessage, media) {
               action: { type: "string", enum: ["reply", "payment_ack", "visit_request", "escalate"] },
               text: { type: "string", description: "Texto a enviar al cliente por WhatsApp (no aplica para escalate)." },
               preferred_date: { type: "string", description: "Fecha u horario preferido que dio el cliente para la visita, si aplica." },
-              reason: { type: "string", description: "Motivo de la visita o de la escalación." },
+              reason: { type: "string", description: "Motivo de la visita/incidencia o de la escalación." },
+              account_name: { type: "string", description: "Nombre a cuyo nombre está contratado el servicio, si el cliente lo indicó (puede diferir de quien escribe)." },
             },
             required: ["action"],
           },
@@ -440,9 +443,9 @@ async function executeBotAction(env, credentials, phone, action, message) {
   if (action.action === "visit_request") {
     await ensureWhatsAppBotTables(env);
     const customer = await findCustomerForWhatsApp(env, phone, message.customerName);
-    await env.DB.prepare(`INSERT INTO whatsapp_visit_requests (phone, customer_id, customer_name, preferred_date, reason, status, created_at)
-      VALUES (?, ?, ?, ?, ?, 'pending', datetime('now'))`)
-      .bind(phone, customer.id, customer.name, action.preferred_date || null, action.reason || null).run();
+    await env.DB.prepare(`INSERT INTO whatsapp_visit_requests (phone, customer_id, customer_name, reported_name, preferred_date, reason, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`)
+      .bind(phone, customer.id, customer.name, action.account_name || null, action.preferred_date || null, action.reason || null).run();
     await sendWhatsAppText(env, credentials, phone, action.text || "Registramos tu solicitud de visita técnica, un agente te confirmará el horario. 🙌");
     return;
   }
@@ -1080,7 +1083,7 @@ export default {
       const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
       if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
       await ensureWhatsAppBotTables(env);
-      const rows = await env.DB.prepare(`SELECT id, phone, customer_id, customer_name, preferred_date, reason, status, created_at
+      const rows = await env.DB.prepare(`SELECT id, phone, customer_id, customer_name, reported_name, preferred_date, reason, status, created_at
         FROM whatsapp_visit_requests ORDER BY created_at DESC LIMIT 200`).all();
       return Response.json({ ok: true, requests: rows.results || [] });
     }
