@@ -1758,6 +1758,31 @@ export default {
       return Response.json({ ok: true, id, status });
     }
 
+    if (url.pathname === "/api/whatsapp/sales-leads" && request.method === "GET") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      await ensureWhatsAppBotTables(env);
+      const rows = await env.DB.prepare(`SELECT id, phone, customer_name, sector, plan_group, chosen_plan, latitude, longitude, status,
+        installation_name, installation_rut, installation_phone, installation_email, installation_address, created_at, updated_at
+        FROM whatsapp_sales_leads ORDER BY created_at DESC LIMIT 200`).all();
+      return Response.json({ ok: true, leads: rows.results || [] });
+    }
+
+    if (url.pathname === "/api/whatsapp/sales-leads" && request.method === "PATCH") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      const body = await request.json().catch(() => ({}));
+      const id = String(body.id || "").trim();
+      const status = String(body.status || "").trim();
+      const allowed = new Set(["awaiting_sector", "awaiting_location", "awaiting_factibilidad", "awaiting_group_clarification",
+        "no_factibilidad", "awaiting_plan", "awaiting_installation_data", "completed", "cancelled"]);
+      if (!id || !allowed.has(status)) return Response.json({ ok: false, error: "Solicitud o estado inválido." }, { status: 400 });
+      await ensureWhatsAppBotTables(env);
+      const result = await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = ?, updated_at = datetime('now') WHERE id = ?").bind(status, id).run();
+      if (!result.meta?.changes) return Response.json({ ok: false, error: "Solicitud no encontrada." }, { status: 404 });
+      return Response.json({ ok: true, id, status });
+    }
+
     if (url.pathname === "/api/whatsapp/bot-faq" && request.method === "GET") {
       const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
       if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
