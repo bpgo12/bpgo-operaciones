@@ -48,6 +48,7 @@
       (url.includes("/api/whatsapp/bot-sessions") && (method === "GET" || method === "PATCH")) ||
       (url.includes("/api/whatsapp/visit-requests") && (method === "GET" || method === "PATCH")) ||
       (url.includes("/api/whatsapp/billing-requests") && (method === "GET" || method === "PATCH")) ||
+      (url.includes("/api/whatsapp/sales-leads") && (method === "GET" || method === "PATCH")) ||
       (url.includes("/api/whatsapp/bot-faq") && (method === "GET" || method === "PUT")) ||
       (url.includes("/api/whatsapp/onboarding") && (method === "GET" || method === "POST")))) {
       const headers = new Headers(init && init.headers || {});
