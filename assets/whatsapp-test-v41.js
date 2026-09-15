@@ -184,7 +184,7 @@
       list.innerHTML = Array.from(groups.entries()).map(function (entry) {
         var phone = entry[0], messages = entry[1].slice().reverse();
         var name = messages.find(function (item) { return item.customer_name; });
-        return '<article class="whatsapp-conversation"><header><div><strong>' + escapeHtml(name && name.customer_name || "+" + phone) + '</strong><small>+' + escapeHtml(phone) + '</small></div><button type="button" class="btn secondary small" data-reply-phone="' + escapeHtml(phone) + '">Responder</button></header><div class="whatsapp-thread">' + messages.map(function (message) {
+        return '<article class="whatsapp-conversation" data-conversation-phone="' + escapeHtml(phone) + '"><header><div><strong>' + escapeHtml(name && name.customer_name || "+" + phone) + '</strong><small>+' + escapeHtml(phone) + '</small></div><button type="button" class="btn secondary small" data-reply-phone="' + escapeHtml(phone) + '">Responder</button></header><div class="whatsapp-thread">' + messages.map(function (message) {
           var content = message.message_text || (message.media_id ? "Archivo recibido (" + message.message_type + ")" : "Mensaje " + message.message_type);
           var attachment = message.media_id ? '<button type="button" class="btn secondary small" data-media-id="' + escapeHtml(message.media_id) + '">Ver comprobante o archivo</button>' : "";
           return '<div class="whatsapp-bubble ' + (message.direction === "outbound" ? "outbound" : "inbound") + '"><span>' + escapeHtml(content) + '</span>' + attachment + '<small>' + escapeHtml(new Date(message.created_at).toLocaleString("es-CL")) + '</small></div>';
@@ -217,7 +217,7 @@
         if (item.reported_name && item.customer_name && item.reported_name !== item.customer_name) details.push("En sistema: " + escapeHtml(item.customer_name));
         if (item.service_month) details.push("Período " + escapeHtml(item.service_month));
         if (item.amount) details.push("$" + Number(item.amount).toLocaleString("es-CL"));
-        return '<article class="automation-case ' + escapeHtml(item.case_type) + '"><header><div><span class="automation-kind">' + escapeHtml(automationLabel(item.case_type)) + '</span><strong>' + identified + '</strong><small>+' + escapeHtml(item.phone) + ' · confianza ' + escapeHtml(item.confidence) + '%</small></div><span class="automation-state">' + escapeHtml(item.status) + '</span></header><p>' + escapeHtml(item.summary || "Pendiente de revisión") + '</p>' + (details.length ? '<p class="automation-details">' + details.join(" · ") + '</p>' : '') + '<footer><button type="button" class="btn secondary small" data-case-action="dismissed" data-case-id="' + escapeHtml(item.id) + '">Descartar</button><button type="button" class="btn small" data-case-action="reviewing" data-case-id="' + escapeHtml(item.id) + '">Revisar</button></footer></article>';
+        return '<article class="automation-case ' + escapeHtml(item.case_type) + '"><header><div><span class="automation-kind">' + escapeHtml(automationLabel(item.case_type)) + '</span><strong>' + identified + '</strong><small>+' + escapeHtml(item.phone) + ' · confianza ' + escapeHtml(item.confidence) + '%</small></div><span class="automation-state">' + escapeHtml(item.status) + '</span></header><p>' + escapeHtml(item.summary || "Pendiente de revisión") + '</p>' + (details.length ? '<p class="automation-details">' + details.join(" · ") + '</p>' : '') + '<footer><button type="button" class="btn secondary small" data-case-action="dismissed" data-case-id="' + escapeHtml(item.id) + '">Descartar</button><button type="button" class="btn small" data-case-action="reviewing" data-case-id="' + escapeHtml(item.id) + '" data-case-phone="' + escapeHtml(item.phone) + '">Revisar</button></footer></article>';
       }).join("");
     } catch (error) {
       list.innerHTML = '<div class="whatsapp-test-status error">' + escapeHtml(error.message || "Error al cargar los casos") + '</div>';
@@ -233,6 +233,15 @@
     var data = await response.json().catch(function () { return {}; });
     if (!response.ok) window.alert(data.error || "No se pudo actualizar el caso.");
     await loadAutomation(panel);
+  }
+
+  async function openCaseInInbox(panel, phone) {
+    await loadInbox(panel);
+    var conversation = panel.querySelector('[data-conversation-phone="' + CSS.escape(phone) + '"]');
+    if (!conversation) return;
+    conversation.scrollIntoView({ behavior: "smooth", block: "center" });
+    conversation.classList.add("highlighted");
+    window.setTimeout(function () { conversation.classList.remove("highlighted"); }, 3000);
   }
 
   async function replyTo(panel, phone) {
@@ -401,7 +410,11 @@
     }
     var caseAction = event.target.closest("[data-case-action]");
     if (caseAction) {
-      updateAutomationCase(caseAction.closest("[data-whatsapp-test-panel]"), caseAction.dataset.caseId, caseAction.dataset.caseAction);
+      var casePanel = caseAction.closest("[data-whatsapp-test-panel]");
+      updateAutomationCase(casePanel, caseAction.dataset.caseId, caseAction.dataset.caseAction);
+      if (caseAction.dataset.caseAction === "reviewing" && caseAction.dataset.casePhone) {
+        openCaseInInbox(casePanel, caseAction.dataset.casePhone);
+      }
       return;
     }
     var refreshInbox = event.target.closest("[data-refresh-inbox]");
