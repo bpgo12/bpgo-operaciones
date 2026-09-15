@@ -178,6 +178,7 @@ async function ensureWhatsAppAutomationTable(env) {
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_cases_status_created ON whatsapp_automation_cases(status, created_at DESC)").run();
+  await env.DB.prepare("ALTER TABLE whatsapp_automation_cases ADD COLUMN reported_name TEXT").run().catch(() => null);
 }
 
 const SPANISH_MONTHS = {
@@ -271,6 +272,11 @@ async function ensureWhatsAppBotTables(env) {
     preferred_date TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_pending_payments (
+    phone TEXT PRIMARY KEY,
+    case_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS bpgo_bot_faq (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
@@ -353,7 +359,7 @@ async function sendWhatsAppText(env, credentials, phone, text) {
 const BOT_SYSTEM_PROMPT = `Eres el asistente de WhatsApp de BPGO, un proveedor de internet/TV cable en Chile. Respondes en español, tono cercano y breve (2-4 frases, sin inventar información que no tengas).
 
 Reglas duras, nunca las rompas:
-- NUNCA confirmes ni marques un pago como "recibido" o "verificado" en el sistema. Si el cliente dice que pagó o envía un comprobante, solo agradece la recepción y explica que el equipo lo va a revisar (usa la acción "payment_ack").
+- NUNCA confirmes ni marques un pago como "recibido" o "verificado" en el sistema. Si el cliente dice que pagó o envía un comprobante (imagen o PDF, en cualquier formato de banco/app, no todos se ven iguales), solo agradece la recepción y explica que el equipo lo va a revisar (usa la acción "payment_ack"). Si en la imagen del comprobante puedes leer CLARAMENTE el monto pagado y la fecha del pago, ponlos en "extracted_amount" (solo el número, sin $ ni puntos) y "extracted_date" (como aparezca, ej. "15-09-2026"). Si no los ves con certeza, déjalos vacíos: nunca inventes un monto o fecha.
 - Si el cliente pregunta cuánto debe, cuándo vence su pago, o el estado de su cuenta: usa EXCLUSIVAMENTE el dato de "Cliente identificado" (saldo/vencimiento) que te doy abajo, con la acción "reply". Nunca inventes un monto o fecha. Si ese dato no está disponible o el cliente no fue identificado, dilo claramente y usa "escalate".
 - Si el cliente reporta una falla técnica (sin internet, lento, intermitente, etc.) y NO pidió una visita todavía, NO uses "visit_request" de inmediato. Primero hace diagnóstico progresivo con la acción "reply", preguntando UNA cosa a la vez (color/estado de la luz del router, si ya reinició el equipo, si afecta a todos los dispositivos o solo uno, hace cuánto empezó). Sigue así hasta que el cliente confirme que afecta a todos los dispositivos, ya respondió 2-3 preguntas y el problema sigue, o pida explícitamente una visita/técnico. En ese momento usa "visit_request" con un resumen del motivo en "reason" (el sistema se encarga por su cuenta de pedir el nombre del titular si hace falta, no necesitas preguntarlo tú). Nunca confirmes un horario exacto, solo di que quedó registrada la solicitud.
 - Si el cliente pide hablar con una persona, insulta, hace un reclamo grave, o preguntas algo que no sabes con certeza (fuera de las FAQs y de los datos de cliente dados), usa la acción "escalate" y no inventes una respuesta.
@@ -418,6 +424,8 @@ async function callBotResponder(env, context, inboundMessage, media) {
               text: { type: "string", description: "Texto a enviar al cliente por WhatsApp (no aplica para escalate)." },
               preferred_date: { type: "string", description: "Fecha u horario preferido que dio el cliente para la visita, si aplica." },
               reason: { type: "string", description: "Motivo de la visita/incidencia o de la escalación." },
+              extracted_amount: { type: "number", description: "Monto pagado, solo si se lee con certeza en la imagen del comprobante (payment_ack)." },
+              extracted_date: { type: "string", description: "Fecha del pago, solo si se lee con certeza en la imagen del comprobante (payment_ack)." },
             },
             required: ["action"],
           },
@@ -435,20 +443,68 @@ async function callBotResponder(env, context, inboundMessage, media) {
   return parsed;
 }
 
+async function getKnownAccountName(env, phone) {
+  await ensureWhatsAppBotTables(env);
+  await ensureWhatsAppAutomationTable(env);
+  const visit = await env.DB.prepare(`SELECT reported_name, created_at FROM whatsapp_visit_requests
+    WHERE phone = ? AND reported_name IS NOT NULL ORDER BY created_at DESC LIMIT 1`).bind(phone).first();
+  const payment = await env.DB.prepare(`SELECT reported_name, created_at FROM whatsapp_automation_cases
+    WHERE phone = ? AND reported_name IS NOT NULL ORDER BY created_at DESC LIMIT 1`).bind(phone).first();
+  const candidates = [visit, payment].filter(Boolean).sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  return candidates[0]?.reported_name || null;
+  // Nota: reported_name solo se llena en el flujo determinístico (el cliente respondiendo
+  // directamente a nuestra pregunta fija), nunca a partir de un campo libre del modelo --
+  // por eso es seguro reutilizarlo para no volver a preguntar a un contacto ya identificado.
+}
+
 async function executeBotAction(env, credentials, phone, action, message) {
   if (action.action === "reply" && action.text) {
     await sendWhatsAppText(env, credentials, phone, action.text);
     return;
   }
   if (action.action === "payment_ack") {
-    await sendWhatsAppText(env, credentials, phone, action.text || "Recibimos tu comprobante, en breve lo revisamos. ¡Gracias! 🙏");
+    await ensureWhatsAppAutomationTable(env);
+    const caseRow = message.messageId ? await env.DB.prepare(
+      "SELECT id, reported_name FROM whatsapp_automation_cases WHERE source_message_id = ?"
+    ).bind(message.messageId).first() : null;
+    if (caseRow && (Number.isFinite(Number(action.extracted_amount)) || action.extracted_date)) {
+      await env.DB.prepare(`UPDATE whatsapp_automation_cases SET
+        amount = COALESCE(?, amount), service_month = COALESCE(?, service_month), updated_at = datetime('now')
+        WHERE id = ?`)
+        .bind(Number.isFinite(Number(action.extracted_amount)) ? Math.round(Number(action.extracted_amount)) : null,
+          action.extracted_date || null, caseRow.id).run();
+    }
+    const known = caseRow?.reported_name || await getKnownAccountName(env, phone);
+    if (known) {
+      if (caseRow && !caseRow.reported_name) {
+        await env.DB.prepare("UPDATE whatsapp_automation_cases SET reported_name = ? WHERE id = ?").bind(known, caseRow.id).run();
+      }
+      await sendWhatsAppText(env, credentials, phone, action.text || "Recibimos tu comprobante, en breve lo revisamos. ¡Gracias! 🙏");
+      return;
+    }
+    if (caseRow) {
+      await ensureWhatsAppBotTables(env);
+      await env.DB.prepare(`INSERT INTO whatsapp_pending_payments (phone, case_id, created_at) VALUES (?, ?, datetime('now'))
+        ON CONFLICT(phone) DO UPDATE SET case_id = excluded.case_id, created_at = datetime('now')`)
+        .bind(phone, caseRow.id).run();
+    }
+    await sendWhatsAppText(env, credentials, phone, "¡Gracias por tu comprobante! Para dejarlo asociado a tu cuenta, ¿a nombre de quién está contratado el servicio?");
     return;
   }
   if (action.action === "visit_request") {
-    // El nombre del titular SIEMPRE se pide y se captura por código en el próximo mensaje
-    // (ver whatsapp_pending_visits en runBotForInboundMessages) -- nunca se confía en que el
-    // modelo lo haya preguntado o lo recuerde, para que esto sea 100% predecible.
+    // El nombre del titular SIEMPRE se pide y se captura por código en el próximo mensaje si
+    // no lo conocíamos ya (ver whatsapp_pending_visits en runBotForInboundMessages) -- nunca se
+    // confía en que el modelo lo haya preguntado o lo recuerde, para que esto sea predecible.
     await ensureWhatsAppBotTables(env);
+    const known = await getKnownAccountName(env, phone);
+    if (known) {
+      const customer = await findCustomerForWhatsApp(env, phone, message.customerName);
+      await env.DB.prepare(`INSERT INTO whatsapp_visit_requests (phone, customer_id, customer_name, reported_name, preferred_date, reason, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`)
+        .bind(phone, customer.id, customer.name, known, action.preferred_date || null, action.reason || null).run();
+      await sendWhatsAppText(env, credentials, phone, action.text || "Registramos tu solicitud de visita técnica, un agente te confirmará el horario. 🙌");
+      return;
+    }
     await env.DB.prepare(`INSERT INTO whatsapp_pending_visits (phone, reason, preferred_date, created_at)
       VALUES (?, ?, ?, datetime('now'))
       ON CONFLICT(phone) DO UPDATE SET reason = excluded.reason, preferred_date = excluded.preferred_date, created_at = datetime('now')`)
@@ -493,12 +549,26 @@ async function runBotForInboundMessages(env, changes) {
           await sendWhatsAppText(env, credentials, phone, `Gracias, registramos la solicitud a nombre de ${reportedName}. Un agente te confirmará el horario. 🙌`);
           continue;
         }
+        const pendingPayment = await env.DB.prepare("SELECT case_id FROM whatsapp_pending_payments WHERE phone = ?").bind(phone).first();
+        if (pendingPayment && String(text || "").trim()) {
+          // Mismo mecanismo determinístico que las visitas: el próximo mensaje del cliente se
+          // toma como el nombre del titular para el comprobante que ya quedó registrado.
+          const reportedName = String(text).trim().slice(0, 200);
+          if (pendingPayment.case_id) {
+            await ensureWhatsAppAutomationTable(env);
+            await env.DB.prepare("UPDATE whatsapp_automation_cases SET reported_name = ?, updated_at = datetime('now') WHERE id = ?")
+              .bind(reportedName, pendingPayment.case_id).run();
+          }
+          await env.DB.prepare("DELETE FROM whatsapp_pending_payments WHERE phone = ?").bind(phone).run();
+          await sendWhatsAppText(env, credentials, phone, `Gracias, dejamos tu comprobante asociado a nombre de ${reportedName}. El equipo lo confirmará pronto. 🙏`);
+          continue;
+        }
         const mediaId = message.image?.id || message.document?.id || null;
         let media = null;
         if (mediaId) media = await fetchWhatsAppMediaBase64(credentials, mediaId).catch(() => null);
         const context = await buildBotContext(env, phone, name);
         const action = await callBotResponder(env, context, { type: message.type || "unknown", text }, media);
-        await executeBotAction(env, credentials, phone, action, { customerName: name });
+        await executeBotAction(env, credentials, phone, action, { customerName: name, messageId: message.id });
       } catch {
         await setBotSessionMode(env, phone, "human", "bot_exception").catch(() => null);
       }
@@ -861,7 +931,7 @@ export default {
       const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
       if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
       await ensureWhatsAppAutomationTable(env);
-      const rows = await env.DB.prepare(`SELECT id, source_message_id, phone, customer_name, customer_id,
+      const rows = await env.DB.prepare(`SELECT id, source_message_id, phone, customer_name, customer_id, reported_name,
         case_type, confidence, status, summary, service_month, amount, media_id, decision_note, created_at, updated_at
         FROM whatsapp_automation_cases ORDER BY created_at DESC LIMIT 200`).all();
       return Response.json({ ok: true, cases: rows.results || [] });
