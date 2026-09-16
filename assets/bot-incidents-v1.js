@@ -4,6 +4,59 @@
   const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" })[char]);
   const statusLabel = (value) => ({ pending: "Pendiente", scheduled: "Agendada", resolved: "Resuelta", dismissed: "Descartada" })[value] || value;
   let active = false;
+  let currentItems = [];
+
+  function waitFor(check, timeout, interval) {
+    return new Promise((resolve) => {
+      const start = Date.now();
+      const tick = () => {
+        const result = check();
+        if (result) return resolve(result);
+        if (Date.now() - start >= (timeout || 4000)) return resolve(null);
+        window.setTimeout(tick, interval || 120);
+      };
+      tick();
+    });
+  }
+
+  function setReactValue(el, value) {
+    if (!el) return;
+    const proto = el.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype
+      : el.tagName === "SELECT" ? window.HTMLSelectElement.prototype
+      : window.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+    setter.call(el, value);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
+  // Abre el formulario real de "Nuevo trabajo" (Actividades) y lo prellena con lo que el bot ya
+  // reunió, para no hacer que Eduardo retipee todo -- solo le falta definir fecha/técnico/ruta en
+  // Planificación, como ya indica la propia app ("Usa Pre-agendada para solicitudes de WhatsApp").
+  async function openWorkOrderForm(item) {
+    deactivate();
+    const actividadesBtn = await waitFor(() => [...document.querySelectorAll(".sidebar .nav button")].find((b) => !b.dataset.botIncidentsNav && b.textContent.trim().toLowerCase() === "actividades"));
+    if (!actividadesBtn) { window.alert("No encontré la sección Actividades."); return; }
+    actividadesBtn.click();
+    const nuevoBtn = await waitFor(() => [...document.querySelectorAll("button")].find((b) => b.textContent.trim() === "Nuevo trabajo"));
+    if (!nuevoBtn) { window.alert("Abrí Actividades pero no encontré el botón \"Nuevo trabajo\"."); return; }
+    nuevoBtn.click();
+    const clientInput = await waitFor(() => document.querySelector('input[name="client"]'));
+    if (!clientInput) { window.alert("No se pudo abrir el formulario de nuevo trabajo."); return; }
+    const isBilling = item._source === "billing";
+    const titleField = document.querySelector('input[name="title"]');
+    setReactValue(titleField, isBilling ? "Revisión por corte de servicio" : "Visita técnica");
+    setReactValue(clientInput, item.reported_name || item.customer_name || "");
+    setReactValue(document.querySelector('input[name="customerPhone"]'), item.phone || "");
+    const notes = [item.reason, item.days_without_service ? `${item.days_without_service} día(s) sin servicio` : null].filter(Boolean).join(". ");
+    setReactValue(document.querySelector('textarea[name="accessNotes"]'), notes);
+    setReactValue(document.querySelector('textarea[name="description"]'), notes || "Caso reportado por el bot de WhatsApp.");
+    const statusField = document.querySelector('select[name="status"]');
+    if (statusField) {
+      const preagendada = [...statusField.options].find((option) => option.textContent.trim().toLowerCase().includes("pre-agendada"));
+      if (preagendada) setReactValue(statusField, preagendada.value);
+    }
+  }
 
   function sidebarNav() {
     return document.querySelector(".sidebar .nav");
@@ -109,6 +162,7 @@
       const items = visits.concat(billing)
         .filter((item) => item.status !== "dismissed")
         .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      currentItems = items;
       updateBadge(items.filter((item) => item.status === "pending").length);
       if (!items.length) {
         list.innerHTML = '<div class="whatsapp-inbox-empty">No hay incidencias técnicas pendientes.</div>';
@@ -122,9 +176,7 @@
         if (item.days_without_service) extra.push(item.days_without_service + " día(s) sin servicio");
         if (item.reason) extra.push(escapeHtml(item.reason));
         const kindLabel = item._source === "billing" ? "Descuento por corte" : "Solicitud de visita";
-        const resolveAction = item._source === "billing" ? "resolved" : "scheduled";
-        const resolveLabel = item._source === "billing" ? "Marcar resuelta" : "Marcar agendada";
-        return '<article class="automation-case technical_fault"><header><div><span class="automation-kind">' + kindLabel + '</span><strong>' + identified + '</strong><small>+' + escapeHtml(item.phone) + ' · ' + escapeHtml(new Date(item.created_at).toLocaleString("es-CL")) + '</small></div><span class="automation-state">' + escapeHtml(statusLabel(item.status)) + '</span></header>' + (extra.length ? '<p class="automation-details">' + extra.join(" · ") + '</p>' : '') + '<footer><button type="button" class="btn secondary small" data-bot-incidents-action="dismissed" data-source="' + item._source + '" data-id="' + escapeHtml(item.id) + '">Descartar</button><button type="button" class="btn small" data-bot-incidents-action="' + resolveAction + '" data-source="' + item._source + '" data-id="' + escapeHtml(item.id) + '">' + resolveLabel + '</button></footer></article>';
+        return '<article class="automation-case technical_fault"><header><div><span class="automation-kind">' + kindLabel + '</span><strong>' + identified + '</strong><small>+' + escapeHtml(item.phone) + ' · ' + escapeHtml(new Date(item.created_at).toLocaleString("es-CL")) + '</small></div><span class="automation-state">' + escapeHtml(statusLabel(item.status)) + '</span></header>' + (extra.length ? '<p class="automation-details">' + extra.join(" · ") + '</p>' : '') + '<footer><button type="button" class="btn secondary small" data-bot-incidents-action="dismissed" data-source="' + item._source + '" data-id="' + escapeHtml(item.id) + '">Descartar</button><button type="button" class="btn small" data-bot-incidents-review data-source="' + item._source + '" data-id="' + escapeHtml(item.id) + '">Revisar y agendar</button></footer></article>';
       }).join("");
     } catch (error) {
       list.innerHTML = '<div class="whatsapp-test-status error">' + escapeHtml(error.message || "Error al cargar incidencias") + '</div>';
@@ -191,7 +243,16 @@
   document.addEventListener("click", (event) => {
     const actionBtn = event.target.closest("[data-bot-incidents-action]");
     if (actionBtn) {
-      updateStatus(actionBtn.dataset.id, actionBtn.dataset.botIncidentsAction);
+      updateStatus(actionBtn.dataset.id, actionBtn.dataset.botIncidentsAction, actionBtn.dataset.source);
+      return;
+    }
+    const reviewBtn = event.target.closest("[data-bot-incidents-review]");
+    if (reviewBtn) {
+      const item = currentItems.find((entry) => String(entry.id) === reviewBtn.dataset.id && entry._source === reviewBtn.dataset.source);
+      if (item) {
+        openWorkOrderForm(item);
+        updateStatus(item.id, item._source === "billing" ? "resolved" : "scheduled", item._source);
+      }
       return;
     }
     const navBtn = event.target.closest(".sidebar .nav button");
