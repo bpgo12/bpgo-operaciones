@@ -49,7 +49,8 @@
     setReactValue(clientInput, item.reported_name || item.customer_name || "");
     setReactValue(document.querySelector('input[name="customerPhone"]'), item.phone || "");
     const notes = [item.reason, item.days_without_service ? `${item.days_without_service} día(s) sin servicio` : null].filter(Boolean).join(". ");
-    setReactValue(document.querySelector('textarea[name="accessNotes"]'), notes);
+    const withTranscript = [notes, item.transcript ? `Conversación con el cliente:\n${item.transcript}` : null].filter(Boolean).join("\n\n");
+    setReactValue(document.querySelector('textarea[name="accessNotes"]'), withTranscript || "Caso reportado por el bot de WhatsApp.");
     setReactValue(document.querySelector('textarea[name="description"]'), notes || "Caso reportado por el bot de WhatsApp.");
     const statusField = document.querySelector('select[name="status"]');
     if (statusField) {
@@ -176,7 +177,10 @@
         if (item.days_without_service) extra.push(item.days_without_service + " día(s) sin servicio");
         if (item.reason) extra.push(escapeHtml(item.reason));
         const kindLabel = item._source === "billing" ? "Descuento por corte" : "Solicitud de visita";
-        return '<article class="automation-case technical_fault"><header><div><span class="automation-kind">' + kindLabel + '</span><strong>' + identified + '</strong><small>+' + escapeHtml(item.phone) + ' · ' + escapeHtml(new Date(item.created_at).toLocaleString("es-CL")) + '</small></div><span class="automation-state">' + escapeHtml(statusLabel(item.status)) + '</span></header>' + (extra.length ? '<p class="automation-details">' + extra.join(" · ") + '</p>' : '') + '<footer><button type="button" class="btn secondary small" data-bot-incidents-action="dismissed" data-source="' + item._source + '" data-id="' + escapeHtml(item.id) + '">Descartar</button><button type="button" class="btn small" data-bot-incidents-review data-source="' + item._source + '" data-id="' + escapeHtml(item.id) + '">Revisar y agendar</button></footer></article>';
+        const transcriptBlock = item.transcript
+          ? '<details class="bot-incidents-transcript"><summary>Ver conversación con el cliente</summary><pre>' + escapeHtml(item.transcript) + '</pre></details>'
+          : "";
+        return '<article class="automation-case technical_fault"><header><div><span class="automation-kind">' + kindLabel + '</span><strong>' + identified + '</strong><small>+' + escapeHtml(item.phone) + ' · ' + escapeHtml(new Date(item.created_at).toLocaleString("es-CL")) + '</small></div><span class="automation-state">' + escapeHtml(statusLabel(item.status)) + '</span></header>' + (extra.length ? '<p class="automation-details">' + extra.join(" · ") + '</p>' : '') + transcriptBlock + '<footer><button type="button" class="btn secondary small" data-bot-incidents-action="dismissed" data-source="' + item._source + '" data-id="' + escapeHtml(item.id) + '">Descartar</button><button type="button" class="btn small" data-bot-incidents-review data-source="' + item._source + '" data-id="' + escapeHtml(item.id) + '">Revisar y agendar</button></footer></article>';
       }).join("");
     } catch (error) {
       list.innerHTML = '<div class="whatsapp-test-status error">' + escapeHtml(error.message || "Error al cargar incidencias") + '</div>';

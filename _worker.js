@@ -316,6 +316,24 @@ async function ensureWhatsAppBotTables(env) {
   for (const column of ["installation_name", "installation_rut", "installation_phone", "installation_email", "installation_address"]) {
     await env.DB.prepare(`ALTER TABLE whatsapp_sales_leads ADD COLUMN ${column} TEXT`).run().catch(() => null);
   }
+  await env.DB.prepare("ALTER TABLE whatsapp_visit_requests ADD COLUMN transcript TEXT").run().catch(() => null);
+  await env.DB.prepare("ALTER TABLE whatsapp_billing_requests ADD COLUMN transcript TEXT").run().catch(() => null);
+}
+
+// Arma un texto legible con los últimos mensajes reales del cliente (y las preguntas del bot) para
+// que Operaciones vea el detalle exacto de lo que se conversó -- un resumen de una línea escrito
+// por el modelo puede perder matices ("qué luz tiene el router", "desde cuándo", etc.) que sí
+// importan para diagnosticar en terreno.
+async function buildRecentTranscript(env, phone, limit) {
+  await ensureWhatsAppInboxTable(env);
+  const rows = await env.DB.prepare(`SELECT direction, message_type, message_text, created_at
+    FROM whatsapp_inbox_messages WHERE phone = ? ORDER BY created_at DESC LIMIT ?`).bind(phone, limit || 20).all();
+  const lines = (rows.results || []).reverse().map((row) => {
+    const who = row.direction === "inbound" ? "Cliente" : "BPGO";
+    const text = row.message_text || (row.message_type === "image" ? "[imagen]" : row.message_type === "audio" ? "[audio]" : `[${row.message_type}]`);
+    return `${who}: ${text}`;
+  });
+  return lines.join("\n").slice(0, 3000);
 }
 
 async function getBotSessionRow(env, phone) {
@@ -674,7 +692,7 @@ Reglas duras, nunca las rompas:
 - NUNCA confirmes ni marques un pago como "recibido" o "verificado" en el sistema. Si el cliente dice que pagó o envía un comprobante (imagen o PDF, en cualquier formato de banco/app, no todos se ven iguales), solo agradece la recepción y explica que el equipo lo va a revisar (usa la acción "payment_ack"). Si en la imagen del comprobante puedes leer CLARAMENTE el monto pagado y la fecha del pago, ponlos en "extracted_amount" (solo el número, sin $ ni puntos) y "extracted_date" (como aparezca, ej. "15-09-2026"). Si no los ves con certeza, déjalos vacíos: nunca inventes un monto o fecha.
 - Si el cliente pregunta cuánto debe, cuándo vence su pago, o el estado de su cuenta: usa EXCLUSIVAMENTE el dato de "Cliente identificado" (saldo/vencimiento) que te doy abajo, con la acción "reply". Nunca inventes un monto o fecha. Si ese dato no está disponible o el cliente no fue identificado, dilo claramente y usa "escalate".
 - "billing_review_request" (Descuento por corte) es SOLO para cuando el cliente pide explícitamente el descuento/ajuste, o pregunta directamente cuánto le van a cobrar o descontar por los días sin servicio (ej. "me van a descontar esos días?", "cuánto tengo que pagar si estuve sin internet", "quiero que me hagan un descuento"). Si el cliente SOLO está reportando la falla y respondiendo tu diagnóstico técnico (aunque mencione hace cuántos días o desde qué hora no tiene servicio), eso NO es un pedido de descuento -- sigue el flujo de diagnóstico técnico normal de más abajo, NO uses "billing_review_request" solo porque haya un número de días de por medio. Cuando sí corresponda billing_review_request: NUNCA calcules ni menciones ningún monto, descuento o total ajustado, bajo ninguna circunstancia. Eso solo lo decide un humano. Usa "reply" para preguntar cuántos días exactos estuvo sin servicio si no te lo ha dicho, y cuando lo tengas usa la acción "billing_review_request" con "days_without_service" (número) y un resumen en "reason" — nunca en "text" va un monto.
-- Si el cliente reporta una falla técnica (sin internet, lento, intermitente, etc.) y NO pidió una visita ni un descuento todavía, NO uses "visit_request" de inmediato. Primero hace diagnóstico progresivo con la acción "reply", preguntando UNA cosa a la vez (color/estado de la luz del router, si ya reinició el equipo, si afecta a todos los dispositivos o solo uno, hace cuánto/desde cuándo empezó). Sigue así hasta que el cliente confirme que afecta a todos los dispositivos, ya respondió 2-3 preguntas y el problema sigue, o pida explícitamente una visita/técnico. En ese momento usa "visit_request" con un resumen del motivo en "reason" (incluye ahí cuántos días/desde cuándo lleva sin servicio si te lo dijo; el sistema se encarga por su cuenta de pedir el nombre del titular si hace falta, no necesitas preguntarlo tú). Nunca confirmes un horario exacto, solo di que quedó registrada la solicitud. Este es el flujo normal para "estoy sin internet" -- billing_review_request NUNCA reemplaza este flujo, son cosas distintas (una es mandar un técnico, la otra es un descuento que el cliente pidió aparte).
+- Si el cliente reporta una falla técnica (sin internet, lento, intermitente, etc.) y NO pidió una visita ni un descuento todavía, NO uses "visit_request" de inmediato. Primero hace diagnóstico progresivo con la acción "reply", preguntando UNA cosa a la vez (color/estado de la luz del router, si ya reinició el equipo, si afecta a todos los dispositivos o solo uno, hace cuánto/desde cuándo empezó). Sigue así hasta que el cliente confirme que afecta a todos los dispositivos, ya respondió 2-3 preguntas y el problema sigue, o pida explícitamente una visita/técnico. En ese momento usa "visit_request" con un resumen COMPLETO en "reason" -- no una frase corta: incluye todo lo que el cliente contó (color/estado de la luz, si reinició el router y qué pasó, si afecta a todos los dispositivos o solo uno, hace cuánto/desde cuándo, y cualquier otro detalle que haya dado) para que el técnico que llegue a terreno ya sepa qué está pasando sin tener que volver a preguntar (el sistema se encarga por su cuenta de pedir el nombre del titular si hace falta, no necesitas preguntarlo tú). Nunca confirmes un horario exacto, solo di que quedó registrada la solicitud. Este es el flujo normal para "estoy sin internet" -- billing_review_request NUNCA reemplaza este flujo, son cosas distintas (una es mandar un técnico, la otra es un descuento que el cliente pidió aparte).
 - Reserva la acción "escalate" solo para: el cliente pide explícitamente hablar con una persona, insulta, hace un reclamo grave, o pregunta algo puntual que no sabes con certeza (fuera de las FAQs y de los datos de cliente dados). Si el mensaje es corto, ambiguo, tiene errores de tipeo, o simplemente no lo entiendes (ej. "hol", una palabra suelta, algo cortado), NUNCA escales por eso solo: usa "reply" y pide amablemente que repita o aclare qué necesita. Escala únicamente si ya pediste aclaración y el cliente sigue sin poder comunicar lo que necesita.
 - Si el cliente escribe porque quiere CONTRATAR internet por primera vez (no es cliente ya identificado, o pide un nuevo punto/dirección), usa la acción "new_customer_request" y no digas nada más tú: el sistema se encarga de preguntar el sector, pedir la ubicación, revisar factibilidad con el equipo y mostrar los planes, todo por su cuenta.
 - Para todo lo demás (preguntas frecuentes, saludos, consultas generales que sí puedes responder con las FAQs dadas), usa la acción "reply".
@@ -858,9 +876,10 @@ async function executeBotAction(env, credentials, phone, action, message) {
     const known = await getKnownAccountName(env, phone);
     if (known) {
       const customer = await findCustomerForWhatsApp(env, phone, message.customerName);
-      await env.DB.prepare(`INSERT INTO whatsapp_visit_requests (phone, customer_id, customer_name, reported_name, preferred_date, reason, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`)
-        .bind(phone, customer.id, customer.name, known, action.preferred_date || null, action.reason || null).run();
+      const transcript = await buildRecentTranscript(env, phone);
+      await env.DB.prepare(`INSERT INTO whatsapp_visit_requests (phone, customer_id, customer_name, reported_name, preferred_date, reason, status, created_at, transcript)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'), ?)`)
+        .bind(phone, customer.id, customer.name, known, action.preferred_date || null, action.reason || null, transcript).run();
       await sendBotReply(env, credentials, phone, action.text || "Registramos tu solicitud de visita técnica, un agente te confirmará el horario. 🙌", preferAudio);
       await notifyStaff(env, credentials, "eduardo", "Incidencia técnica", known, phone, action.reason || "Cliente reportó una falla técnica.");
       await setBotSessionMode(env, phone, "human", "case_created_visit");
@@ -881,9 +900,10 @@ async function executeBotAction(env, credentials, phone, action, message) {
     const known = await getKnownAccountName(env, phone);
     if (known) {
       const customer = await findCustomerForWhatsApp(env, phone, message.customerName);
-      await env.DB.prepare(`INSERT INTO whatsapp_billing_requests (phone, customer_id, customer_name, reported_name, days_without_service, reason, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`)
-        .bind(phone, customer.id, customer.name, known, days, action.reason || null).run();
+      const transcript = await buildRecentTranscript(env, phone);
+      await env.DB.prepare(`INSERT INTO whatsapp_billing_requests (phone, customer_id, customer_name, reported_name, days_without_service, reason, status, created_at, transcript)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'), ?)`)
+        .bind(phone, customer.id, customer.name, known, days, action.reason || null, transcript).run();
       await sendBotReply(env, credentials, phone, "Registramos tu solicitud de revisión por los días sin servicio. Un agente calculará el ajuste correspondiente y te confirmará. 🙏", preferAudio);
       await notifyStaff(env, credentials, "carlos", "Descuento por corte", known, phone, days ? `${days} día(s) sin servicio. ${action.reason || ""}` : (action.reason || "Cliente pide revisión por corte de servicio."));
       await setBotSessionMode(env, phone, "human", "case_created_billing");
@@ -1101,9 +1121,10 @@ async function runBotForInboundMessages(env, changes) {
           // pendiente: se captura en código, sin pasar por la IA (más confiable y más barato).
           const reportedName = String(text).trim().slice(0, 200);
           const customer = await findCustomerForWhatsApp(env, phone, reportedName);
-          await env.DB.prepare(`INSERT INTO whatsapp_visit_requests (phone, customer_id, customer_name, reported_name, preferred_date, reason, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`)
-            .bind(phone, customer.id, customer.name, reportedName, pendingVisit.preferred_date, pendingVisit.reason).run();
+          const transcript = await buildRecentTranscript(env, phone);
+          await env.DB.prepare(`INSERT INTO whatsapp_visit_requests (phone, customer_id, customer_name, reported_name, preferred_date, reason, status, created_at, transcript)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'), ?)`)
+            .bind(phone, customer.id, customer.name, reportedName, pendingVisit.preferred_date, pendingVisit.reason, transcript).run();
           await env.DB.prepare("DELETE FROM whatsapp_pending_visits WHERE phone = ?").bind(phone).run();
           await sendBotReply(env, credentials, phone, `Gracias, registramos la solicitud a nombre de ${reportedName}. Un agente te confirmará el horario. 🙌`, preferAudio);
           await notifyStaff(env, credentials, "eduardo", "Incidencia técnica", reportedName, phone, pendingVisit.reason || "Cliente reportó una falla técnica.");
@@ -1132,9 +1153,10 @@ async function runBotForInboundMessages(env, changes) {
           // pide al modelo que calcule ni mencione un monto de descuento.
           const reportedName = String(text).trim().slice(0, 200);
           const customer = await findCustomerForWhatsApp(env, phone, reportedName);
-          await env.DB.prepare(`INSERT INTO whatsapp_billing_requests (phone, customer_id, customer_name, reported_name, days_without_service, reason, status, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'))`)
-            .bind(phone, customer.id, customer.name, reportedName, pendingBilling.days_without_service, pendingBilling.reason).run();
+          const transcript = await buildRecentTranscript(env, phone);
+          await env.DB.prepare(`INSERT INTO whatsapp_billing_requests (phone, customer_id, customer_name, reported_name, days_without_service, reason, status, created_at, transcript)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'), ?)`)
+            .bind(phone, customer.id, customer.name, reportedName, pendingBilling.days_without_service, pendingBilling.reason, transcript).run();
           await env.DB.prepare("DELETE FROM whatsapp_pending_billing WHERE phone = ?").bind(phone).run();
           await sendBotReply(env, credentials, phone, `Gracias, registramos la solicitud a nombre de ${reportedName}. Un agente calculará el ajuste y te confirmará. 🙏`, preferAudio);
           await notifyStaff(env, credentials, "carlos", "Descuento por corte", reportedName, phone, pendingBilling.days_without_service ? `${pendingBilling.days_without_service} día(s) sin servicio. ${pendingBilling.reason || ""}` : (pendingBilling.reason || "Cliente pide revisión por corte de servicio."));
@@ -1752,7 +1774,7 @@ export default {
       const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
       if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
       await ensureWhatsAppBotTables(env);
-      const rows = await env.DB.prepare(`SELECT id, phone, customer_id, customer_name, reported_name, preferred_date, reason, status, created_at
+      const rows = await env.DB.prepare(`SELECT id, phone, customer_id, customer_name, reported_name, preferred_date, reason, status, created_at, transcript
         FROM whatsapp_visit_requests ORDER BY created_at DESC LIMIT 200`).all();
       return Response.json({ ok: true, requests: rows.results || [] });
     }
@@ -1774,7 +1796,7 @@ export default {
       const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
       if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
       await ensureWhatsAppBotTables(env);
-      const rows = await env.DB.prepare(`SELECT id, phone, customer_id, customer_name, reported_name, days_without_service, reason, status, created_at
+      const rows = await env.DB.prepare(`SELECT id, phone, customer_id, customer_name, reported_name, days_without_service, reason, status, created_at, transcript
         FROM whatsapp_billing_requests ORDER BY created_at DESC LIMIT 200`).all();
       return Response.json({ ok: true, requests: rows.results || [] });
     }
