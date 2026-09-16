@@ -360,14 +360,19 @@ async function buildBotContext(env, phone, fallbackName) {
   const session = await getBotSessionRow(env, phone);
   const reactivatedAt = session && session.mode !== "human"
     && ["auto_reactivated_on_reply", "manual_reactivated"].includes(session.escalation_reason)
-    ? session.updated_at : null;
-  const historyQuery = reactivatedAt
-    ? env.DB.prepare(`SELECT direction, message_type, message_text, created_at
-        FROM whatsapp_inbox_messages WHERE phone = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 10`).bind(phone, reactivatedAt)
-    : env.DB.prepare(`SELECT direction, message_type, message_text, created_at
-        FROM whatsapp_inbox_messages WHERE phone = ? ORDER BY created_at DESC LIMIT 10`).bind(phone);
-  const historyRows = await historyQuery.all();
-  const history = (historyRows.results || []).reverse();
+    ? Date.parse(session.updated_at.includes("T") ? session.updated_at : `${session.updated_at.replace(" ", "T")}Z`)
+    : null;
+  // Comparar como texto fallaba: whatsapp_inbox_messages.created_at es ISO ("...T...Z") pero
+  // whatsapp_bot_sessions.updated_at usa datetime('now') de SQLite ("YYYY-MM-DD HH:MM:SS") --
+  // formatos distintos hacían que el filtro por fecha nunca funcionara como texto. Se filtra acá
+  // en JS con fechas reales en vez de confiar en la comparación de strings en SQL.
+  const historyRows = await env.DB.prepare(`SELECT direction, message_type, message_text, created_at
+    FROM whatsapp_inbox_messages WHERE phone = ? ORDER BY created_at DESC LIMIT 20`).bind(phone).all();
+  let history = (historyRows.results || []).reverse();
+  if (reactivatedAt && Number.isFinite(reactivatedAt)) {
+    history = history.filter((row) => Date.parse(row.created_at) >= reactivatedAt);
+  }
+  history = history.slice(-10);
   const customer = await findCustomerForWhatsApp(env, phone, fallbackName);
   const faq = await getBotFaqText(env);
   return { history, customer, faq };
