@@ -318,9 +318,13 @@ async function ensureWhatsAppBotTables(env) {
   }
 }
 
-async function getBotSessionMode(env, phone) {
+async function getBotSessionRow(env, phone) {
   await ensureWhatsAppBotTables(env);
-  const row = await env.DB.prepare("SELECT mode FROM whatsapp_bot_sessions WHERE phone = ?").bind(phone).first();
+  return env.DB.prepare("SELECT mode, escalation_reason, updated_at FROM whatsapp_bot_sessions WHERE phone = ?").bind(phone).first();
+}
+
+async function getBotSessionMode(env, phone) {
+  const row = await getBotSessionRow(env, phone);
   return row?.mode === "human" ? "human" : "bot";
 }
 
@@ -349,8 +353,20 @@ async function getBotFaqText(env) {
 
 async function buildBotContext(env, phone, fallbackName) {
   await ensureWhatsAppInboxTable(env);
-  const historyRows = await env.DB.prepare(`SELECT direction, message_type, message_text, created_at
-    FROM whatsapp_inbox_messages WHERE phone = ? ORDER BY created_at DESC LIMIT 10`).bind(phone).all();
+  // Si la conversación se acaba de reactivar (el cliente estaba pausado esperando revisión
+  // humana y volvió a escribir), no le mostramos al modelo el historial de ANTES de esa
+  // reactivación -- si no, un simple "hola" hace que vea el reclamo viejo sin resolver y escale
+  // de nuevo en el acto, generando un loop de avisos al equipo por nada.
+  const session = await getBotSessionRow(env, phone);
+  const reactivatedAt = session && session.mode !== "human"
+    && ["auto_reactivated_on_reply", "manual_reactivated"].includes(session.escalation_reason)
+    ? session.updated_at : null;
+  const historyQuery = reactivatedAt
+    ? env.DB.prepare(`SELECT direction, message_type, message_text, created_at
+        FROM whatsapp_inbox_messages WHERE phone = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 10`).bind(phone, reactivatedAt)
+    : env.DB.prepare(`SELECT direction, message_type, message_text, created_at
+        FROM whatsapp_inbox_messages WHERE phone = ? ORDER BY created_at DESC LIMIT 10`).bind(phone);
+  const historyRows = await historyQuery.all();
   const history = (historyRows.results || []).reverse();
   const customer = await findCustomerForWhatsApp(env, phone, fallbackName);
   const faq = await getBotFaqText(env);
@@ -1723,7 +1739,7 @@ export default {
       const phone = normalizeWhatsAppPhone(body.phone);
       const mode = String(body.mode || "").trim();
       if (!phone || !["bot", "human"].includes(mode)) return Response.json({ ok: false, error: "Teléfono o modo inválido." }, { status: 400 });
-      await setBotSessionMode(env, phone, mode, mode === "human" ? "manual" : null);
+      await setBotSessionMode(env, phone, mode, mode === "human" ? "manual" : "manual_reactivated");
       return Response.json({ ok: true, phone, mode });
     }
 
