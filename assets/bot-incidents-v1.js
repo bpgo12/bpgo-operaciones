@@ -26,7 +26,9 @@
     // Reubicar siempre justo después de "Turnos": la primera vez que corre el observer, el botón
     // de Turnos puede no existir todavía (React aún no terminó de pintar el menú), así que sin
     // esto el botón se quedaba pegado al final del menú donde cayó por defecto la primera vez.
-    const turnos = [...nav.querySelectorAll("button")].find((item) => !item.dataset.botIncidentsNav && item.textContent.trim().toLowerCase() === "turnos");
+    // El texto real del botón trae un ícono pegado (ej. "TTurnos"), así que una igualdad estricta
+    // nunca matcheaba y el botón se quedaba pegado al final del menú (el fallback de más abajo).
+    const turnos = [...nav.querySelectorAll("button")].find((item) => !item.dataset.botIncidentsNav && item.textContent.trim().toLowerCase().endsWith("turnos"));
     if (turnos && turnos.nextElementSibling !== btn) turnos.insertAdjacentElement("afterend", btn);
     else if (!turnos && !btn.isConnected) nav.appendChild(btn);
     return btn;
