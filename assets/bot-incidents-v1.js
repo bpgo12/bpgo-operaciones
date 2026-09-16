@@ -1,0 +1,194 @@
+(function () {
+  "use strict";
+
+  const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" })[char]);
+  const statusLabel = (value) => ({ pending: "Pendiente", scheduled: "Agendada", dismissed: "Descartada" })[value] || value;
+  let active = false;
+
+  function sidebarNav() {
+    return document.querySelector(".sidebar .nav");
+  }
+
+  function ensureButton() {
+    const nav = sidebarNav();
+    if (!nav) return null;
+    let btn = nav.querySelector("[data-bot-incidents-nav]");
+    if (btn) return btn;
+    btn = document.createElement("button");
+    btn.type = "button";
+    btn.dataset.botIncidentsNav = "true";
+    btn.textContent = "Incidencias Bot";
+    btn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      activate();
+    });
+    const turnos = [...nav.querySelectorAll("button")].find((item) => item.textContent.trim().toLowerCase() === "turnos");
+    if (turnos) turnos.insertAdjacentElement("afterend", btn);
+    else nav.appendChild(btn);
+    return btn;
+  }
+
+  function overlayRoot() {
+    let root = document.getElementById("bot-incidents-overlay");
+    if (root) return root;
+    const shell = document.querySelector(".app-shell");
+    if (!shell) return null;
+    root = document.createElement("div");
+    root.id = "bot-incidents-overlay";
+    root.hidden = true;
+    root.innerHTML = '<div class="bot-incidents-page"><header class="bot-incidents-header"><div><p class="eyebrow">Bot autónomo</p><h1>Incidencias Bot</h1><p>Fallas técnicas y solicitudes de visita reportadas por clientes a través del bot de WhatsApp.</p></div><button type="button" class="btn secondary" data-bot-incidents-refresh>Actualizar</button></header><div class="automation-list" data-bot-incidents-list><div class="whatsapp-inbox-empty">Cargando…</div></div></div>';
+    document.body.appendChild(root);
+    root.querySelector("[data-bot-incidents-refresh]").addEventListener("click", load);
+    return root;
+  }
+
+  function positionOverlay() {
+    const root = document.getElementById("bot-incidents-overlay");
+    const sidebar = document.querySelector(".sidebar");
+    if (!root || !sidebar) return;
+    root.style.left = sidebar.getBoundingClientRect().width + "px";
+  }
+
+  function setActiveNav(isActive) {
+    const nav = sidebarNav();
+    if (!nav) return;
+    if (isActive) {
+      [...nav.querySelectorAll("button")].forEach((item) => item.classList.remove("active"));
+      const btn = nav.querySelector("[data-bot-incidents-nav]");
+      if (btn) btn.classList.add("active");
+    } else {
+      const btn = nav.querySelector("[data-bot-incidents-nav]");
+      if (btn) btn.classList.remove("active");
+    }
+  }
+
+  function deactivate() {
+    if (!active) return;
+    active = false;
+    setActiveNav(false);
+    const root = document.getElementById("bot-incidents-overlay");
+    if (root) root.hidden = true;
+  }
+
+  function activate() {
+    active = true;
+    setActiveNav(true);
+    const root = overlayRoot();
+    if (!root) return;
+    positionOverlay();
+    root.hidden = false;
+    load();
+  }
+
+  async function load() {
+    const root = document.getElementById("bot-incidents-overlay");
+    if (!root) return;
+    const list = root.querySelector("[data-bot-incidents-list]");
+    list.innerHTML = '<div class="whatsapp-test-status pending">Buscando incidencias…</div>';
+    try {
+      const response = await fetch("/api/whatsapp/visit-requests", { cache: "no-store" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "No se pudo cargar las incidencias.");
+      const items = (data.requests || []).filter((item) => item.status !== "dismissed");
+      updateBadge(items.filter((item) => item.status === "pending").length);
+      if (!items.length) {
+        list.innerHTML = '<div class="whatsapp-inbox-empty">No hay incidencias técnicas pendientes.</div>';
+        return;
+      }
+      list.innerHTML = items.map((item) => {
+        const identified = escapeHtml(item.reported_name || item.customer_name || item.customer_id || "Titular sin identificar");
+        const extra = [];
+        if (item.reported_name && item.customer_name && item.reported_name !== item.customer_name) extra.push("En sistema: " + escapeHtml(item.customer_name));
+        if (item.preferred_date) extra.push("Prefiere: " + escapeHtml(item.preferred_date));
+        if (item.reason) extra.push(escapeHtml(item.reason));
+        return '<article class="automation-case technical_fault"><header><div><strong>' + identified + '</strong><small>+' + escapeHtml(item.phone) + ' · ' + escapeHtml(new Date(item.created_at).toLocaleString("es-CL")) + '</small></div><span class="automation-state">' + escapeHtml(statusLabel(item.status)) + '</span></header>' + (extra.length ? '<p class="automation-details">' + extra.join(" · ") + '</p>' : '') + '<footer><button type="button" class="btn secondary small" data-bot-incidents-action="dismissed" data-id="' + escapeHtml(item.id) + '">Descartar</button><button type="button" class="btn small" data-bot-incidents-action="scheduled" data-id="' + escapeHtml(item.id) + '">Marcar agendada</button></footer></article>';
+      }).join("");
+    } catch (error) {
+      list.innerHTML = '<div class="whatsapp-test-status error">' + escapeHtml(error.message || "Error al cargar incidencias") + '</div>';
+    }
+  }
+
+  async function updateStatus(id, status) {
+    await fetch("/api/whatsapp/visit-requests", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: Number(id), status }),
+    }).catch(() => null);
+    load();
+  }
+
+  function updateBadge(pendingCount) {
+    const nav = sidebarNav();
+    const btn = nav && nav.querySelector("[data-bot-incidents-nav]");
+    if (!btn) return;
+    let badge = btn.querySelector("[data-bot-incidents-badge]");
+    if (!pendingCount) {
+      if (badge) badge.remove();
+      return;
+    }
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.dataset.botIncidentsBadge = "true";
+      badge.className = "bot-incidents-badge";
+      btn.appendChild(badge);
+    }
+    badge.textContent = String(pendingCount);
+  }
+
+  function ensureHomeCard() {
+    const kpis = document.querySelector("#bpgo-os-overview .bpgo-os-kpis");
+    if (!kpis || kpis.querySelector("[data-bot-incidents-kpi]")) return;
+    const card = document.createElement("article");
+    card.dataset.botIncidentsKpi = "true";
+    card.className = "bot-incidents-kpi";
+    card.innerHTML = "<span>Incidencias Bot</span><strong data-bot-incidents-kpi-count>—</strong><small>Reportadas por WhatsApp</small>";
+    card.addEventListener("click", () => {
+      ensureButton();
+      activate();
+    });
+    kpis.appendChild(card);
+    refreshHomeCount();
+  }
+
+  function refreshHomeCount() {
+    const card = document.querySelector("[data-bot-incidents-kpi]");
+    if (!card) return;
+    fetch("/api/whatsapp/visit-requests", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((data) => {
+        const pending = (data.requests || []).filter((item) => item.status === "pending").length;
+        updateBadge(pending);
+        const countEl = card.querySelector("[data-bot-incidents-kpi-count]");
+        if (countEl) countEl.textContent = String(pending);
+      })
+      .catch(() => null);
+  }
+
+  document.addEventListener("click", (event) => {
+    const actionBtn = event.target.closest("[data-bot-incidents-action]");
+    if (actionBtn) {
+      updateStatus(actionBtn.dataset.id, actionBtn.dataset.botIncidentsAction);
+      return;
+    }
+    const navBtn = event.target.closest(".sidebar .nav button");
+    if (navBtn && !navBtn.dataset.botIncidentsNav) deactivate();
+  }, true);
+
+  window.addEventListener("resize", positionOverlay);
+
+  function refresh() {
+    ensureButton();
+    ensureHomeCard();
+    if (active) {
+      const root = document.getElementById("bot-incidents-overlay");
+      if (!root || root.hidden) activate();
+      else positionOverlay();
+    } else {
+      refreshHomeCount();
+    }
+  }
+
+  new MutationObserver(refresh).observe(document.documentElement, { childList: true, subtree: true });
+  document.addEventListener("DOMContentLoaded", refresh);
+  refresh();
+})();
