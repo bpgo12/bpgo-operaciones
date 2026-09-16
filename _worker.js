@@ -817,6 +817,7 @@ async function executeBotAction(env, credentials, phone, action, message) {
       }
       await sendBotReply(env, credentials, phone, action.text || "Recibimos tu comprobante, en breve lo revisamos. ¡Gracias! 🙏", preferAudio);
       await notifyStaff(env, credentials, "carlos", "Comprobante de pago", known, phone, "Cliente envió comprobante de pago para revisión.", { caseId: caseRow?.id || null });
+      await setBotSessionMode(env, phone, "human", "case_created_payment");
       return;
     }
     if (caseRow) {
@@ -841,6 +842,7 @@ async function executeBotAction(env, credentials, phone, action, message) {
         .bind(phone, customer.id, customer.name, known, action.preferred_date || null, action.reason || null).run();
       await sendBotReply(env, credentials, phone, action.text || "Registramos tu solicitud de visita técnica, un agente te confirmará el horario. 🙌", preferAudio);
       await notifyStaff(env, credentials, "eduardo", "Incidencia técnica", known, phone, action.reason || "Cliente reportó una falla técnica.");
+      await setBotSessionMode(env, phone, "human", "case_created_visit");
       return;
     }
     await env.DB.prepare(`INSERT INTO whatsapp_pending_visits (phone, reason, preferred_date, created_at)
@@ -863,6 +865,7 @@ async function executeBotAction(env, credentials, phone, action, message) {
         .bind(phone, customer.id, customer.name, known, days, action.reason || null).run();
       await sendBotReply(env, credentials, phone, "Registramos tu solicitud de revisión por los días sin servicio. Un agente calculará el ajuste correspondiente y te confirmará. 🙏", preferAudio);
       await notifyStaff(env, credentials, "carlos", "Descuento por corte", known, phone, days ? `${days} día(s) sin servicio. ${action.reason || ""}` : (action.reason || "Cliente pide revisión por corte de servicio."));
+      await setBotSessionMode(env, phone, "human", "case_created_billing");
       return;
     }
     await env.DB.prepare(`INSERT INTO whatsapp_pending_billing (phone, days_without_service, reason, created_at)
@@ -979,7 +982,13 @@ async function runBotForInboundMessages(env, changes) {
           }
         }
         const mode = await getBotSessionMode(env, phone);
-        if (mode === "human") continue;
+        if (mode === "human") {
+          // El bot se pausa apenas crea un caso y avisa al equipo (para no seguir procesando
+          // mientras un humano todavía no lo revisa), pero se reactiva solo con el próximo mensaje
+          // del cliente -- este mismo mensaje ya se procesa normalmente a continuación, nadie del
+          // equipo tiene que acordarse de reactivarlo a mano.
+          await setBotSessionMode(env, phone, "bot", "auto_reactivated_on_reply");
+        }
         const preferAudio = message.type === "audio";
         let text = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || null;
         if (preferAudio && message.audio?.id) {
@@ -1058,6 +1067,7 @@ async function runBotForInboundMessages(env, changes) {
               await sendBotReply(env, credentials, phone, "¡Perfecto, ya tenemos todos tus datos! Un agente coordinará la instalación contigo a la brevedad. 🙌", preferAudio);
               await notifyStaff(env, credentials, "carlos", "Nueva contratación", updatedLead.installation_name || name || salesLead.customer_name, phone,
                 `Sector: ${salesLead.sector || "no indicado"}. Plan: ${salesLead.chosen_plan}. RUT: ${updatedLead.installation_rut}. Tel: ${updatedLead.installation_phone}. Correo: ${updatedLead.installation_email}. Dirección: ${updatedLead.installation_address}. Coordinar instalación.`);
+              await setBotSessionMode(env, phone, "human", "case_created_new_customer");
             } else {
               await sendBotReply(env, credentials, phone, `Anotado ✅ Todavía me falta: ${missing.join(", ")}.`, preferAudio);
             }
@@ -1076,6 +1086,7 @@ async function runBotForInboundMessages(env, changes) {
           await env.DB.prepare("DELETE FROM whatsapp_pending_visits WHERE phone = ?").bind(phone).run();
           await sendBotReply(env, credentials, phone, `Gracias, registramos la solicitud a nombre de ${reportedName}. Un agente te confirmará el horario. 🙌`, preferAudio);
           await notifyStaff(env, credentials, "eduardo", "Incidencia técnica", reportedName, phone, pendingVisit.reason || "Cliente reportó una falla técnica.");
+          await setBotSessionMode(env, phone, "human", "case_created_visit");
           continue;
         }
         const pendingPayment = await env.DB.prepare("SELECT case_id FROM whatsapp_pending_payments WHERE phone = ?").bind(phone).first();
@@ -1091,6 +1102,7 @@ async function runBotForInboundMessages(env, changes) {
           await env.DB.prepare("DELETE FROM whatsapp_pending_payments WHERE phone = ?").bind(phone).run();
           await sendBotReply(env, credentials, phone, `Gracias, dejamos tu comprobante asociado a nombre de ${reportedName}. El equipo lo confirmará pronto. 🙏`, preferAudio);
           await notifyStaff(env, credentials, "carlos", "Comprobante de pago", reportedName, phone, "Cliente envió comprobante de pago para revisión.", { caseId: pendingPayment.case_id || null });
+          await setBotSessionMode(env, phone, "human", "case_created_payment");
           continue;
         }
         const pendingBilling = await env.DB.prepare("SELECT days_without_service, reason FROM whatsapp_pending_billing WHERE phone = ?").bind(phone).first();
@@ -1105,6 +1117,7 @@ async function runBotForInboundMessages(env, changes) {
           await env.DB.prepare("DELETE FROM whatsapp_pending_billing WHERE phone = ?").bind(phone).run();
           await sendBotReply(env, credentials, phone, `Gracias, registramos la solicitud a nombre de ${reportedName}. Un agente calculará el ajuste y te confirmará. 🙏`, preferAudio);
           await notifyStaff(env, credentials, "carlos", "Descuento por corte", reportedName, phone, pendingBilling.days_without_service ? `${pendingBilling.days_without_service} día(s) sin servicio. ${pendingBilling.reason || ""}` : (pendingBilling.reason || "Cliente pide revisión por corte de servicio."));
+          await setBotSessionMode(env, phone, "human", "case_created_billing");
           continue;
         }
         const mediaId = message.image?.id || message.document?.id || null;
