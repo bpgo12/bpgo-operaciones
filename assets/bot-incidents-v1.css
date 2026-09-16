@@ -1,0 +1,15 @@
+#bot-incidents-overlay{position:fixed;top:0;right:0;bottom:0;background:#f4f7f6;z-index:40;overflow:auto}
+#bot-incidents-overlay[hidden]{display:none}
+.bot-incidents-page{max-width:960px;margin:0 auto;padding:32px 28px 60px}
+.bot-incidents-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:22px}
+.bot-incidents-header .eyebrow{margin:0 0 4px;font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#0b8c75}
+.bot-incidents-header h1{margin:0 0 6px;font-size:28px}
+.bot-incidents-header p{margin:0;color:#536965;max-width:560px}
+.bot-incidents-badge{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;margin-left:8px;border-radius:999px;background:#d3372f;color:#fff;font-size:11px;font-weight:800}
+.bot-incidents-kpi{cursor:pointer;transition:transform .15s ease}
+.bot-incidents-kpi:hover{transform:translateY(-2px)}
+@media(max-width:760px){
+  #bot-incidents-overlay{left:0!important}
+  .bot-incidents-page{padding:20px 16px 40px}
+  .bot-incidents-header{flex-direction:column}
+}
