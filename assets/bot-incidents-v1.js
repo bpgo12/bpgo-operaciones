@@ -13,18 +13,22 @@
     const nav = sidebarNav();
     if (!nav) return null;
     let btn = nav.querySelector("[data-bot-incidents-nav]");
-    if (btn) return btn;
-    btn = document.createElement("button");
-    btn.type = "button";
-    btn.dataset.botIncidentsNav = "true";
-    btn.textContent = "Incidencias Bot";
-    btn.addEventListener("click", (event) => {
-      event.stopPropagation();
-      activate();
-    });
-    const turnos = [...nav.querySelectorAll("button")].find((item) => item.textContent.trim().toLowerCase() === "turnos");
-    if (turnos) turnos.insertAdjacentElement("afterend", btn);
-    else nav.appendChild(btn);
+    if (!btn) {
+      btn = document.createElement("button");
+      btn.type = "button";
+      btn.dataset.botIncidentsNav = "true";
+      btn.textContent = "Incidencias Bot";
+      btn.addEventListener("click", (event) => {
+        event.stopPropagation();
+        activate();
+      });
+    }
+    // Reubicar siempre justo después de "Turnos": la primera vez que corre el observer, el botón
+    // de Turnos puede no existir todavía (React aún no terminó de pintar el menú), así que sin
+    // esto el botón se quedaba pegado al final del menú donde cayó por defecto la primera vez.
+    const turnos = [...nav.querySelectorAll("button")].find((item) => !item.dataset.botIncidentsNav && item.textContent.trim().toLowerCase() === "turnos");
+    if (turnos && turnos.nextElementSibling !== btn) turnos.insertAdjacentElement("afterend", btn);
+    else if (!turnos && !btn.isConnected) nav.appendChild(btn);
     return btn;
   }
 
