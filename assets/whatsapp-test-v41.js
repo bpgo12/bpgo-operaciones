@@ -173,6 +173,8 @@
       var data = await response.json().catch(function () { return {}; });
       if (!response.ok) throw new Error(data.error || "No se pudo abrir la bandeja.");
       var groups = new Map();
+      var sessions = new Map();
+      (data.sessions || []).forEach(function (session) { sessions.set(session.phone, session); });
       (data.messages || []).forEach(function (message) {
         if (!groups.has(message.phone)) groups.set(message.phone, []);
         groups.get(message.phone).push(message);
@@ -184,7 +186,14 @@
       list.innerHTML = Array.from(groups.entries()).map(function (entry) {
         var phone = entry[0], messages = entry[1].slice().reverse();
         var name = messages.find(function (item) { return item.customer_name; });
-        return '<article class="whatsapp-conversation" data-conversation-phone="' + escapeHtml(phone) + '"><header><div><strong>' + escapeHtml(name && name.customer_name || "+" + phone) + '</strong><small>+' + escapeHtml(phone) + '</small></div><button type="button" class="btn secondary small" data-reply-phone="' + escapeHtml(phone) + '">Responder</button></header><div class="whatsapp-thread">' + messages.map(function (message) {
+        var session = sessions.get(phone);
+        var human = session && session.mode === "human";
+        var modeButton = human
+          ? '<button type="button" class="btn small" data-conversation-mode="bot" data-mode-phone="' + escapeHtml(phone) + '">Reactivar bot</button>'
+          : '<button type="button" class="btn secondary small" data-conversation-mode="human" data-mode-phone="' + escapeHtml(phone) + '">Tomar conversación</button>';
+        var modeDetail = human ? 'Atención humana' : 'Bot activo';
+        if (session && session.updated_at) modeDetail += ' · ' + new Date(session.updated_at).toLocaleString("es-CL");
+        return '<article class="whatsapp-conversation" data-conversation-phone="' + escapeHtml(phone) + '"><header><div><strong>' + escapeHtml(name && name.customer_name || "+" + phone) + '</strong><small>+' + escapeHtml(phone) + '</small><small class="conversation-mode ' + (human ? 'human' : 'bot') + '">' + escapeHtml(modeDetail) + '</small></div><div class="conversation-actions">' + modeButton + '<button type="button" class="btn secondary small" data-reply-phone="' + escapeHtml(phone) + '">Responder</button></div></header><div class="whatsapp-thread">' + messages.map(function (message) {
           var content = message.message_text || (message.media_id ? "Archivo recibido (" + message.message_type + ")" : "Mensaje " + message.message_type);
           var attachment = message.media_id ? '<button type="button" class="btn secondary small" data-media-id="' + escapeHtml(message.media_id) + '">Ver comprobante o archivo</button>' : "";
           return '<div class="whatsapp-bubble ' + (message.direction === "outbound" ? "outbound" : "inbound") + '"><span>' + escapeHtml(content) + '</span>' + attachment + '<small>' + escapeHtml(new Date(message.created_at).toLocaleString("es-CL")) + '</small></div>';
@@ -251,6 +260,24 @@
     var data = await response.json().catch(function () { return {}; });
     if (!response.ok) window.alert(data.error || "No se pudo enviar la respuesta. Recuerda que los textos libres solo funcionan dentro de las 24 horas desde el mensaje del cliente.");
     await loadInbox(panel);
+    await loadEscalations(panel);
+  }
+
+  async function setConversationMode(panel, phone, mode) {
+    var action = mode === "human" ? "tomar la conversación" : "reactivar el bot";
+    if (!window.confirm("¿Confirmas que deseas " + action + " para +" + phone + "?")) return;
+    var response = await fetch("/api/whatsapp/bot-sessions", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ phone: phone, mode: mode })
+    });
+    var data = await response.json().catch(function () { return {}; });
+    if (!response.ok) {
+      window.alert(data.error || "No se pudo cambiar el responsable de la conversación.");
+      return;
+    }
+    await loadInbox(panel);
+    await loadEscalations(panel);
   }
 
   async function openMedia(mediaId) {
@@ -513,6 +540,11 @@
     var replyButton = event.target.closest("[data-reply-phone]");
     if (replyButton) {
       replyTo(replyButton.closest("[data-whatsapp-test-panel]"), replyButton.dataset.replyPhone);
+      return;
+    }
+    var modeButton = event.target.closest("[data-conversation-mode]");
+    if (modeButton) {
+      setConversationMode(modeButton.closest("[data-whatsapp-test-panel]"), modeButton.dataset.modePhone, modeButton.dataset.conversationMode);
       return;
     }
     var refreshEscalations = event.target.closest("[data-refresh-escalations]");

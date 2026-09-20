@@ -252,8 +252,22 @@ async function ensureWhatsAppBotTables(env) {
     phone TEXT PRIMARY KEY,
     mode TEXT NOT NULL DEFAULT 'bot',
     escalation_reason TEXT,
+    updated_by_user_id TEXT,
+    updated_by_role TEXT,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`).run();
+  await env.DB.prepare("ALTER TABLE whatsapp_bot_sessions ADD COLUMN updated_by_user_id TEXT").run().catch(() => null);
+  await env.DB.prepare("ALTER TABLE whatsapp_bot_sessions ADD COLUMN updated_by_role TEXT").run().catch(() => null);
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_bot_session_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    phone TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    reason TEXT,
+    user_id TEXT,
+    user_role TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_bot_events_phone_created ON whatsapp_bot_session_events(phone, created_at DESC)").run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_visit_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     phone TEXT NOT NULL,
@@ -338,7 +352,7 @@ async function buildRecentTranscript(env, phone, limit) {
 
 async function getBotSessionRow(env, phone) {
   await ensureWhatsAppBotTables(env);
-  return env.DB.prepare("SELECT mode, escalation_reason, updated_at FROM whatsapp_bot_sessions WHERE phone = ?").bind(phone).first();
+  return env.DB.prepare("SELECT mode, escalation_reason, updated_by_user_id, updated_by_role, updated_at FROM whatsapp_bot_sessions WHERE phone = ?").bind(phone).first();
 }
 
 async function getBotSessionMode(env, phone) {
@@ -346,12 +360,20 @@ async function getBotSessionMode(env, phone) {
   return row?.mode === "human" ? "human" : "bot";
 }
 
-async function setBotSessionMode(env, phone, mode, reason) {
+async function setBotSessionMode(env, phone, mode, reason, actor) {
   await ensureWhatsAppBotTables(env);
-  await env.DB.prepare(`INSERT INTO whatsapp_bot_sessions (phone, mode, escalation_reason, updated_at)
-    VALUES (?, ?, ?, datetime('now'))
-    ON CONFLICT(phone) DO UPDATE SET mode = excluded.mode, escalation_reason = excluded.escalation_reason, updated_at = datetime('now')`)
-    .bind(phone, mode, reason || null).run();
+  const userId = actor?.userId ? String(actor.userId) : null;
+  const userRole = actor?.role ? String(actor.role) : null;
+  await env.DB.prepare(`INSERT INTO whatsapp_bot_sessions
+    (phone, mode, escalation_reason, updated_by_user_id, updated_by_role, updated_at)
+    VALUES (?, ?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(phone) DO UPDATE SET mode = excluded.mode, escalation_reason = excluded.escalation_reason,
+      updated_by_user_id = excluded.updated_by_user_id, updated_by_role = excluded.updated_by_role,
+      updated_at = datetime('now')`)
+    .bind(phone, mode, reason || null, userId, userRole).run();
+  await env.DB.prepare(`INSERT INTO whatsapp_bot_session_events
+    (phone, mode, reason, user_id, user_role, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))`)
+    .bind(phone, mode, reason || null, userId, userRole).run();
 }
 
 const DEFAULT_BOT_FAQ = [
@@ -371,13 +393,11 @@ async function getBotFaqText(env) {
 
 async function buildBotContext(env, phone, fallbackName) {
   await ensureWhatsAppInboxTable(env);
-  // Si la conversación se acaba de reactivar (el cliente estaba pausado esperando revisión
-  // humana y volvió a escribir), no le mostramos al modelo el historial de ANTES de esa
-  // reactivación -- si no, un simple "hola" hace que vea el reclamo viejo sin resolver y escale
-  // de nuevo en el acto, generando un loop de avisos al equipo por nada.
+  // Cuando un operador reactiva explícitamente el bot, no se le muestra al modelo el historial
+  // anterior a esa reactivación. Así una consulta nueva no hereda un caso humano ya cerrado.
   const session = await getBotSessionRow(env, phone);
   const reactivatedAt = session && session.mode !== "human"
-    && ["auto_reactivated_on_reply", "manual_reactivated"].includes(session.escalation_reason)
+    && session.escalation_reason === "manual_reactivated"
     ? Date.parse(session.updated_at.includes("T") ? session.updated_at : `${session.updated_at.replace(" ", "T")}Z`)
     : null;
   // Comparar como texto fallaba: whatsapp_inbox_messages.created_at es ISO ("...T...Z") pero
@@ -1024,11 +1044,9 @@ async function runBotForInboundMessages(env, changes) {
         }
         const mode = await getBotSessionMode(env, phone);
         if (mode === "human") {
-          // El bot se pausa apenas crea un caso y avisa al equipo (para no seguir procesando
-          // mientras un humano todavía no lo revisa), pero se reactiva solo con el próximo mensaje
-          // del cliente -- este mismo mensaje ya se procesa normalmente a continuación, nadie del
-          // equipo tiene que acordarse de reactivarlo a mano.
-          await setBotSessionMode(env, phone, "bot", "auto_reactivated_on_reply");
+          // El mensaje ya fue guardado en la bandeja. Mientras un humano tenga la conversación,
+          // nunca se llama a la IA ni se responde; solo "Reactivar bot" puede devolverla al bot.
+          continue;
         }
         const preferAudio = message.type === "audio";
         let text = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || null;
@@ -1205,15 +1223,19 @@ async function saveInboundWhatsAppMessages(env, changes) {
         VALUES (?, ?, ?, 'inbound', ?, ?, ?, ?, ?)`)
         .bind(message.id, message.from, name, message.type || "unknown", text, mediaId, new Date(Number(message.timestamp || 0) * 1000).toISOString(), JSON.stringify(message))
         .run();
-      await createAutomationCase(env, {
-        messageId: message.id,
-        phone: message.from,
-        customerName: name,
-        type: message.type || "unknown",
-        text,
-        mediaId,
-        createdAt: new Date(Number(message.timestamp || 0) * 1000).toISOString(),
-      }).catch(() => null);
+      // En handoff humano el webhook conserva el mensaje en la bandeja, pero no lo clasifica ni
+      // crea automatizaciones. El operador debe reactivar el bot explícitamente desde Operaciones.
+      if (await getBotSessionMode(env, message.from) !== "human") {
+        await createAutomationCase(env, {
+          messageId: message.id,
+          phone: message.from,
+          customerName: name,
+          type: message.type || "unknown",
+          text,
+          mediaId,
+          createdAt: new Date(Number(message.timestamp || 0) * 1000).toISOString(),
+        }).catch(() => null);
+      }
       saved += 1;
     }
   }
@@ -1487,9 +1509,12 @@ export default {
       const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
       if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
       await ensureWhatsAppInboxTable(env);
+      await ensureWhatsAppBotTables(env);
       const rows = await env.DB.prepare(`SELECT message_id, phone, customer_name, direction, message_type,
         message_text, media_id, created_at FROM whatsapp_inbox_messages ORDER BY created_at DESC LIMIT 300`).all();
-      return Response.json({ ok: true, messages: rows.results || [] });
+      const sessions = await env.DB.prepare(`SELECT phone, mode, escalation_reason, updated_by_user_id,
+        updated_by_role, updated_at FROM whatsapp_bot_sessions ORDER BY updated_at DESC LIMIT 500`).all();
+      return Response.json({ ok: true, messages: rows.results || [], sessions: sessions.results || [] });
     }
 
     if (url.pathname === "/api/whatsapp/media" && request.method === "GET") {
@@ -1576,6 +1601,7 @@ export default {
         (message_id, phone, direction, message_type, message_text, created_at, raw_json)
         VALUES (?, ?, 'outbound', 'text', ?, ?, ?)`)
         .bind(messageId, phone, messageText, new Date().toISOString(), JSON.stringify(meta)).run();
+      await setBotSessionMode(env, phone, "human", "manual_reply", session);
       return Response.json({ ok: true, messageId });
     }
 
@@ -1754,7 +1780,7 @@ export default {
       const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
       if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
       await ensureWhatsAppBotTables(env);
-      const rows = await env.DB.prepare(`SELECT phone, mode, escalation_reason, updated_at FROM whatsapp_bot_sessions
+      const rows = await env.DB.prepare(`SELECT phone, mode, escalation_reason, updated_by_user_id, updated_by_role, updated_at FROM whatsapp_bot_sessions
         WHERE mode = 'human' ORDER BY updated_at DESC LIMIT 200`).all();
       return Response.json({ ok: true, sessions: rows.results || [] });
     }
@@ -1766,8 +1792,9 @@ export default {
       const phone = normalizeWhatsAppPhone(body.phone);
       const mode = String(body.mode || "").trim();
       if (!phone || !["bot", "human"].includes(mode)) return Response.json({ ok: false, error: "Teléfono o modo inválido." }, { status: 400 });
-      await setBotSessionMode(env, phone, mode, mode === "human" ? "manual" : "manual_reactivated");
-      return Response.json({ ok: true, phone, mode });
+      await setBotSessionMode(env, phone, mode, mode === "human" ? "manual_takeover" : "manual_reactivated", session);
+      const current = await getBotSessionRow(env, phone);
+      return Response.json({ ok: true, phone, mode, session: current });
     }
 
     if (url.pathname === "/api/whatsapp/visit-requests" && request.method === "GET") {
