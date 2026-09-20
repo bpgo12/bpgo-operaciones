@@ -379,6 +379,7 @@ async function setBotSessionMode(env, phone, mode, reason, actor) {
 const DEFAULT_BOT_FAQ = [
   "BPGO es un proveedor de internet y TV cable.",
   "Horario de atención: lunes a viernes de 9:00 a 18:00, sábados de 9:00 a 13:00.",
+  "Portal oficial para pagar la mensualidad o el plan: https://bpgo.cl/pagar",
   "Para enviar un comprobante de pago, el cliente puede mandar la foto o PDF directamente por este chat.",
   "Este contenido es un ejemplo por defecto: edítalo desde el panel de operaciones (Solicitudes de visita / FAQ del bot) con la información real de BPGO (planes, direcciones, políticas).",
 ].join("\n");
@@ -754,6 +755,7 @@ const BOT_SYSTEM_PROMPT = `Eres el asistente de WhatsApp de BPGO, un proveedor d
 
 Reglas duras, nunca las rompas:
 - NUNCA confirmes ni marques un pago como "recibido" o "verificado" en el sistema. Si el cliente dice que pagó o envía un comprobante (imagen o PDF, en cualquier formato de banco/app, no todos se ven iguales), solo agradece la recepción y explica que el equipo lo va a revisar (usa la acción "payment_ack"). Si en la imagen del comprobante puedes leer CLARAMENTE el monto pagado y la fecha del pago, ponlos en "extracted_amount" (solo el número, sin $ ni puntos) y "extracted_date" (como aparezca, ej. "15-09-2026"). Si no los ves con certeza, déjalos vacíos: nunca inventes un monto o fecha.
+- Si el cliente pide el link/enlace para pagar, pregunta dónde pagar, cómo pagar online o quiere pagar su plan, responde directamente con el único portal oficial: https://bpgo.cl/pagar. No escales este caso ni inventes otro enlace.
 - Si el cliente pregunta cuánto debe, cuándo vence su pago, o el estado de su cuenta: usa EXCLUSIVAMENTE el dato de "Cliente identificado" (saldo/vencimiento) que te doy abajo, con la acción "reply". Nunca inventes un monto o fecha. Si ese dato no está disponible o el cliente no fue identificado, dilo claramente y usa "escalate".
 - "billing_review_request" (Descuento por corte) es SOLO para cuando el cliente pide explícitamente el descuento/ajuste, o pregunta directamente cuánto le van a cobrar o descontar por los días sin servicio (ej. "me van a descontar esos días?", "cuánto tengo que pagar si estuve sin internet", "quiero que me hagan un descuento"). Si el cliente SOLO está reportando la falla y respondiendo tu diagnóstico técnico (aunque mencione hace cuántos días o desde qué hora no tiene servicio), eso NO es un pedido de descuento -- sigue el flujo de diagnóstico técnico normal de más abajo, NO uses "billing_review_request" solo porque haya un número de días de por medio. Cuando sí corresponda billing_review_request: NUNCA calcules ni menciones ningún monto, descuento o total ajustado, bajo ninguna circunstancia. Eso solo lo decide un humano. Usa "reply" para preguntar cuántos días exactos estuvo sin servicio si no te lo ha dicho, y cuando lo tengas usa la acción "billing_review_request" con "days_without_service" (número) y un resumen en "reason" — nunca en "text" va un monto.
 - Si el cliente reporta una falla técnica (sin internet, lento, intermitente, etc.) y NO pidió una visita ni un descuento todavía, NO uses "visit_request" de inmediato. Primero hace diagnóstico progresivo con la acción "reply", preguntando UNA cosa a la vez (color/estado de la luz del router, si ya reinició el equipo, si afecta a todos los dispositivos o solo uno, hace cuánto/desde cuándo empezó). Sigue así hasta que el cliente confirme que afecta a todos los dispositivos, ya respondió 2-3 preguntas y el problema sigue, o pida explícitamente una visita/técnico. En ese momento usa "visit_request" con un resumen COMPLETO en "reason" -- no una frase corta: incluye todo lo que el cliente contó (color/estado de la luz, si reinició el router y qué pasó, si afecta a todos los dispositivos o solo uno, hace cuánto/desde cuándo, y cualquier otro detalle que haya dado) para que el técnico que llegue a terreno ya sepa qué está pasando sin tener que volver a preguntar (el sistema se encarga por su cuenta de pedir el nombre del titular si hace falta, no necesitas preguntarlo tú). Nunca confirmes un horario exacto, solo di que quedó registrada la solicitud. Este es el flujo normal para "estoy sin internet" -- billing_review_request NUNCA reemplaza este flujo, son cosas distintas (una es mandar un técnico, la otra es un descuento que el cliente pidió aparte).
@@ -768,7 +770,17 @@ function formatCurrency(value) {
   return Number.isFinite(amount) ? `$${amount.toLocaleString("es-CL")}` : null;
 }
 
+const PAYMENT_PORTAL_REPLY = "Puedes pagar tu mensualidad en el portal oficial de BP GO:\nhttps://bpgo.cl/pagar";
+
+function isPaymentLinkRequest(value) {
+  const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
+  return /\b(link|enlace)\b.{0,40}\b(pago|pagar)\b/.test(text)
+    || /\b(donde|como)\s+(?:puedo\s+)?(?:pago|pagar)\b/.test(text)
+    || /\bpagar\s+(?:el|mi|la)?\s*(?:plan|mensualidad)\b/.test(text);
+}
+
 async function callBotResponder(env, context, inboundMessage, media) {
+  if (isPaymentLinkRequest(inboundMessage?.text)) return { action: "reply", text: PAYMENT_PORTAL_REPLY };
   if (!env.OPENAI_API_KEY) return { action: "escalate", reason: "bot_not_configured" };
   let customerLine = "No se pudo identificar al cliente en el sistema por su número.";
   if (context.customer?.name) {
