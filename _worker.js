@@ -506,71 +506,115 @@ async function ensureStaffNotificationsLogTable(env) {
     ok INTEGER, http_status INTEGER, response_json TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`).run();
+  const columns = [
+    ["idempotency_key", "TEXT"], ["template_name", "TEXT"], ["template_language", "TEXT"],
+    ["customer_name", "TEXT"], ["entity_type", "TEXT"], ["entity_id", "TEXT"],
+    ["source_message_id", "TEXT"], ["summary", "TEXT"], ["status", "TEXT NOT NULL DEFAULT 'pending'"],
+    ["message_id", "TEXT"], ["error_code", "TEXT"], ["error_message", "TEXT"],
+    ["error_details", "TEXT"], ["attempt_count", "INTEGER NOT NULL DEFAULT 0"],
+    ["last_attempt_at", "TEXT"], ["updated_at", "TEXT"],
+  ];
+  for (const [name, type] of columns) {
+    await env.DB.prepare(`ALTER TABLE staff_notifications_log ADD COLUMN ${name} ${type}`).run().catch(() => null);
+  }
+  await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_notifications_idempotency ON staff_notifications_log(idempotency_key)").run();
+  await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_notifications_message ON staff_notifications_log(message_id) WHERE message_id IS NOT NULL").run();
 }
 
-async function notifyStaff(env, credentials, role, caseType, customerName, customerPhone, summary, options) {
-  const staffPhone = role === "carlos" ? env.STAFF_PHONE_CARLOS : role === "eduardo" ? env.STAFF_PHONE_EDUARDO : null;
-  const normalized = normalizeWhatsAppPhone(staffPhone);
-  await ensureStaffNotificationsLogTable(env).catch(() => null);
-  if (!normalized || !credentials.accessToken || !credentials.phoneNumberId) {
-    await env.DB.prepare(`INSERT INTO staff_notifications_log (role, staff_phone, case_type, customer_phone, ok, http_status, response_json)
-      VALUES (?, ?, ?, ?, 0, NULL, ?)`)
-      .bind(role, staffPhone || null, caseType, customerPhone,
-        JSON.stringify({ error: "missing_config", hasNormalizedPhone: Boolean(normalized), hasAccessToken: Boolean(credentials.accessToken), hasPhoneNumberId: Boolean(credentials.phoneNumberId) }))
-      .run().catch(() => null);
-    return;
+function staffNotificationIdentity(role, caseType, options = {}) {
+  if (options.caseId) return { type: "case", id: String(options.caseId), key: `${role}:case:${options.caseId}` };
+  if (options.visitRequestId) return { type: "visit_request", id: String(options.visitRequestId), key: `${role}:visit:${options.visitRequestId}` };
+  if (options.billingRequestId) return { type: "billing_request", id: String(options.billingRequestId), key: `${role}:billing:${options.billingRequestId}` };
+  if (options.factibilidadLeadId) return { type: "lead", id: String(options.factibilidadLeadId), key: `${role}:factibilidad:${options.factibilidadLeadId}` };
+  if (options.leadId) return { type: "lead", id: String(options.leadId), key: `${role}:contratacion:${options.leadId}` };
+  if (options.sourceMessageId) return { type: "source_message", id: String(options.sourceMessageId), key: `${role}:mensaje:${options.sourceMessageId}:${caseType}` };
+  return null;
+}
+
+function sanitizeStaffTemplateParam(value, maxLength = 300) {
+  return String(value || "").replace(/[\n\t\r]+/g, " ").replace(/\s{2,}/g, " ").trim().slice(0, maxLength);
+}
+
+function staffMetaError(body) {
+  const error = body?.error || {};
+  return { code: error.code == null ? null : String(error.code), message: error.message || null, details: error.error_data?.details || error.error_user_msg || null };
+}
+
+async function deliverStaffNotification(env, credentials, row) {
+  const normalized = normalizeWhatsAppPhone(row.staff_phone);
+  const configurationError = !/^\d{8,15}$/.test(String(normalized || "")) ? "Número del responsable inválido o ausente."
+    : !credentials?.accessToken || !credentials?.phoneNumberId ? "Credenciales de WhatsApp incompletas." : null;
+  if (configurationError) {
+    await env.DB.prepare(`UPDATE staff_notifications_log SET status='failed', ok=0, http_status=NULL,
+      error_code='configuration_error', error_message=?, error_details=NULL, attempt_count=COALESCE(attempt_count,0)+1,
+      last_attempt_at=datetime('now'), updated_at=datetime('now') WHERE id=?`).bind(configurationError, row.id).run();
+    return { ok: false, status: "failed", error: configurationError };
   }
-  // Los casos de pago y las solicitudes de factibilidad usan plantillas con botones de respuesta
-  // rápida que cargan el id del caso/lead en el payload, para que el webhook pueda resolverlos en
-  // cuanto Carlos/Eduardo confirmen desde WhatsApp, sin pasos extra ni tocar el panel.
-  const templateName = options?.factibilidadLeadId ? "aviso_factibilidad" : options?.caseId ? "aviso_nuevo_pago" : "aviso_nuevo_caso";
-  // Meta rechaza cualquier parámetro de plantilla que tenga saltos de línea/tabs o más de 4
-  // espacios seguidos (error 132018) -- se sanea acá para no depender de que cada texto armado
-  // más arriba lo recuerde.
-  const sanitizeParam = (value) => String(value || "").replace(/[\n\t\r]+/g, " ").replace(/ {5,}/g, "    ").trim();
-  const components = [{
-    type: "body",
-    parameters: [
-      { type: "text", text: sanitizeParam(caseType) },
-      { type: "text", text: sanitizeParam(customerName) || "Sin identificar" },
-      { type: "text", text: sanitizeParam(customerPhone) },
-      { type: "text", text: sanitizeParam(summary).slice(0, 300) || "Sin detalle" },
-    ],
-  }];
-  if (options?.caseId) {
-    components.push({
-      type: "button", sub_type: "quick_reply", index: 0,
-      parameters: [{ type: "payload", payload: `confirm_payment:${options.caseId}` }],
-    });
-  } else if (options?.factibilidadLeadId) {
-    components.push({
-      type: "button", sub_type: "quick_reply", index: 0,
-      parameters: [{ type: "payload", payload: `factibilidad_yes:${options.factibilidadLeadId}` }],
-    });
-    components.push({
-      type: "button", sub_type: "quick_reply", index: 1,
-      parameters: [{ type: "payload", payload: `factibilidad_no:${options.factibilidadLeadId}` }],
-    });
+  const components = [{ type: "body", parameters: [
+    { type: "text", text: sanitizeStaffTemplateParam(row.case_type, 120) || "Caso interno" },
+    { type: "text", text: sanitizeStaffTemplateParam(row.customer_name, 160) || "Sin identificar" },
+    { type: "text", text: sanitizeStaffTemplateParam(row.customer_phone, 30) || "Sin teléfono" },
+    { type: "text", text: sanitizeStaffTemplateParam(row.summary, 300) || "Sin detalle" },
+  ] }];
+  if (row.entity_type === "case" && row.entity_id) components.push({ type: "button", sub_type: "quick_reply", index: 0, parameters: [{ type: "payload", payload: `confirm_payment:${row.entity_id}` }] });
+  else if (row.template_name === "aviso_factibilidad" && row.entity_id) {
+    components.push({ type: "button", sub_type: "quick_reply", index: 0, parameters: [{ type: "payload", payload: `factibilidad_yes:${row.entity_id}` }] });
+    components.push({ type: "button", sub_type: "quick_reply", index: 1, parameters: [{ type: "payload", payload: `factibilidad_no:${row.entity_id}` }] });
   }
   const endpoint = `https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/messages`;
-  const result = await fetch(endpoint, {
-    method: "POST",
-    headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      recipient_type: "individual",
-      to: normalized,
-      type: "template",
-      template: { name: templateName, language: { code: "es_CL" }, components },
-    }),
-  }).then(async (response) => ({ status: response.status, ok: response.ok, body: await response.json().catch(() => null) }))
-    .catch((error) => ({ status: 0, ok: false, body: { error: String(error && error.message || error) } }));
-  await env.DB.prepare(`INSERT INTO staff_notifications_log (role, staff_phone, case_type, customer_phone, ok, http_status, response_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .bind(role, normalized, caseType, customerPhone, result.ok ? 1 : 0, result.status, JSON.stringify(result.body))
-    .run().catch(() => null);
-  // El resultado queda en staff_notifications_log para diagnóstico; nunca debe interrumpir
-  // la respuesta al cliente ni la creación del caso aunque el envío falle.
+  const result = await fetch(endpoint, { method: "POST", headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" }, body: JSON.stringify({
+    messaging_product: "whatsapp", recipient_type: "individual", to: normalized, type: "template",
+    template: { name: row.template_name, language: { code: row.template_language || "es_CL" }, components },
+  }) }).then(async (response) => ({ status: response.status, ok: response.ok, body: await response.json().catch(() => null) }))
+    .catch((error) => ({ status: 0, ok: false, body: { error: { message: String(error?.message || error) } } }));
+  const messageId = result.body?.messages?.[0]?.id || null;
+  const error = staffMetaError(result.body);
+  const accepted = Boolean(result.ok && messageId);
+  await env.DB.prepare(`UPDATE staff_notifications_log SET status=?, ok=?, http_status=?, message_id=?, error_code=?,
+    error_message=?, error_details=?, response_json=?, attempt_count=COALESCE(attempt_count,0)+1,
+    last_attempt_at=datetime('now'), updated_at=datetime('now') WHERE id=?`)
+    .bind(accepted ? "accepted" : "failed", accepted ? 1 : 0, result.status, messageId, accepted ? null : error.code,
+      accepted ? null : (error.message || "Meta no devolvió un message_id."), accepted ? null : error.details,
+      JSON.stringify(result.body), row.id).run();
+  if (accepted) await saveWhatsAppStatus(env, { messageId, recipient: normalized, status: "accepted" }).catch(() => null);
+  return { ok: accepted, status: accepted ? "accepted" : "failed", messageId, error };
+}
+
+async function notifyStaff(env, credentials, role, caseType, customerName, customerPhone, summary, options = {}) {
+  try {
+    await ensureStaffNotificationsLogTable(env);
+    const identity = staffNotificationIdentity(role, caseType, options);
+    if (!identity) throw new Error(`Falta identificador idempotente para ${role}/${caseType}.`);
+    const normalized = normalizeWhatsAppPhone(role === "carlos" ? env.STAFF_PHONE_CARLOS : role === "eduardo" ? env.STAFF_PHONE_EDUARDO : null);
+    const templateName = options.factibilidadLeadId ? "aviso_factibilidad" : options.caseId ? "aviso_nuevo_pago" : "aviso_nuevo_caso";
+    const insert = await env.DB.prepare(`INSERT OR IGNORE INTO staff_notifications_log
+      (idempotency_key,role,staff_phone,case_type,customer_name,customer_phone,entity_type,entity_id,source_message_id,
+       summary,template_name,template_language,status,ok,attempt_count,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,'es_CL','pending',0,0,datetime('now'),datetime('now'))`)
+      .bind(identity.key, role, normalized || null, sanitizeStaffTemplateParam(caseType, 120), sanitizeStaffTemplateParam(customerName, 160) || null,
+        normalizeWhatsAppPhone(customerPhone) || null, identity.type, identity.id, options.sourceMessageId || null,
+        sanitizeStaffTemplateParam(summary, 300), templateName).run();
+    const row = await env.DB.prepare("SELECT * FROM staff_notifications_log WHERE idempotency_key=?").bind(identity.key).first();
+    if (!insert.meta?.changes) return { ok: row?.status !== "failed", duplicate: true, status: row?.status };
+    return await deliverStaffNotification(env, credentials, row);
+  } catch (error) {
+    console.error("staff_notification_failed", role, caseType, String(error?.message || error));
+    return { ok: false, status: "failed", error: String(error?.message || error) };
+  }
+}
+
+async function updateStaffNotificationStatus(env, item) {
+  await ensureStaffNotificationsLogTable(env);
+  const row = await env.DB.prepare("SELECT id,status FROM staff_notifications_log WHERE message_id=?").bind(item.messageId).first();
+  if (!row) return;
+  const next = String(item.status || "").toLowerCase();
+  if (!["sent", "delivered", "read", "failed"].includes(next)) return;
+  const rank = { pending: 0, accepted: 1, sent: 2, delivered: 3, read: 4 };
+  if (next !== "failed" && (rank[next] || 0) < (rank[row.status] || 0)) return;
+  const error = staffMetaError({ error: item.error || null });
+  await env.DB.prepare(`UPDATE staff_notifications_log SET status=?,ok=?,error_code=?,error_message=?,error_details=?,updated_at=datetime('now') WHERE id=?`)
+    .bind(next, next === "failed" ? 0 : 1, next === "failed" ? error.code : null,
+      next === "failed" ? error.message : null, next === "failed" ? error.details : null, row.id).run();
 }
 
 async function sendBotReply(env, credentials, phone, text, preferAudio) {
@@ -875,7 +919,7 @@ async function executeBotAction(env, credentials, phone, action, message) {
         await env.DB.prepare("UPDATE whatsapp_automation_cases SET reported_name = ? WHERE id = ?").bind(known, caseRow.id).run();
       }
       await sendBotReply(env, credentials, phone, action.text || "Recibimos tu comprobante, en breve lo revisamos. ¡Gracias! 🙏", preferAudio);
-      await notifyStaff(env, credentials, "carlos", "Comprobante de pago", known, phone, "Cliente envió comprobante de pago para revisión.", { caseId: caseRow?.id || null });
+      await notifyStaff(env, credentials, "carlos", "Comprobante de pago", known, phone, "Cliente envió comprobante de pago para revisión.", { caseId: caseRow?.id || null, sourceMessageId: message.messageId });
       await setBotSessionMode(env, phone, "human", "case_created_payment");
       return;
     }
@@ -897,11 +941,11 @@ async function executeBotAction(env, credentials, phone, action, message) {
     if (known) {
       const customer = await findCustomerForWhatsApp(env, phone, message.customerName);
       const transcript = await buildRecentTranscript(env, phone);
-      await env.DB.prepare(`INSERT INTO whatsapp_visit_requests (phone, customer_id, customer_name, reported_name, preferred_date, reason, status, created_at, transcript)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'), ?)`)
-        .bind(phone, customer.id, customer.name, known, action.preferred_date || null, action.reason || null, transcript).run();
+      const visitRow = await env.DB.prepare(`INSERT INTO whatsapp_visit_requests (phone, customer_id, customer_name, reported_name, preferred_date, reason, status, created_at, transcript)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'), ?) RETURNING id`)
+        .bind(phone, customer.id, customer.name, known, action.preferred_date || null, action.reason || null, transcript).first();
       await sendBotReply(env, credentials, phone, action.text || "Registramos tu solicitud de visita técnica, un agente te confirmará el horario. 🙌", preferAudio);
-      await notifyStaff(env, credentials, "eduardo", "Incidencia técnica", known, phone, action.reason || "Cliente reportó una falla técnica.");
+      await notifyStaff(env, credentials, "eduardo", "Incidencia técnica", known, phone, action.reason || "Cliente reportó una falla técnica.", { visitRequestId: visitRow?.id, sourceMessageId: message.messageId });
       await setBotSessionMode(env, phone, "human", "case_created_visit");
       return;
     }
@@ -921,11 +965,11 @@ async function executeBotAction(env, credentials, phone, action, message) {
     if (known) {
       const customer = await findCustomerForWhatsApp(env, phone, message.customerName);
       const transcript = await buildRecentTranscript(env, phone);
-      await env.DB.prepare(`INSERT INTO whatsapp_billing_requests (phone, customer_id, customer_name, reported_name, days_without_service, reason, status, created_at, transcript)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'), ?)`)
-        .bind(phone, customer.id, customer.name, known, days, action.reason || null, transcript).run();
+      const billingRow = await env.DB.prepare(`INSERT INTO whatsapp_billing_requests (phone, customer_id, customer_name, reported_name, days_without_service, reason, status, created_at, transcript)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'), ?) RETURNING id`)
+        .bind(phone, customer.id, customer.name, known, days, action.reason || null, transcript).first();
       await sendBotReply(env, credentials, phone, "Registramos tu solicitud de revisión por los días sin servicio. Un agente calculará el ajuste correspondiente y te confirmará. 🙏", preferAudio);
-      await notifyStaff(env, credentials, "carlos", "Descuento por corte", known, phone, days ? `${days} día(s) sin servicio. ${action.reason || ""}` : (action.reason || "Cliente pide revisión por corte de servicio."));
+      await notifyStaff(env, credentials, "carlos", "Descuento por corte", known, phone, days ? `${days} día(s) sin servicio. ${action.reason || ""}` : (action.reason || "Cliente pide revisión por corte de servicio."), { billingRequestId: billingRow?.id, sourceMessageId: message.messageId });
       await setBotSessionMode(env, phone, "human", "case_created_billing");
       return;
     }
@@ -940,7 +984,7 @@ async function executeBotAction(env, credentials, phone, action, message) {
     await setBotSessionMode(env, phone, "human", action.reason || "bot_escalated");
     await sendBotReply(env, credentials, phone, action.text || "Ya te comunico con un agente de BPGO, en breve te responde por acá. 🙌", preferAudio);
     const escalatedName = await getKnownAccountName(env, phone);
-    await notifyStaff(env, credentials, "carlos", "Conversación escalada", escalatedName, phone, action.reason || "El bot no pudo resolver la consulta.");
+    await notifyStaff(env, credentials, "carlos", "Conversación escalada", escalatedName, phone, action.reason || "El bot no pudo resolver la consulta.", { sourceMessageId: message.messageId });
     return;
   }
   if (action.action === "new_customer_request") {
@@ -1086,7 +1130,7 @@ async function runBotForInboundMessages(env, changes) {
               await sendBotReply(env, credentials, phone, "¡Gracias! Ya estamos revisando la factibilidad en tu zona, te avisamos apenas tengamos la confirmación. 🙏", preferAudio);
               const mapsLink = `https://www.google.com/maps?q=${latitude},${longitude}`;
               await notifyStaff(env, credentials, "carlos", "Solicitud de factibilidad", name || salesLead.customer_name, phone,
-                `Sector: ${salesLead.sector || "no indicado"}. Ubicación: ${mapsLink}`, { caseId: null, factibilidadLeadId: salesLead.id });
+                `Sector: ${salesLead.sector || "no indicado"}. Ubicación: ${mapsLink}`, { caseId: null, factibilidadLeadId: salesLead.id, sourceMessageId: message.id });
             } else {
               await sendBotReply(env, credentials, phone, "Necesitamos que nos compartas tu ubicación desde WhatsApp: toca el ícono 📎 (adjuntar) y elige \"Ubicación\". Así podemos revisar la factibilidad exacta.", preferAudio);
             }
@@ -1125,7 +1169,7 @@ async function runBotForInboundMessages(env, changes) {
               await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'completed', updated_at = datetime('now') WHERE id = ?").bind(salesLead.id).run();
               await sendBotReply(env, credentials, phone, "¡Perfecto, ya tenemos todos tus datos! Un agente coordinará la instalación contigo a la brevedad. 🙌", preferAudio);
               await notifyStaff(env, credentials, "carlos", "Nueva contratación", updatedLead.installation_name || name || salesLead.customer_name, phone,
-                `Sector: ${salesLead.sector || "no indicado"}. Plan: ${salesLead.chosen_plan}. RUT: ${updatedLead.installation_rut}. Tel: ${updatedLead.installation_phone}. Correo: ${updatedLead.installation_email}. Dirección: ${updatedLead.installation_address}. Coordinar instalación.`);
+                `Sector: ${salesLead.sector || "no indicado"}. Plan: ${salesLead.chosen_plan}. RUT: ${updatedLead.installation_rut}. Tel: ${updatedLead.installation_phone}. Correo: ${updatedLead.installation_email}. Dirección: ${updatedLead.installation_address}. Coordinar instalación.`, { leadId: salesLead.id, sourceMessageId: message.id });
               await setBotSessionMode(env, phone, "human", "case_created_new_customer");
             } else {
               await sendBotReply(env, credentials, phone, `Anotado ✅ Todavía me falta: ${missing.join(", ")}.`, preferAudio);
@@ -1140,12 +1184,12 @@ async function runBotForInboundMessages(env, changes) {
           const reportedName = String(text).trim().slice(0, 200);
           const customer = await findCustomerForWhatsApp(env, phone, reportedName);
           const transcript = await buildRecentTranscript(env, phone);
-          await env.DB.prepare(`INSERT INTO whatsapp_visit_requests (phone, customer_id, customer_name, reported_name, preferred_date, reason, status, created_at, transcript)
-            VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'), ?)`)
-            .bind(phone, customer.id, customer.name, reportedName, pendingVisit.preferred_date, pendingVisit.reason, transcript).run();
+          const visitRow = await env.DB.prepare(`INSERT INTO whatsapp_visit_requests (phone, customer_id, customer_name, reported_name, preferred_date, reason, status, created_at, transcript)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'), ?) RETURNING id`)
+            .bind(phone, customer.id, customer.name, reportedName, pendingVisit.preferred_date, pendingVisit.reason, transcript).first();
           await env.DB.prepare("DELETE FROM whatsapp_pending_visits WHERE phone = ?").bind(phone).run();
           await sendBotReply(env, credentials, phone, `Gracias, registramos la solicitud a nombre de ${reportedName}. Un agente te confirmará el horario. 🙌`, preferAudio);
-          await notifyStaff(env, credentials, "eduardo", "Incidencia técnica", reportedName, phone, pendingVisit.reason || "Cliente reportó una falla técnica.");
+          await notifyStaff(env, credentials, "eduardo", "Incidencia técnica", reportedName, phone, pendingVisit.reason || "Cliente reportó una falla técnica.", { visitRequestId: visitRow?.id, sourceMessageId: message.id });
           await setBotSessionMode(env, phone, "human", "case_created_visit");
           continue;
         }
@@ -1161,7 +1205,7 @@ async function runBotForInboundMessages(env, changes) {
           }
           await env.DB.prepare("DELETE FROM whatsapp_pending_payments WHERE phone = ?").bind(phone).run();
           await sendBotReply(env, credentials, phone, `Gracias, dejamos tu comprobante asociado a nombre de ${reportedName}. El equipo lo confirmará pronto. 🙏`, preferAudio);
-          await notifyStaff(env, credentials, "carlos", "Comprobante de pago", reportedName, phone, "Cliente envió comprobante de pago para revisión.", { caseId: pendingPayment.case_id || null });
+          await notifyStaff(env, credentials, "carlos", "Comprobante de pago", reportedName, phone, "Cliente envió comprobante de pago para revisión.", { caseId: pendingPayment.case_id || null, sourceMessageId: message.id });
           await setBotSessionMode(env, phone, "human", "case_created_payment");
           continue;
         }
@@ -1172,12 +1216,12 @@ async function runBotForInboundMessages(env, changes) {
           const reportedName = String(text).trim().slice(0, 200);
           const customer = await findCustomerForWhatsApp(env, phone, reportedName);
           const transcript = await buildRecentTranscript(env, phone);
-          await env.DB.prepare(`INSERT INTO whatsapp_billing_requests (phone, customer_id, customer_name, reported_name, days_without_service, reason, status, created_at, transcript)
-            VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'), ?)`)
-            .bind(phone, customer.id, customer.name, reportedName, pendingBilling.days_without_service, pendingBilling.reason, transcript).run();
+          const billingRow = await env.DB.prepare(`INSERT INTO whatsapp_billing_requests (phone, customer_id, customer_name, reported_name, days_without_service, reason, status, created_at, transcript)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'), ?) RETURNING id`)
+            .bind(phone, customer.id, customer.name, reportedName, pendingBilling.days_without_service, pendingBilling.reason, transcript).first();
           await env.DB.prepare("DELETE FROM whatsapp_pending_billing WHERE phone = ?").bind(phone).run();
           await sendBotReply(env, credentials, phone, `Gracias, registramos la solicitud a nombre de ${reportedName}. Un agente calculará el ajuste y te confirmará. 🙏`, preferAudio);
-          await notifyStaff(env, credentials, "carlos", "Descuento por corte", reportedName, phone, pendingBilling.days_without_service ? `${pendingBilling.days_without_service} día(s) sin servicio. ${pendingBilling.reason || ""}` : (pendingBilling.reason || "Cliente pide revisión por corte de servicio."));
+          await notifyStaff(env, credentials, "carlos", "Descuento por corte", reportedName, phone, pendingBilling.days_without_service ? `${pendingBilling.days_without_service} día(s) sin servicio. ${pendingBilling.reason || ""}` : (pendingBilling.reason || "Cliente pide revisión por corte de servicio."), { billingRequestId: billingRow?.id, sourceMessageId: message.id });
           await setBotSessionMode(env, phone, "human", "case_created_billing");
           continue;
         }
@@ -1498,6 +1542,11 @@ export default {
           status: item.status,
           error: item.errors?.[0] || null,
         }).catch(() => null);
+        await updateStaffNotificationStatus(env, {
+          messageId: item.id,
+          status: item.status,
+          error: item.errors?.[0] || null,
+        }).catch(() => null);
       }
       const messagesSaved = await saveInboundWhatsAppMessages(env, changes).catch(() => 0);
       const botTask = runBotForInboundMessages(env, changes).catch(() => null);
@@ -1774,6 +1823,48 @@ export default {
 
     if (url.pathname === "/api/whatsapp/register" && request.method === "POST") {
       return Response.json({ ok: false, error: "Los números con WhatsApp Business deben completar el registro dentro del flujo oficial de Meta." }, { status: 409 });
+    }
+
+    if (url.pathname === "/api/whatsapp/staff-notifications" && request.method === "GET") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      await ensureStaffNotificationsLogTable(env);
+      const rows = await env.DB.prepare(`SELECT id,role,case_type,customer_name,entity_type,entity_id,template_name,status,
+        http_status,error_code,error_message,error_details,attempt_count,created_at,updated_at
+        FROM staff_notifications_log ORDER BY created_at DESC LIMIT 300`).all();
+      const items = rows.results || [];
+      const stats = { carlos: { sent: 0, delivered: 0, failed: 0 }, eduardo: { sent: 0, delivered: 0, failed: 0 } };
+      for (const item of items) {
+        if (!stats[item.role]) continue;
+        if (item.status === "failed") stats[item.role].failed += 1;
+        else if (["delivered", "read"].includes(item.status)) stats[item.role].delivered += 1;
+        else if (["accepted", "sent"].includes(item.status)) stats[item.role].sent += 1;
+      }
+      return Response.json({ ok: true, stats, failed: items.filter((item) => item.status === "failed"), configured: {
+        carlos: /^\d{8,15}$/.test(String(normalizeWhatsAppPhone(env.STAFF_PHONE_CARLOS) || "")),
+        eduardo: /^\d{8,15}$/.test(String(normalizeWhatsAppPhone(env.STAFF_PHONE_EDUARDO) || "")),
+      } });
+    }
+
+    if (url.pathname === "/api/whatsapp/staff-notifications/retry" && request.method === "POST") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      const body = await request.json().catch(() => ({}));
+      const id = Number(body.id);
+      if (!Number.isInteger(id) || id < 1) return Response.json({ ok: false, error: "Notificación inválida." }, { status: 400 });
+      await ensureStaffNotificationsLogTable(env);
+      const row = await env.DB.prepare("SELECT * FROM staff_notifications_log WHERE id=?").bind(id).first();
+      if (!row) return Response.json({ ok: false, error: "Notificación no encontrada." }, { status: 404 });
+      if (row.status !== "failed") return Response.json({ ok: false, error: "Solo se pueden reintentar notificaciones fallidas." }, { status: 409 });
+      const lock = await env.DB.prepare("UPDATE staff_notifications_log SET status='pending',updated_at=datetime('now') WHERE id=? AND status='failed'").bind(id).run();
+      if (!lock.meta?.changes) return Response.json({ ok: false, error: "La notificación ya está siendo procesada." }, { status: 409 });
+      const credentials = await getWhatsAppCredentials(env);
+      const result = await deliverStaffNotification(env, credentials, row).catch(async (error) => {
+        await env.DB.prepare("UPDATE staff_notifications_log SET status='failed',error_message=?,updated_at=datetime('now') WHERE id=?")
+          .bind(String(error?.message || error), id).run().catch(() => null);
+        return { ok: false, status: "failed", error: String(error?.message || error) };
+      });
+      return Response.json(result, { status: result.ok ? 200 : 422 });
     }
 
     if (url.pathname === "/api/whatsapp/bot-sessions" && request.method === "GET") {
