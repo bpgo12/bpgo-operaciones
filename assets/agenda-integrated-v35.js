@@ -38,6 +38,29 @@
     return match ? monthValue + "-" + String(Number(match[1])).padStart(2, "0") : "";
   }
 
+  function decorateWorkDescriptions(column) {
+    var orders = state && Array.isArray(state.workOrders) ? state.workOrders : [];
+    column.querySelectorAll(".day-work").forEach(function (card) {
+      var codeNode = card.querySelector("span");
+      var code = String(codeNode && codeNode.textContent || "").split("|")[0].trim();
+      var work = orders.find(function (item) { return String(item.code || "").trim() === code; });
+      var description = String(work && work.description || "").trim();
+      var current = card.querySelector(".agenda-work-description");
+      if (!description) {
+        if (current) current.remove();
+        return;
+      }
+      if (!current) {
+        current = document.createElement("em");
+        current.className = "agenda-work-description";
+        var location = Array.from(card.querySelectorAll("em")).find(function (item) { return !item.classList.contains("followup-tag"); });
+        (location || card.querySelector("strong")).insertAdjacentElement("afterend", current);
+      }
+      current.textContent = "Descripción: " + description;
+      current.title = description;
+    });
+  }
+
   function decorateAgenda() {
     var title = Array.from(document.querySelectorAll("h1")).find(function (item) {
       return normalize(item.textContent) === "calendario de trabajos";
@@ -48,6 +71,7 @@
     if (!calendar || !monthSelect) return;
     var technicians = activeTechnicians();
     var shifts = Array.isArray(state.technicianShifts) ? state.technicianShifts : [];
+    decorateWorkDescriptions(calendar);
 
     calendar.querySelectorAll(".day-column").forEach(function (column) {
       var date = dateForColumn(column, monthSelect.value);
