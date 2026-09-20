@@ -38,26 +38,28 @@
     return match ? monthValue + "-" + String(Number(match[1])).padStart(2, "0") : "";
   }
 
-  function decorateWorkDescriptions(column) {
+  function decorateWorkObservations(column) {
     var orders = state && Array.isArray(state.workOrders) ? state.workOrders : [];
     column.querySelectorAll(".day-work").forEach(function (card) {
       var codeNode = card.querySelector("span");
       var code = String(codeNode && codeNode.textContent || "").split("|")[0].trim();
       var work = orders.find(function (item) { return String(item.code || "").trim() === code; });
-      var description = String(work && work.description || "").trim();
-      var current = card.querySelector(".agenda-work-description");
-      if (!description) {
+      var observations = String(work && work.accessNotes || "").trim();
+      var current = card.querySelector(".agenda-work-observations");
+      var previousDescription = card.querySelector(".agenda-work-description");
+      if (previousDescription) previousDescription.remove();
+      if (!observations) {
         if (current) current.remove();
         return;
       }
       if (!current) {
         current = document.createElement("em");
-        current.className = "agenda-work-description";
+        current.className = "agenda-work-observations";
         var location = Array.from(card.querySelectorAll("em")).find(function (item) { return !item.classList.contains("followup-tag"); });
         (location || card.querySelector("strong")).insertAdjacentElement("afterend", current);
       }
-      current.textContent = "Descripción: " + description;
-      current.title = description;
+      current.textContent = "Observaciones: " + observations;
+      current.title = observations;
     });
   }
 
@@ -71,7 +73,7 @@
     if (!calendar || !monthSelect) return;
     var technicians = activeTechnicians();
     var shifts = Array.isArray(state.technicianShifts) ? state.technicianShifts : [];
-    decorateWorkDescriptions(calendar);
+    decorateWorkObservations(calendar);
 
     calendar.querySelectorAll(".day-column").forEach(function (column) {
       var date = dateForColumn(column, monthSelect.value);
