@@ -38,29 +38,64 @@
     return match ? monthValue + "-" + String(Number(match[1])).padStart(2, "0") : "";
   }
 
-  function decorateWorkObservations(column) {
+  function customerForWork(work) {
+    var customers = state && Array.isArray(state.customers) ? state.customers : [];
+    return customers.find(function (item) { return item.id === work.customerId; }) || null;
+  }
+
+  function descriptionForWork(work) {
+    if (!work) return "";
+    var description = String(work.description || "").trim();
+    if (description) return description;
+    var customer = customerForWork(work);
+    return String(customer && customer.accessNotes || "").trim();
+  }
+
+  function decorateWorkDescriptions(column) {
     var orders = state && Array.isArray(state.workOrders) ? state.workOrders : [];
     column.querySelectorAll(".day-work").forEach(function (card) {
       var codeNode = card.querySelector("span");
       var code = String(codeNode && codeNode.textContent || "").split("|")[0].trim();
       var work = orders.find(function (item) { return String(item.code || "").trim() === code; });
-      var observations = String(work && work.accessNotes || "").trim();
-      var current = card.querySelector(".agenda-work-observations");
-      var previousDescription = card.querySelector(".agenda-work-description");
-      if (previousDescription) previousDescription.remove();
-      if (!observations) {
+      var description = descriptionForWork(work);
+      var current = card.querySelector(".agenda-work-description");
+      var previousObservations = card.querySelector(".agenda-work-observations");
+      if (previousObservations) previousObservations.remove();
+      if (!description) {
         if (current) current.remove();
         return;
       }
       if (!current) {
         current = document.createElement("em");
-        current.className = "agenda-work-observations";
+        current.className = "agenda-work-description";
         var location = Array.from(card.querySelectorAll("em")).find(function (item) { return !item.classList.contains("followup-tag"); });
         (location || card.querySelector("strong")).insertAdjacentElement("afterend", current);
       }
-      current.textContent = "Observaciones: " + observations;
-      current.title = observations;
+      current.textContent = "Descripción: " + description;
+      current.title = description;
     });
+  }
+
+  function decorateActivityDetail() {
+    var modal = document.querySelector('.modal[aria-label="Detalle de actividad"]');
+    var detail = modal && modal.querySelector(".detail-section");
+    if (!detail || !state) return;
+    var orders = Array.isArray(state.workOrders) ? state.workOrders : [];
+    var work = orders.find(function (item) { return item.code && detail.textContent.includes(item.code); });
+    if (!work) return;
+    var customer = customerForWork(work);
+    var description = descriptionForWork(work);
+    var observations = String(customer && customer.accessNotes || "").trim();
+    var block = detail.querySelector(".agenda-work-fields");
+    if (!block) {
+      block = document.createElement("div");
+      block.className = "agenda-work-fields";
+      var head = detail.querySelector(".panel-head");
+      head.insertAdjacentElement("afterend", block);
+    }
+    block.innerHTML = (description ? '<div><strong>Descripción del trabajo</strong><p>' + escapeHtml(description) + '</p></div>' : "") +
+      (observations ? '<div><strong>Observaciones del cliente</strong><p>' + escapeHtml(observations) + '</p></div>' : "");
+    block.hidden = !description && !observations;
   }
 
   function decorateAgenda() {
@@ -73,7 +108,7 @@
     if (!calendar || !monthSelect) return;
     var technicians = activeTechnicians();
     var shifts = Array.isArray(state.technicianShifts) ? state.technicianShifts : [];
-    decorateWorkObservations(calendar);
+    decorateWorkDescriptions(calendar);
 
     calendar.querySelectorAll(".day-column").forEach(function (column) {
       var date = dateForColumn(column, monthSelect.value);
@@ -174,12 +209,12 @@
   }
 
   function refresh(force) {
-    loadState(force).then(function () { installSearch(); decorateAgenda(); }).catch(function () {});
+    loadState(force).then(function () { installSearch(); decorateAgenda(); decorateActivityDetail(); }).catch(function () {});
   }
 
   function scan() {
     clearTimeout(timer);
-    timer = window.setTimeout(function () { if (state) { installSearch(); decorateAgenda(); } else refresh(false); }, 80);
+    timer = window.setTimeout(function () { if (state) { installSearch(); decorateAgenda(); decorateActivityDetail(); } else refresh(false); }, 80);
   }
 
   document.addEventListener("click", function (event) {
