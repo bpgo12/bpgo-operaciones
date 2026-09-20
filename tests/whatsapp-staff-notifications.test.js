@@ -21,6 +21,14 @@ assert.match(worker, /templateName === "aviso_nuevo_pago" && row\.entity_type ==
 assert.match(worker, /original_error_code/);
 assert.match(worker, /fallback_message_id/);
 assert.match(worker, /JSON\.stringify\(\{ primary: primary\.body, fallback: fallback\?\.body \|\| null \}\)/);
+assert.match(worker, /error_subcode/);
+assert.match(worker, /fbtrace_id/);
+assert.match(worker, /primary_response_json/);
+assert.match(worker, /fallback_response_json/);
+assert.match(worker, /staff-notifications\/diagnostic/);
+assert.match(worker, /staff-notifications\/test/);
+assert.match(worker, /name: "aviso_nuevo_caso"/);
+assert.match(worker, /Bloqueo de cuenta Meta, no de plantilla/);
 assert.match(worker, /visitRequestId: visitRow\?\.id/);
 assert.match(worker, /billingRequestId: billingRow\?\.id/);
 assert.match(worker, /leadId: salesLead\.id/);
@@ -29,5 +37,9 @@ assert.doesNotMatch(worker, /SELECT id,role,staff_phone/);
 assert.match(operations, /Notificaciones internas/);
 assert.match(operations, /Notificación interna fallida/);
 assert.match(operations, /data-retry-staff-notification/);
+assert.match(operations, /Ver diagnóstico Meta/);
+assert.match(operations, /Probar aviso a Carlos/);
+assert.match(operations, /Respuesta completa PRIMARY/);
+assert.match(operations, /Respuesta completa FALLBACK/);
 
 console.log("whatsapp staff notifications: ok");
