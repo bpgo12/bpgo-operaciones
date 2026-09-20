@@ -478,6 +478,42 @@
     await loadFaq(panel);
   }
 
+  async function loadStaffNotifications(panel) {
+    var list = panel.querySelector("[data-staff-notifications-list]");
+    var stats = panel.querySelector("[data-staff-notifications-stats]");
+    list.innerHTML = '<div class="whatsapp-test-status pending">Cargando notificaciones internas…</div>';
+    try {
+      var response = await fetch("/api/whatsapp/staff-notifications", { cache: "no-store" });
+      var data = await response.json().catch(function () { return {}; });
+      if (!response.ok) throw new Error(data.error || "No se pudieron cargar las notificaciones internas.");
+      function summary(role, label) {
+        var item = data.stats[role] || { sent: 0, delivered: 0, failed: 0 };
+        var configured = data.configured[role] ? "Configurado" : "Configuración faltante";
+        return '<article class="automation-case general"><header><div><strong>' + label + '</strong><small>' + configured + '</small></div></header><p class="automation-details">Enviadas: ' + item.sent + ' · Entregadas: ' + item.delivered + ' · Fallidas: ' + item.failed + '</p></article>';
+      }
+      stats.innerHTML = summary("carlos", "Carlos") + summary("eduardo", "Eduardo");
+      if (!(data.failed || []).length) {
+        list.innerHTML = '<div class="whatsapp-inbox-empty">No hay notificaciones internas fallidas.</div>';
+        return;
+      }
+      list.innerHTML = data.failed.map(function (item) {
+        var reason = item.error_message || item.error_details || (item.error_code ? "Error Meta " + item.error_code : "Error sin detalle");
+        return '<article class="automation-case payment_proof"><header><div><strong>Notificación interna fallida · ' + escapeHtml(item.role === "eduardo" ? "Eduardo" : "Carlos") + '</strong><small>' + escapeHtml(item.case_type || "Caso") + ' · ' + escapeHtml(new Date(item.created_at).toLocaleString("es-CL")) + '</small></div><span class="automation-state">Fallida</span></header><p class="automation-details">Cliente: ' + escapeHtml(item.customer_name || "Sin identificar") + ' · Caso: ' + escapeHtml(item.entity_id || "Sin ID") + ' · Motivo: ' + escapeHtml(reason) + '</p><footer><button type="button" class="btn small" data-retry-staff-notification="' + item.id + '">Reintentar</button></footer></article>';
+      }).join("");
+    } catch (error) {
+      list.innerHTML = '<div class="whatsapp-test-status error">' + escapeHtml(error.message || "Error al cargar notificaciones") + '</div>';
+    }
+  }
+
+  async function retryStaffNotification(panel, id, button) {
+    button.disabled = true;
+    button.textContent = "Reintentando…";
+    var response = await fetch("/api/whatsapp/staff-notifications/retry", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: Number(id) }) });
+    var data = await response.json().catch(function () { return {}; });
+    if (!response.ok) window.alert(data.error || "No se pudo reintentar la notificación.");
+    await loadStaffNotifications(panel);
+  }
+
   function markup() {
     return '<section class="whatsapp-test-panel" data-whatsapp-test-panel>' +
       '<div><p class="eyebrow">Validación segura</p><h3>Prueba controlada</h3>' +
@@ -491,6 +527,7 @@
       '<button type="button" class="btn secondary" data-number-change-button>Preparar alerta de cambio de número</button>' +
       '<div class="whatsapp-test-status" data-number-change-status hidden></div></div>' +
       '<div class="whatsapp-inbox" data-whatsapp-inbox><header><div><p class="eyebrow">Atención al cliente</p><h3>Bandeja de mensajes</h3><p>Conversaciones recibidas en el número oficial BPGO.</p></div><button type="button" class="btn secondary" data-refresh-inbox>Actualizar</button></header><div data-inbox-list><div class="whatsapp-inbox-empty">Presiona Actualizar para revisar los mensajes.</div></div></div>' +
+      '<div class="whatsapp-automation" data-staff-notifications><header><div><p class="eyebrow">Control de entrega</p><h3>Notificaciones internas</h3><p>Seguimiento de avisos a Carlos y Eduardo. Los fallos no bloquean la creación del caso.</p></div><button type="button" class="btn secondary" data-refresh-staff-notifications>Actualizar</button></header><div class="automation-list" data-staff-notifications-stats></div><div class="automation-list" data-staff-notifications-list><div class="whatsapp-inbox-empty">Presiona Actualizar para revisar.</div></div></div>' +
       '<div class="whatsapp-automation" data-whatsapp-automation><header><div><p class="eyebrow">Preparación del bot</p><h3>Casos detectados</h3><p>Pagos y fallas sugeridos automáticamente. Ningún caso modifica Cobranza ni crea órdenes sin revisión.</p></div><button type="button" class="btn secondary" data-refresh-automation>Actualizar casos</button></header><div class="automation-list" data-automation-list><div class="whatsapp-inbox-empty">Presiona Actualizar casos para revisar las sugerencias.</div></div></div>' +
       '<div class="whatsapp-automation" data-whatsapp-escalations><header><div><p class="eyebrow">Bot autónomo</p><h3>Conversaciones escaladas</h3><p>El bot dejó de responder estos números porque pidieron un humano, no entendió o falló. Reactívalo cuando lo resuelvas.</p></div><button type="button" class="btn secondary" data-refresh-escalations>Actualizar</button></header><div class="automation-list" data-escalation-list><div class="whatsapp-inbox-empty">Presiona Actualizar para revisar.</div></div></div>' +
       '<div class="whatsapp-automation" data-whatsapp-visit-requests><header><div><p class="eyebrow">Bot autónomo</p><h3>Incidencias y solicitudes de visita</h3><p>El bot solo registra la incidencia con el nombre del titular; un agente debe crear la visita real en Agenda.</p></div><button type="button" class="btn secondary" data-refresh-visit-requests>Actualizar</button></header><div class="automation-list" data-visit-requests-list><div class="whatsapp-inbox-empty">Presiona Actualizar para revisar.</div></div></div>' +
@@ -540,6 +577,16 @@
     var replyButton = event.target.closest("[data-reply-phone]");
     if (replyButton) {
       replyTo(replyButton.closest("[data-whatsapp-test-panel]"), replyButton.dataset.replyPhone);
+      return;
+    }
+    var refreshStaff = event.target.closest("[data-refresh-staff-notifications]");
+    if (refreshStaff) {
+      loadStaffNotifications(refreshStaff.closest("[data-whatsapp-test-panel]"));
+      return;
+    }
+    var retryStaff = event.target.closest("[data-retry-staff-notification]");
+    if (retryStaff) {
+      retryStaffNotification(retryStaff.closest("[data-whatsapp-test-panel]"), retryStaff.dataset.retryStaffNotification, retryStaff);
       return;
     }
     var modeButton = event.target.closest("[data-conversation-mode]");
