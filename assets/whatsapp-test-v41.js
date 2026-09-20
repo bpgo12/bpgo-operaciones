@@ -492,6 +492,7 @@
         return '<article class="automation-case general"><header><div><strong>' + label + '</strong><small>' + configured + '</small></div></header><p class="automation-details">Enviadas: ' + item.sent + ' · Entregadas: ' + item.delivered + ' · Fallidas: ' + item.failed + '</p></article>';
       }
       stats.innerHTML = summary("carlos", "Carlos") + summary("eduardo", "Eduardo");
+      loadStaffMetaDiagnostic(panel);
       if (!(data.failed || []).length) {
         list.innerHTML = '<div class="whatsapp-inbox-empty">No hay notificaciones internas fallidas.</div>';
         return;
