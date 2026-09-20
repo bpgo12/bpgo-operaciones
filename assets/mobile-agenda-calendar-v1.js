@@ -77,7 +77,7 @@
       type: work.type || work.title || "Actividad",
       status: work.status || "Sin estado",
       tech: assigned.join(", "),
-      description: String(work.description || "").trim()
+      observations: String(work.accessNotes || "").trim()
     };
   }
 
@@ -160,7 +160,7 @@
       return '<button type="button" class="mac-activity" data-mac-open="' + escapeHtml(info.code) + '">' +
         '<span class="mac-activity-top"><strong>' + escapeHtml(info.client) + '</strong><em>' + escapeHtml(info.status) + '</em></span>' +
         '<span class="mac-activity-bottom">' + escapeHtml(info.type) + (info.tech ? " · " + escapeHtml(info.tech) : "") + (info.code ? " · " + escapeHtml(info.code) : "") + '</span>' +
-        (info.description ? '<span class="mac-activity-description">Descripción: ' + escapeHtml(info.description) + '</span>' : '') +
+        (info.observations ? '<span class="mac-activity-observations">Observaciones: ' + escapeHtml(info.observations) + '</span>' : '') +
         '</button>';
     }).join("");
     return heading + '<div class="mac-agenda-list">' + rows + '</div>';
