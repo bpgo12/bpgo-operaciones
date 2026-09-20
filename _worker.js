@@ -516,7 +516,10 @@ async function ensureStaffNotificationsLogTable(env) {
     ["last_attempt_at", "TEXT"], ["updated_at", "TEXT"],
     ["attempted_template", "TEXT"], ["final_template", "TEXT"], ["fallback_used", "INTEGER NOT NULL DEFAULT 0"],
     ["fallback_message_id", "TEXT"], ["original_error_code", "TEXT"], ["original_error_message", "TEXT"],
-    ["original_error_details", "TEXT"],
+    ["original_error_details", "TEXT"], ["error_subcode", "TEXT"], ["fbtrace_id", "TEXT"],
+    ["original_error_subcode", "TEXT"], ["original_fbtrace_id", "TEXT"],
+    ["primary_http_status", "INTEGER"], ["fallback_http_status", "INTEGER"],
+    ["primary_response_json", "TEXT"], ["fallback_response_json", "TEXT"],
   ];
   for (const [name, type] of columns) {
     await env.DB.prepare(`ALTER TABLE staff_notifications_log ADD COLUMN ${name} ${type}`).run().catch(() => null);
@@ -541,7 +544,52 @@ function sanitizeStaffTemplateParam(value, maxLength = 300) {
 
 function staffMetaError(body) {
   const error = body?.error || {};
-  return { code: error.code == null ? null : String(error.code), message: error.message || null, details: error.error_data?.details || error.error_user_msg || null };
+  return {
+    code: error.code == null ? null : String(error.code),
+    subcode: error.error_subcode == null ? null : String(error.error_subcode),
+    message: error.message || null,
+    details: error.error_data?.details || error.error_user_msg || null,
+    fbtraceId: error.fbtrace_id || null,
+  };
+}
+
+function sanitizeMetaDiagnostic(value) {
+  if (Array.isArray(value)) return value.map(sanitizeMetaDiagnostic);
+  if (!value || typeof value !== "object") return value;
+  const clean = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (/token|secret|authorization|password/i.test(key)) clean[key] = "[REDACTED]";
+    else clean[key] = sanitizeMetaDiagnostic(item);
+  }
+  return clean;
+}
+
+function parseStoredJson(value) {
+  try { return value ? JSON.parse(value) : null; } catch { return null; }
+}
+
+function classifyStaffMetaFailure(primaryBody, fallbackBody) {
+  const primary = staffMetaError(primaryBody);
+  const fallback = staffMetaError(fallbackBody);
+  if (primary.code === "131042" && fallback.code === "131042") {
+    return { type: "waba_payment_eligibility", label: "Bloqueo de cuenta Meta, no de plantilla", conclusive: true };
+  }
+  if (primary.code === "131042" || fallback.code === "131042") {
+    return { type: "waba_payment_eligibility", label: "Meta reporta un bloqueo de elegibilidad/pago de la cuenta", conclusive: true };
+  }
+  if (primary.code && fallback.code && primary.code === fallback.code) {
+    return { type: "account_or_configuration", label: "PRIMARY y FALLBACK reciben el mismo rechazo de Meta", conclusive: false };
+  }
+  return { type: "undetermined", label: "Revisar respuestas PRIMARY y FALLBACK", conclusive: false };
+}
+
+async function metaDiagnosticRequest(credentials, path) {
+  if (!credentials?.accessToken) return { ok: false, httpStatus: 0, body: { error: { message: "Credencial de Meta ausente." } } };
+  const response = await fetch(`https://graph.facebook.com/v25.0/${path}`, {
+    headers: { authorization: `Bearer ${credentials.accessToken}` },
+  }).catch((error) => ({ ok: false, status: 0, json: async () => ({ error: { message: String(error?.message || error) } }) }));
+  const body = await response.json().catch(() => ({}));
+  return { ok: Boolean(response.ok), httpStatus: Number(response.status || 0), body: sanitizeMetaDiagnostic(body) };
 }
 
 async function deliverStaffNotification(env, credentials, row) {
@@ -588,16 +636,21 @@ async function deliverStaffNotification(env, credentials, row) {
   const accepted = primaryAccepted || fallbackAccepted;
   const finalError = staffMetaError(finalResult.body);
   const finalTemplate = fallback ? "aviso_nuevo_caso" : primaryTemplate;
-  await env.DB.prepare(`UPDATE staff_notifications_log SET status=?, ok=?, http_status=?, message_id=?, error_code=?,
+  await env.DB.prepare(`UPDATE staff_notifications_log SET status=?, ok=?, http_status=?, message_id=?, error_code=?, error_subcode=?, fbtrace_id=?,
     error_message=?, error_details=?, response_json=?, attempt_count=COALESCE(attempt_count,0)+?, attempted_template=?,
     final_template=?, fallback_used=?, fallback_message_id=?, original_error_code=?, original_error_message=?,
-    original_error_details=?, last_attempt_at=datetime('now'), updated_at=datetime('now') WHERE id=?`)
+    original_error_details=?, original_error_subcode=?, original_fbtrace_id=?, primary_http_status=?, fallback_http_status=?,
+    primary_response_json=?, fallback_response_json=?, last_attempt_at=datetime('now'), updated_at=datetime('now') WHERE id=?`)
     .bind(accepted ? "accepted" : "failed", accepted ? 1 : 0, finalResult.status, messageId,
-      accepted ? null : finalError.code, accepted ? null : (finalError.message || "Meta no devolvió un message_id."),
+      accepted ? null : finalError.code, accepted ? null : finalError.subcode, accepted ? null : finalError.fbtraceId,
+      accepted ? null : (finalError.message || "Meta no devolvió un message_id."),
       accepted ? null : finalError.details, JSON.stringify({ primary: primary.body, fallback: fallback?.body || null }),
       fallback ? 2 : 1, primaryTemplate, finalTemplate, fallback ? 1 : 0, fallbackMessageId,
       primaryAccepted ? null : primaryError.code, primaryAccepted ? null : primaryError.message,
-      primaryAccepted ? null : primaryError.details, row.id).run();
+      primaryAccepted ? null : primaryError.details, primaryAccepted ? null : primaryError.subcode,
+      primaryAccepted ? null : primaryError.fbtraceId, primary.status, fallback?.status || null,
+      JSON.stringify(sanitizeMetaDiagnostic(primary.body)), fallback ? JSON.stringify(sanitizeMetaDiagnostic(fallback.body)) : null,
+      row.id).run();
   if (accepted) await saveWhatsAppStatus(env, { messageId, recipient: normalized, status: "accepted" }).catch(() => null);
   return { ok: accepted, status: accepted ? "accepted" : "failed", messageId, fallbackUsed: Boolean(fallback), error: accepted ? null : finalError };
 }
@@ -1858,12 +1911,89 @@ export default {
       return Response.json({ ok: false, error: "Los números con WhatsApp Business deben completar el registro dentro del flujo oficial de Meta." }, { status: 409 });
     }
 
+    if (url.pathname === "/api/whatsapp/staff-notifications/diagnostic" && request.method === "GET") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      await ensureStaffNotificationsLogTable(env);
+      const row = await env.DB.prepare("SELECT * FROM staff_notifications_log WHERE status='failed' ORDER BY COALESCE(updated_at,created_at) DESC LIMIT 1").first();
+      const stored = parseStoredJson(row?.response_json) || {};
+      const primaryBody = parseStoredJson(row?.primary_response_json) || stored.primary || null;
+      const fallbackBody = parseStoredJson(row?.fallback_response_json) || stored.fallback || null;
+      const credentials = await getWhatsAppCredentials(env);
+      const phonePath = credentials.phoneNumberId
+        ? `${encodeURIComponent(credentials.phoneNumberId)}?fields=id,verified_name,display_phone_number,quality_rating,status`
+        : "";
+      const wabaPath = credentials.wabaId
+        ? `${encodeURIComponent(credentials.wabaId)}?fields=id,name,currency,timezone_id,message_template_namespace`
+        : "";
+      const reviewPath = credentials.wabaId
+        ? `${encodeURIComponent(credentials.wabaId)}?fields=account_review_status,business_verification_status`
+        : "";
+      const paymentPath = credentials.wabaId
+        ? `${encodeURIComponent(credentials.wabaId)}?fields=primary_funding_id,purchase_order_number`
+        : "";
+      const [phone, waba, review, payment] = await Promise.all([
+        phonePath ? metaDiagnosticRequest(credentials, phonePath) : Promise.resolve(null),
+        wabaPath ? metaDiagnosticRequest(credentials, wabaPath) : Promise.resolve(null),
+        reviewPath ? metaDiagnosticRequest(credentials, reviewPath) : Promise.resolve(null),
+        paymentPath ? metaDiagnosticRequest(credentials, paymentPath) : Promise.resolve(null),
+      ]);
+      return Response.json({
+        ok: true,
+        classification: classifyStaffMetaFailure(primaryBody, fallbackBody),
+        lastFailure: row ? {
+          id: row.id, role: row.role, caseType: row.case_type, entityId: row.entity_id,
+          createdAt: row.created_at, updatedAt: row.updated_at,
+          httpStatus: row.http_status, errorCode: row.error_code || staffMetaError(fallbackBody || primaryBody).code,
+          errorSubcode: row.error_subcode || staffMetaError(fallbackBody || primaryBody).subcode,
+          errorMessage: row.error_message || staffMetaError(fallbackBody || primaryBody).message,
+          errorDetails: row.error_details || staffMetaError(fallbackBody || primaryBody).details,
+          fbtraceId: row.fbtrace_id || staffMetaError(fallbackBody || primaryBody).fbtraceId,
+          attemptedTemplate: row.attempted_template || row.template_name,
+          finalTemplate: row.final_template || row.template_name,
+          fallbackUsed: Boolean(row.fallback_used),
+          primary: { httpStatus: row.primary_http_status, response: sanitizeMetaDiagnostic(primaryBody) },
+          fallback: { httpStatus: row.fallback_http_status, response: sanitizeMetaDiagnostic(fallbackBody) },
+        } : null,
+        configuration: {
+          credentialSource: credentials.source,
+          phoneNumberId: credentials.phoneNumberId ? `…${credentials.phoneNumberId.slice(-6)}` : "",
+          wabaId: credentials.wabaId ? `…${credentials.wabaId.slice(-6)}` : "",
+          phone, waba, review, payment,
+        },
+      });
+    }
+
+    if (url.pathname === "/api/whatsapp/staff-notifications/test" && request.method === "POST") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      const credentials = await getWhatsAppCredentials(env);
+      const to = normalizeWhatsAppPhone(env.STAFF_PHONE_CARLOS);
+      if (!credentials.accessToken || !credentials.phoneNumberId || !/^\d{8,15}$/.test(String(to || ""))) {
+        return Response.json({ ok: false, error: "Configuración de Meta o Carlos incompleta." }, { status: 409 });
+      }
+      const metaResponse = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/messages`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          messaging_product: "whatsapp", recipient_type: "individual", to, type: "template",
+          template: { name: "aviso_nuevo_caso", language: { code: "es_CL" }, components: [{ type: "body", parameters: [
+            { type: "text", text: "Prueba diagnóstica" }, { type: "text", text: "Cliente de prueba" },
+            { type: "text", text: "56900000000" }, { type: "text", text: "Prueba controlada del panel; no corresponde a un caso real." },
+          ] }] },
+        }),
+      }).catch((error) => ({ ok: false, status: 0, json: async () => ({ error: { message: String(error?.message || error) } }) }));
+      const responseBody = sanitizeMetaDiagnostic(await metaResponse.json().catch(() => ({})));
+      return Response.json({ ok: Boolean(metaResponse.ok), httpStatus: Number(metaResponse.status || 0), template: "aviso_nuevo_caso", response: responseBody }, { status: metaResponse.ok ? 200 : 422 });
+    }
+
     if (url.pathname === "/api/whatsapp/staff-notifications" && request.method === "GET") {
       const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
       if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
       await ensureStaffNotificationsLogTable(env);
       const rows = await env.DB.prepare(`SELECT id,role,case_type,customer_name,entity_type,entity_id,template_name,status,
-        http_status,error_code,error_message,error_details,attempt_count,created_at,updated_at
+        http_status,error_code,error_subcode,error_message,error_details,fbtrace_id,attempt_count,created_at,updated_at,
+        attempted_template,final_template,fallback_used,primary_http_status,fallback_http_status,primary_response_json,fallback_response_json,response_json
         FROM staff_notifications_log ORDER BY created_at DESC LIMIT 300`).all();
       const items = rows.results || [];
       const stats = { carlos: { sent: 0, delivered: 0, failed: 0 }, eduardo: { sent: 0, delivered: 0, failed: 0 } };

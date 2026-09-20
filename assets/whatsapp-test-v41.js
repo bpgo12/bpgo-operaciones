@@ -514,6 +514,52 @@
     await loadStaffNotifications(panel);
   }
 
+  function diagnosticValue(value) {
+    return value == null || value === "" ? "No disponible" : String(value);
+  }
+
+  async function loadStaffMetaDiagnostic(panel) {
+    var target = panel.querySelector("[data-staff-meta-diagnostic]");
+    target.innerHTML = '<div class="whatsapp-test-status pending">Consultando Meta y el último registro fallido…</div>';
+    try {
+      var response = await fetch("/api/whatsapp/staff-notifications/diagnostic", { cache: "no-store" });
+      var data = await response.json().catch(function () { return {}; });
+      if (!response.ok) throw new Error(data.error || "No se pudo obtener el diagnóstico Meta.");
+      var failure = data.lastFailure;
+      var classification = data.classification || {};
+      var config = data.configuration || {};
+      var fields = failure ? [
+        ["HTTP final", failure.httpStatus], ["error.code", failure.errorCode], ["error.error_subcode", failure.errorSubcode],
+        ["error.message", failure.errorMessage], ["error_data.details", failure.errorDetails], ["fbtrace_id", failure.fbtraceId],
+        ["attempted_template", failure.attemptedTemplate], ["final_template", failure.finalTemplate], ["fallback_used", failure.fallbackUsed ? "Sí" : "No"]
+      ].map(function (item) { return '<div><strong>' + escapeHtml(item[0]) + '</strong><span>' + escapeHtml(diagnosticValue(item[1])) + '</span></div>'; }).join("") : '<p>No existe una notificación fallida registrada.</p>';
+      var raw = failure ? '<details><summary>Respuesta completa PRIMARY</summary><pre>' + escapeHtml(JSON.stringify(failure.primary, null, 2)) + '</pre></details>' +
+        '<details><summary>Respuesta completa FALLBACK</summary><pre>' + escapeHtml(JSON.stringify(failure.fallback, null, 2)) + '</pre></details>' : "";
+      var metaState = '<details><summary>Estado de número, WABA, revisión y elegibilidad</summary><pre>' + escapeHtml(JSON.stringify(config, null, 2)) + '</pre></details>';
+      target.innerHTML = '<div class="notice ' + (classification.conclusive ? 'notice-warning' : '') + '"><strong>' + escapeHtml(classification.label || "Diagnóstico no concluyente") + '</strong></div>' +
+        '<div class="staff-meta-grid">' + fields + '</div>' + raw + metaState;
+    } catch (error) {
+      target.innerHTML = '<div class="whatsapp-test-status error">' + escapeHtml(error.message || "Error de diagnóstico") + '</div>';
+    }
+  }
+
+  async function testCarlosNotification(panel, button) {
+    var target = panel.querySelector("[data-staff-meta-test-result]");
+    button.disabled = true;
+    button.textContent = "Probando…";
+    target.innerHTML = '<div class="whatsapp-test-status pending">Enviando solo aviso_nuevo_caso…</div>';
+    try {
+      var response = await fetch("/api/whatsapp/staff-notifications/test", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      var data = await response.json().catch(function () { return {}; });
+      target.innerHTML = '<div class="whatsapp-test-status ' + (response.ok ? 'success' : 'error') + '">' + (response.ok ? 'Meta aceptó la prueba.' : 'Meta rechazó la prueba.') + '</div><pre>' + escapeHtml(JSON.stringify(data, null, 2)) + '</pre>';
+    } catch (error) {
+      target.innerHTML = '<div class="whatsapp-test-status error">' + escapeHtml(error.message || "No se pudo ejecutar la prueba") + '</div>';
+    } finally {
+      button.disabled = false;
+      button.textContent = "Probar aviso a Carlos";
+    }
+  }
+
   function markup() {
     return '<section class="whatsapp-test-panel" data-whatsapp-test-panel>' +
       '<div><p class="eyebrow">Validación segura</p><h3>Prueba controlada</h3>' +
@@ -527,7 +573,7 @@
       '<button type="button" class="btn secondary" data-number-change-button>Preparar alerta de cambio de número</button>' +
       '<div class="whatsapp-test-status" data-number-change-status hidden></div></div>' +
       '<div class="whatsapp-inbox" data-whatsapp-inbox><header><div><p class="eyebrow">Atención al cliente</p><h3>Bandeja de mensajes</h3><p>Conversaciones recibidas en el número oficial BPGO.</p></div><button type="button" class="btn secondary" data-refresh-inbox>Actualizar</button></header><div data-inbox-list><div class="whatsapp-inbox-empty">Presiona Actualizar para revisar los mensajes.</div></div></div>' +
-      '<div class="whatsapp-automation" data-staff-notifications><header><div><p class="eyebrow">Control de entrega</p><h3>Notificaciones internas</h3><p>Seguimiento de avisos a Carlos y Eduardo. Los fallos no bloquean la creación del caso.</p></div><button type="button" class="btn secondary" data-refresh-staff-notifications>Actualizar</button></header><div class="automation-list" data-staff-notifications-stats></div><div class="automation-list" data-staff-notifications-list><div class="whatsapp-inbox-empty">Presiona Actualizar para revisar.</div></div></div>' +
+      '<div class="whatsapp-automation" data-staff-notifications><header><div><p class="eyebrow">Control de entrega</p><h3>Notificaciones internas</h3><p>Seguimiento de avisos a Carlos y Eduardo. Los fallos no bloquean la creación del caso.</p></div><button type="button" class="btn secondary" data-refresh-staff-notifications>Actualizar</button></header><div class="automation-list" data-staff-notifications-stats></div><div class="automation-list" data-staff-notifications-list><div class="whatsapp-inbox-empty">Presiona Actualizar para revisar.</div></div><details class="staff-meta-diagnostic"><summary>Ver diagnóstico Meta</summary><div class="actions"><button type="button" class="btn secondary small" data-load-staff-meta-diagnostic>Consultar estado Meta</button><button type="button" class="btn small" data-test-carlos-notification>Probar aviso a Carlos</button></div><div data-staff-meta-diagnostic><div class="whatsapp-inbox-empty">Consulta el último fallo sin exponer credenciales.</div></div><div data-staff-meta-test-result></div></details></div>' +
       '<div class="whatsapp-automation" data-whatsapp-automation><header><div><p class="eyebrow">Preparación del bot</p><h3>Casos detectados</h3><p>Pagos y fallas sugeridos automáticamente. Ningún caso modifica Cobranza ni crea órdenes sin revisión.</p></div><button type="button" class="btn secondary" data-refresh-automation>Actualizar casos</button></header><div class="automation-list" data-automation-list><div class="whatsapp-inbox-empty">Presiona Actualizar casos para revisar las sugerencias.</div></div></div>' +
       '<div class="whatsapp-automation" data-whatsapp-escalations><header><div><p class="eyebrow">Bot autónomo</p><h3>Conversaciones escaladas</h3><p>El bot dejó de responder estos números porque pidieron un humano, no entendió o falló. Reactívalo cuando lo resuelvas.</p></div><button type="button" class="btn secondary" data-refresh-escalations>Actualizar</button></header><div class="automation-list" data-escalation-list><div class="whatsapp-inbox-empty">Presiona Actualizar para revisar.</div></div></div>' +
       '<div class="whatsapp-automation" data-whatsapp-visit-requests><header><div><p class="eyebrow">Bot autónomo</p><h3>Incidencias y solicitudes de visita</h3><p>El bot solo registra la incidencia con el nombre del titular; un agente debe crear la visita real en Agenda.</p></div><button type="button" class="btn secondary" data-refresh-visit-requests>Actualizar</button></header><div class="automation-list" data-visit-requests-list><div class="whatsapp-inbox-empty">Presiona Actualizar para revisar.</div></div></div>' +
@@ -587,6 +633,16 @@
     var retryStaff = event.target.closest("[data-retry-staff-notification]");
     if (retryStaff) {
       retryStaffNotification(retryStaff.closest("[data-whatsapp-test-panel]"), retryStaff.dataset.retryStaffNotification, retryStaff);
+      return;
+    }
+    var loadMetaDiagnostic = event.target.closest("[data-load-staff-meta-diagnostic]");
+    if (loadMetaDiagnostic) {
+      loadStaffMetaDiagnostic(loadMetaDiagnostic.closest("[data-whatsapp-test-panel]"));
+      return;
+    }
+    var testCarlos = event.target.closest("[data-test-carlos-notification]");
+    if (testCarlos) {
+      testCarlosNotification(testCarlos.closest("[data-whatsapp-test-panel]"), testCarlos);
       return;
     }
     var modeButton = event.target.closest("[data-conversation-mode]");
