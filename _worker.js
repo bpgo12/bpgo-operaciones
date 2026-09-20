@@ -514,6 +514,9 @@ async function ensureStaffNotificationsLogTable(env) {
     ["message_id", "TEXT"], ["error_code", "TEXT"], ["error_message", "TEXT"],
     ["error_details", "TEXT"], ["attempt_count", "INTEGER NOT NULL DEFAULT 0"],
     ["last_attempt_at", "TEXT"], ["updated_at", "TEXT"],
+    ["attempted_template", "TEXT"], ["final_template", "TEXT"], ["fallback_used", "INTEGER NOT NULL DEFAULT 0"],
+    ["fallback_message_id", "TEXT"], ["original_error_code", "TEXT"], ["original_error_message", "TEXT"],
+    ["original_error_details", "TEXT"],
   ];
   for (const [name, type] of columns) {
     await env.DB.prepare(`ALTER TABLE staff_notifications_log ADD COLUMN ${name} ${type}`).run().catch(() => null);
@@ -551,34 +554,52 @@ async function deliverStaffNotification(env, credentials, row) {
       last_attempt_at=datetime('now'), updated_at=datetime('now') WHERE id=?`).bind(configurationError, row.id).run();
     return { ok: false, status: "failed", error: configurationError };
   }
-  const components = [{ type: "body", parameters: [
-    { type: "text", text: sanitizeStaffTemplateParam(row.case_type, 120) || "Caso interno" },
-    { type: "text", text: sanitizeStaffTemplateParam(row.customer_name, 160) || "Sin identificar" },
-    { type: "text", text: sanitizeStaffTemplateParam(row.customer_phone, 30) || "Sin teléfono" },
-    { type: "text", text: sanitizeStaffTemplateParam(row.summary, 300) || "Sin detalle" },
-  ] }];
-  if (row.entity_type === "case" && row.entity_id) components.push({ type: "button", sub_type: "quick_reply", index: 0, parameters: [{ type: "payload", payload: `confirm_payment:${row.entity_id}` }] });
-  else if (row.template_name === "aviso_factibilidad" && row.entity_id) {
-    components.push({ type: "button", sub_type: "quick_reply", index: 0, parameters: [{ type: "payload", payload: `factibilidad_yes:${row.entity_id}` }] });
-    components.push({ type: "button", sub_type: "quick_reply", index: 1, parameters: [{ type: "payload", payload: `factibilidad_no:${row.entity_id}` }] });
-  }
   const endpoint = `https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/messages`;
-  const result = await fetch(endpoint, { method: "POST", headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" }, body: JSON.stringify({
-    messaging_product: "whatsapp", recipient_type: "individual", to: normalized, type: "template",
-    template: { name: row.template_name, language: { code: row.template_language || "es_CL" }, components },
-  }) }).then(async (response) => ({ status: response.status, ok: response.ok, body: await response.json().catch(() => null) }))
-    .catch((error) => ({ status: 0, ok: false, body: { error: { message: String(error?.message || error) } } }));
-  const messageId = result.body?.messages?.[0]?.id || null;
-  const error = staffMetaError(result.body);
-  const accepted = Boolean(result.ok && messageId);
+  async function sendTemplate(templateName) {
+    const components = [{ type: "body", parameters: [
+      { type: "text", text: sanitizeStaffTemplateParam(row.case_type, 120) || "Caso interno" },
+      { type: "text", text: sanitizeStaffTemplateParam(row.customer_name, 160) || "Sin identificar" },
+      { type: "text", text: sanitizeStaffTemplateParam(row.customer_phone, 30) || "Sin teléfono" },
+      { type: "text", text: sanitizeStaffTemplateParam(row.summary, 300) || "Sin detalle" },
+    ] }];
+    if (templateName === "aviso_nuevo_pago" && row.entity_type === "case" && row.entity_id) {
+      components.push({ type: "button", sub_type: "quick_reply", index: 0, parameters: [{ type: "payload", payload: `confirm_payment:${row.entity_id}` }] });
+    } else if (templateName === "aviso_factibilidad" && row.entity_id) {
+      components.push({ type: "button", sub_type: "quick_reply", index: 0, parameters: [{ type: "payload", payload: `factibilidad_yes:${row.entity_id}` }] });
+      components.push({ type: "button", sub_type: "quick_reply", index: 1, parameters: [{ type: "payload", payload: `factibilidad_no:${row.entity_id}` }] });
+    }
+    return fetch(endpoint, { method: "POST", headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" }, body: JSON.stringify({
+      messaging_product: "whatsapp", recipient_type: "individual", to: normalized, type: "template",
+      template: { name: templateName, language: { code: row.template_language || "es_CL" }, components },
+    }) }).then(async (response) => ({ status: response.status, ok: response.ok, body: await response.json().catch(() => null) }))
+      .catch((error) => ({ status: 0, ok: false, body: { error: { message: String(error?.message || error) } } }));
+  }
+  const primaryTemplate = row.template_name;
+  const primary = await sendTemplate(primaryTemplate);
+  const primaryMessageId = primary.body?.messages?.[0]?.id || null;
+  const primaryAccepted = Boolean(primary.ok && primaryMessageId);
+  const primaryError = staffMetaError(primary.body);
+  const canFallback = !primaryAccepted && primaryTemplate !== "aviso_nuevo_caso" && primary.status >= 400;
+  const fallback = canFallback ? await sendTemplate("aviso_nuevo_caso") : null;
+  const fallbackMessageId = fallback?.body?.messages?.[0]?.id || null;
+  const fallbackAccepted = Boolean(fallback?.ok && fallbackMessageId);
+  const finalResult = fallback || primary;
+  const messageId = fallbackAccepted ? fallbackMessageId : primaryMessageId;
+  const accepted = primaryAccepted || fallbackAccepted;
+  const finalError = staffMetaError(finalResult.body);
+  const finalTemplate = fallback ? "aviso_nuevo_caso" : primaryTemplate;
   await env.DB.prepare(`UPDATE staff_notifications_log SET status=?, ok=?, http_status=?, message_id=?, error_code=?,
-    error_message=?, error_details=?, response_json=?, attempt_count=COALESCE(attempt_count,0)+1,
-    last_attempt_at=datetime('now'), updated_at=datetime('now') WHERE id=?`)
-    .bind(accepted ? "accepted" : "failed", accepted ? 1 : 0, result.status, messageId, accepted ? null : error.code,
-      accepted ? null : (error.message || "Meta no devolvió un message_id."), accepted ? null : error.details,
-      JSON.stringify(result.body), row.id).run();
+    error_message=?, error_details=?, response_json=?, attempt_count=COALESCE(attempt_count,0)+?, attempted_template=?,
+    final_template=?, fallback_used=?, fallback_message_id=?, original_error_code=?, original_error_message=?,
+    original_error_details=?, last_attempt_at=datetime('now'), updated_at=datetime('now') WHERE id=?`)
+    .bind(accepted ? "accepted" : "failed", accepted ? 1 : 0, finalResult.status, messageId,
+      accepted ? null : finalError.code, accepted ? null : (finalError.message || "Meta no devolvió un message_id."),
+      accepted ? null : finalError.details, JSON.stringify({ primary: primary.body, fallback: fallback?.body || null }),
+      fallback ? 2 : 1, primaryTemplate, finalTemplate, fallback ? 1 : 0, fallbackMessageId,
+      primaryAccepted ? null : primaryError.code, primaryAccepted ? null : primaryError.message,
+      primaryAccepted ? null : primaryError.details, row.id).run();
   if (accepted) await saveWhatsAppStatus(env, { messageId, recipient: normalized, status: "accepted" }).catch(() => null);
-  return { ok: accepted, status: accepted ? "accepted" : "failed", messageId, error };
+  return { ok: accepted, status: accepted ? "accepted" : "failed", messageId, fallbackUsed: Boolean(fallback), error: accepted ? null : finalError };
 }
 
 async function notifyStaff(env, credentials, role, caseType, customerName, customerPhone, summary, options = {}) {
