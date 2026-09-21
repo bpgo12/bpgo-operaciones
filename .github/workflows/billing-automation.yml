@@ -1,12 +1,11 @@
 name: Cobranza automática BPGO
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/billing-automation.yml"
-      - "_worker.js"
+  workflow_run:
+    workflows:
+      - "Publicar BPGO Operaciones"
+    types:
+      - completed
   schedule:
     - cron: "15 13 * * *"
   workflow_dispatch:
@@ -18,6 +17,7 @@ concurrency:
 jobs:
   billing:
     name: Revisar y ejecutar cobranza diaria
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read

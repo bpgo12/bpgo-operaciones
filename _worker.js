@@ -2018,7 +2018,7 @@ async function verifyBillingAutomationOidc(request) {
     && audience.includes("bpgo-billing-automation")
     && claims.repository === "bpgo12/bpgo-operaciones"
     && claims.ref === "refs/heads/main"
-    && ["schedule", "workflow_dispatch"].includes(claims.event_name)
+    && ["schedule", "workflow_dispatch", "workflow_run"].includes(claims.event_name)
     && claims.workflow_ref === "bpgo12/bpgo-operaciones/.github/workflows/billing-automation.yml@refs/heads/main"
     && Number(claims.exp) > now && Number(claims.iat) <= now + 60 && (!claims.nbf || Number(claims.nbf) <= now + 60);
   return validSignature && validClaims ? claims : null;
