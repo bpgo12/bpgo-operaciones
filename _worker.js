@@ -475,7 +475,10 @@ async function buildBotContext(env, phone, fallbackName) {
   history = history.slice(-10);
   const customer = await findCustomerForWhatsApp(env, phone, fallbackName);
   const faq = await getBotFaqText(env);
-  return { history, customer, faq };
+  await ensureWhatsAppAutomationTable(env);
+  const pendingReceipt = await env.DB.prepare(`SELECT 1 AS found FROM whatsapp_automation_cases
+    WHERE phone=? AND case_type='payment' AND status IN ('suggested','reviewing') LIMIT 1`).bind(phone).first();
+  return { history, customer, faq, hasPendingReceipt: Boolean(pendingReceipt) };
 }
 
 async function fetchWhatsAppMediaBytes(credentials, mediaId) {
@@ -950,8 +953,22 @@ function briefCourtesyReply(value) {
   return /^(gracias|muchas gracias|vale gracias|ok gracias)$/.test(text) ? "De nada 👍" : null;
 }
 
+function isPaidQuickReply(value) {
+  const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[.!]/g, "").trim();
+  return text === "ya pague";
+}
+
+function isExecutiveQuickReply(value) {
+  const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+  return text === "hablar con ejecutivo";
+}
+
 async function callBotResponder(env, context, inboundMessage, media) {
   if (isPaymentLinkRequest(inboundMessage?.text)) return { action: "reply", text: PAYMENT_PORTAL_REPLY };
+  if (isPaidQuickReply(inboundMessage?.text)) return { action: "reply", text: context.hasPendingReceipt
+    ? "Tu comprobante ya está en revisión."
+    : "Perfecto. Envíame el comprobante para dejarlo en revisión." };
+  if (isExecutiveQuickReply(inboundMessage?.text)) return { action: "escalate", text: "Te comunico con un ejecutivo de BP GO.", reason: "billing_customer_requested_human" };
   if (isBalanceQuestion(inboundMessage?.text)) return authoritativeBalanceAction(context.customer);
   const courtesy = briefCourtesyReply(inboundMessage?.text);
   if (courtesy) return { action: "reply", text: courtesy };
@@ -1561,403 +1578,325 @@ function inboundOnlyChanges(changes) {
   }));
 }
 
-async function ensureBillingAutomationTables(env) {
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS billing_automation_sends (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    billing_month TEXT NOT NULL,
-    stage TEXT NOT NULL,
-    phone TEXT NOT NULL,
-    customer_id TEXT,
-    customer_name TEXT,
-    amount INTEGER,
-    message_id TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',
-    error_message TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(billing_month, stage, phone)
-  )`).run();
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS billing_suspension_queue (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    billing_month TEXT NOT NULL,
-    phone TEXT NOT NULL,
-    customer_id TEXT,
-    customer_name TEXT,
-    sector TEXT,
-    plan TEXT,
-    amount INTEGER,
-    status TEXT NOT NULL DEFAULT 'pending',
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(billing_month, phone)
-  )`).run();
-}
+const BILLING_AUTOMATION_TEMPLATES = {
+  day20: {
+    name: "recordatorio_pago_bpgo_dia20",
+    text: "Hola. Te recordamos que tu mensualidad BP GO se encuentra pendiente de pago. Puedes regularizarla en https://bpgo.cl/pagar. Si ya pagaste, envíanos tu comprobante por este medio. BP GO",
+  },
+  day22: {
+    name: "recordatorio_pago_bpgo_dia22",
+    text: "Hola. Tu mensualidad BP GO continúa pendiente de pago. Para evitar la suspensión del servicio, puedes regularizarla en https://bpgo.cl/pagar. Si ya pagaste, envíanos tu comprobante por este medio. BP GO",
+  },
+  day23: {
+    name: "aviso_suspension_pago_bpgo",
+    text: "Estimado/a, según nuestros registros tu mensualidad BP GO continúa pendiente. Si no regularizas el pago durante hoy, el servicio será suspendido por no pago. Puedes pagar en https://bpgo.cl/pagar. Si ya pagaste, envíanos tu comprobante por este medio. BP GO",
+  },
+};
 
-function billingMonthKey(date) {
-  const current = date || new Date();
-  return `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, "0")}`;
-}
+const BILLING_MONTHS_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
 
-function billingMonthName(date) {
-  const current = date || new Date();
-  return SPANISH_MONTH_NAMES[current.getMonth()];
-}
-
-function normalizedBillingStatus(value) {
-  return String(value || "").trim().toLocaleLowerCase("es-CL");
-}
-
-async function loadCortadoPhones(env) {
-  const syncUrl = "https://script.google.com/macros/s/AKfycbxQWG6fkP1_V8quAUCGN0q2kDtHq5nT4kmOXjTtqdkP9kBaEx_KoE0KAwnG39QhxJvd/exec?cortados=1&token=bpgo_sheets_sync_2026_seguro";
-  const response = await fetch(syncUrl, { cache: "no-store" }).catch(() => null);
-  const payload = await response?.json().catch(() => null);
-  if (!response?.ok || !payload?.ok) throw new Error("No se pudo validar clientes cortados en Google Sheets.");
-  return new Set((Array.isArray(payload.cortados) ? payload.cortados : []).map(normalizeComparablePhone).filter(Boolean));
-}
-
-async function buildBillingAutomationPreview(env, now) {
-  await ensureWhatsAppBotTables(env);
-  await ensureBillingAutomationTables(env);
-  const row = await env.DB.prepare("SELECT data FROM app_state WHERE id = 'main'").first();
-  const state = row?.data ? JSON.parse(row.data) : {};
-  const monthName = billingMonthName(now);
-  const monthKey = billingMonthKey(now);
-  const cortados = await loadCortadoPhones(env);
-  const pendingPaymentRows = await env.DB.prepare("SELECT phone FROM whatsapp_pending_payments").all().catch(() => ({ results: [] }));
-  const pendingPayments = new Set((pendingPaymentRows.results || []).map((item) => normalizeComparablePhone(item.phone)).filter(Boolean));
-  const customerByPhone = new Map();
-  for (const customer of (Array.isArray(state.billingCustomers) ? state.billingCustomers : [])) {
-    const key = normalizeComparablePhone(customer.phone || customer.whatsapp || customer.telefono || "");
-    if (key) customerByPhone.set(key, customer);
-  }
-  const currentRecords = (Array.isArray(state.billingRecords) ? state.billingRecords : []).filter((record) => {
-    const recordMonth = String(record.billingMonth || record.month || "").toLocaleLowerCase("es-CL");
-    return recordMonth.includes(monthName);
-  });
-  const seen = new Set();
-  const eligible = [];
-  const excluded = [];
-  for (const record of currentRecords) {
-    const phone = normalizeWhatsAppPhone(record.phone || record.whatsapp || record.telefono || "");
-    const comparablePhone = normalizeComparablePhone(phone);
-    const customer = customerByPhone.get(comparablePhone) || {};
-    const customerId = String(record.customerId || record.customer_id || record.id || customer.id || customer.rut || "").trim();
-    const customerName = record.customerName || record.name || customer.customerName || customer.name || "Sin nombre";
-    const amountRaw = record.amount ?? record.saldo ?? record.deuda ?? customer.amount ?? customer.saldo ?? customer.deuda;
-    const amount = Number(amountRaw);
-    const status = normalizedBillingStatus(record.status);
-    const active = customer.active !== false;
-    const reasons = [];
-    if (!phone || !/^\d{8,15}$/.test(phone)) reasons.push("telefono_invalido");
-    if (seen.has(comparablePhone)) reasons.push("duplicado");
-    if (status === "pagado" || status === "pago confirmado") reasons.push("pagado");
-    if (!Number.isFinite(amount) || amount <= 0) reasons.push("monto_cero_o_invalido");
-    if (!active) reasons.push("inactivo_o_suspendido");
-    if (cortados.has(comparablePhone)) reasons.push("cortado");
-    if (pendingPayments.has(comparablePhone)) reasons.push("comprobante_pendiente");
-    if (reasons.length) {
-      excluded.push({ customerId, customerName, phone, amount: Number.isFinite(amount) ? amount : null, status: record.status || "", reasons });
-      continue;
-    }
-    seen.add(comparablePhone);
-    eligible.push({
-      customerId,
-      customerName,
-      phone,
-      sector: record.sector || customer.sector || "",
-      plan: record.plan || record.planName || customer.plan || customer.planName || "",
-      amount: Math.round(amount),
-      billingMonth: monthKey,
-      status: record.status || "Pendiente",
-    });
-  }
-  const sends = await env.DB.prepare("SELECT billing_month,stage,phone,status,message_id,created_at FROM billing_automation_sends WHERE billing_month=?")
-    .bind(monthKey).all().catch(() => ({ results: [] }));
-  const sentByStage = {};
-  for (const item of (sends.results || [])) {
-    (sentByStage[item.stage] ||= new Set()).add(normalizeComparablePhone(item.phone));
-  }
-  return {
-    ok: true,
-    billingMonth: monthKey,
-    monthName,
-    source: "app_state + Google Sheets cortados",
-    eligible,
-    excluded,
-    totals: {
-      records: currentRecords.length,
-      eligible: eligible.length,
-      excluded: excluded.length,
-      alreadySentDay20: sentByStage.day20?.size || 0,
-      alreadySentDay22: sentByStage.day22?.size || 0,
-      alreadySentDay23: sentByStage.day23?.size || 0,
-    },
-  };
-}
-
-
-function chileBillingClock(date) {
+function chileDateParts(date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Santiago", year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
-  }).formatToParts(date || new Date()).reduce((acc, item) => {
-    if (item.type !== "literal") acc[item.type] = item.value;
-    return acc;
-  }, {});
+  }).formatToParts(date).reduce((result, part) => ({ ...result, [part.type]: part.value }), {});
+  return { year: Number(parts.year), month: Number(parts.month), day: Number(parts.day) };
+}
+
+function billingStageForDate(date = new Date()) {
+  const day = chileDateParts(date).day;
+  return day === 20 ? "day20" : day === 22 ? "day22" : day === 23 ? "day23" : null;
+}
+
+function billingMonthKey(date = new Date()) {
+  const local = chileDateParts(date);
+  return `${local.year}-${String(local.month).padStart(2, "0")}`;
+}
+
+function normalizeSheetHeader(value) {
+  return String(value || "").trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ");
+}
+
+function parseBillingAmount(value) {
+  const digits = String(value ?? "").replace(/[^\d-]/g, "");
+  if (!digits) return null;
+  const amount = Number(digits);
+  return Number.isFinite(amount) ? amount : null;
+}
+
+function billingSheetColumns(rows, date = new Date()) {
+  const headers = Array.isArray(rows?.[0]) ? rows[0].map(normalizeSheetHeader) : [];
+  const monthName = BILLING_MONTHS_ES[chileDateParts(date).month - 1];
+  const monthMatches = headers.map((header, index) => ({ header, index }))
+    .filter((item) => item.header === monthName);
   return {
-    year: Number(parts.year), month: Number(parts.month), day: Number(parts.day),
-    hour: Number(parts.hour), minute: Number(parts.minute),
-    monthKey: `${parts.year}-${parts.month}`,
+    customerId: headers.indexOf("id del cliente"),
+    customerName: headers.indexOf("nombre del cliente"),
+    address: headers.indexOf("direccion"),
+    sector: headers.indexOf("sector"),
+    phone: headers.indexOf("telefono"),
+    plan: headers.indexOf("plan contratado"),
+    amount: headers.indexOf("monto total"),
+    accountStatus: headers.indexOf("estado bpgo"),
+    month: monthMatches.length ? monthMatches[monthMatches.length - 1].index : -1,
   };
 }
 
-function billingAutomationStage(day) {
-  if (day === 20) return "day20";
-  if (day === 22) return "day22";
-  if (day === 23) return "day23";
-  return null;
-}
-
-function billingAutomationTemplateName(env, stage) {
-  if (stage === "day20") return String(env.WHATSAPP_BILLING_TEMPLATE_DAY20 || "recordatorio_pago_bpgo_dia20").trim();
-  if (stage === "day22") return String(env.WHATSAPP_BILLING_TEMPLATE_DAY22 || "recordatorio_pago_bpgo_dia22").trim();
-  if (stage === "day23") return String(env.WHATSAPP_BILLING_TEMPLATE_DAY23 || "aviso_suspension_pago_bpgo").trim();
-  return "";
-}
-
-
-function billingAutomationTemplateDefinition(stage) {
-  const commonButtons = {
-    type: "BUTTONS",
-    buttons: [
-      { type: "QUICK_REPLY", text: "Ya pagué" },
-      { type: "QUICK_REPLY", text: "Necesito link de pago" },
-      { type: "QUICK_REPLY", text: "Hablar con ejecutivo" },
-    ],
-  };
-  if (stage === "day20") return {
-    name: "recordatorio_pago_bpgo_dia20",
-    language: "es_CL",
-    category: "UTILITY",
-    components: [
-      { type: "BODY", text: "Hola. Te recordamos que tu mensualidad BP GO se encuentra pendiente de pago. Puedes regularizarla en https://bpgo.cl/pagar. Si ya pagaste, envíanos tu comprobante por este medio. BP GO" },
-      commonButtons,
-    ],
-  };
-  if (stage === "day22") return {
-    name: "recordatorio_pago_bpgo_dia22",
-    language: "es_CL",
-    category: "UTILITY",
-    components: [
-      { type: "BODY", text: "Hola. Tu mensualidad BP GO continúa pendiente de pago. Para evitar la suspensión del servicio, puedes regularizarla en https://bpgo.cl/pagar. Si ya pagaste, envíanos tu comprobante por este medio. BP GO" },
-      commonButtons,
-    ],
-  };
-  if (stage === "day23") return {
-    name: "aviso_suspension_pago_bpgo",
-    language: "es_CL",
-    category: "UTILITY",
-    components: [
-      { type: "BODY", text: "Estimado/a, según nuestros registros tu mensualidad BP GO continúa pendiente. Si no regularizas el pago durante hoy, el servicio será suspendido por no pago. Puedes pagar en https://bpgo.cl/pagar. Si ya pagaste, envíanos tu comprobante por este medio. BP GO" },
-      commonButtons,
-    ],
-  };
-  return null;
-}
-
-async function ensureBillingAutomationTemplates(env, credentials) {
-  if (!credentials?.accessToken || !credentials?.wabaId) return { ok: false, error: "Falta WABA o token de Meta.", templates: [] };
-  const results = [];
-  for (const stage of ["day20", "day22", "day23"]) {
-    const definition = billingAutomationTemplateDefinition(stage);
-    const configuredName = stage === "day20"
-      ? String(env.WHATSAPP_BILLING_TEMPLATE_DAY20 || definition.name).trim()
-      : stage === "day22"
-        ? String(env.WHATSAPP_BILLING_TEMPLATE_DAY22 || definition.name).trim()
-        : String(env.WHATSAPP_BILLING_TEMPLATE_DAY23 || definition.name).trim();
-    const lookup = await fetch(
-      `https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.wabaId)}/message_templates?name=${encodeURIComponent(configuredName)}&fields=name,status,language,category&limit=20`,
-      { headers: { authorization: `Bearer ${credentials.accessToken}` }, cache: "no-store" }
-    ).catch(() => null);
-    const payload = await lookup?.json().catch(() => ({}));
-    const existing = Array.isArray(payload?.data)
-      ? payload.data.find((item) => item.name === configuredName && item.language === "es_CL")
-      : null;
-    if (existing) {
-      results.push({ stage, name: configuredName, status: existing.status || "UNKNOWN", existing: true });
-      continue;
-    }
-    // Si el nombre fue personalizado por variable de entorno no se crea automáticamente:
-    // puede corresponder a una plantilla administrada manualmente en Meta.
-    if (configuredName !== definition.name) {
-      results.push({ stage, name: configuredName, status: "NOT_FOUND", existing: false });
-      continue;
-    }
-    const create = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.wabaId)}/message_templates`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
-      body: JSON.stringify(definition),
-    }).catch(() => null);
-    const created = await create?.json().catch(() => ({}));
-    results.push({
-      stage, name: configuredName,
-      status: create?.ok ? "PENDING_REVIEW" : "CREATE_FAILED",
-      existing: false,
-      error: create?.ok ? null : (created?.error?.message || "Meta rechazó la creación de la plantilla."),
+function billingEligibilityFromRows(rows, date = new Date(), pendingReceiptPhones = new Set()) {
+  const columns = billingSheetColumns(rows, date);
+  if (Object.values(columns).some((index) => index < 0)) {
+    return { ok: false, error: "La planilla no contiene todas las columnas obligatorias del mes vigente.", eligible: [], excluded: [] };
+  }
+  const candidates = [];
+  for (const row of rows.slice(1)) {
+    if (!Array.isArray(row) || !row.some((value) => String(value || "").trim())) continue;
+    const phone = normalizeWhatsAppPhone(row[columns.phone]);
+    candidates.push({
+      customerId: String(row[columns.customerId] || "").trim(),
+      customerName: String(row[columns.customerName] || "").trim(),
+      address: String(row[columns.address] || "").trim(),
+      sector: String(row[columns.sector] || "").trim(),
+      phone,
+      plan: String(row[columns.plan] || "").trim(),
+      amount: parseBillingAmount(row[columns.amount]),
+      monthStatus: String(row[columns.month] || "").trim().toUpperCase(),
+      accountStatus: String(row[columns.accountStatus] || "").trim().toUpperCase(),
     });
   }
-  return { ok: results.every((item) => !["CREATE_FAILED", "NOT_FOUND"].includes(item.status)), templates: results };
+  const phoneCounts = candidates.reduce((map, item) => map.set(item.phone, (map.get(item.phone) || 0) + 1), new Map());
+  const eligible = [];
+  const excluded = [];
+  for (const item of candidates) {
+    let reason = null;
+    if (!/^56\d{9}$/.test(item.phone)) reason = "invalid_phone";
+    else if ((phoneCounts.get(item.phone) || 0) > 1) reason = "duplicate_phone";
+    else if (item.monthStatus === "PAGADO") reason = "paid";
+    else if (item.monthStatus) reason = "month_not_pending";
+    else if (/CORTADO|SUSPENDIDO|INACTIV/.test(item.accountStatus)) reason = "inactive_or_suspended";
+    else if (!(item.amount > 0)) reason = "non_positive_amount";
+    else if (pendingReceiptPhones.has(item.phone)) reason = "pending_receipt";
+    (reason ? excluded : eligible).push(reason ? { ...item, reason } : item);
+  }
+  return { ok: true, columns, eligible, excluded };
 }
 
-async function sendBillingAutomationTemplate(env, credentials, customer, stage) {
-  const templateName = billingAutomationTemplateName(env, stage);
-  const languageCode = String(env.WHATSAPP_TEMPLATE_LANGUAGE || "es_CL").trim();
-  if (!templateName || !credentials.accessToken || !credentials.phoneNumberId) {
-    return { ok: false, error: "Configuracion de WhatsApp incompleta.", templateName };
+async function ensureBillingAutomationTables(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS billing_automation_sends (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, billing_month TEXT NOT NULL, stage TEXT NOT NULL, phone TEXT NOT NULL,
+    customer_id TEXT, customer_name TEXT, amount INTEGER, template_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+    message_id TEXT, error_code TEXT, error_message TEXT, is_test INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
+  await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_automation_unique ON billing_automation_sends(billing_month, stage, phone) WHERE is_test=0").run();
+  await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_automation_message ON billing_automation_sends(message_id) WHERE message_id IS NOT NULL").run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS billing_suspension_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, billing_month TEXT NOT NULL, phone TEXT NOT NULL, customer_id TEXT,
+    customer_name TEXT, sector TEXT, plan TEXT, amount INTEGER, status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(billing_month, phone)
+  )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS billing_automation_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, billing_month TEXT NOT NULL, stage TEXT, status TEXT NOT NULL,
+    eligible_count INTEGER NOT NULL DEFAULT 0, excluded_count INTEGER NOT NULL DEFAULT 0,
+    sent_count INTEGER NOT NULL DEFAULT 0, failed_count INTEGER NOT NULL DEFAULT 0, details TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
+}
+
+async function fetchFreshBillingSource(env) {
+  const endpoint = String(env.BILLING_SHEETS_SYNC_URL || `https://${STABLE_BACKEND}/api/billing/sheets-sync`).trim();
+  const response = await fetch(endpoint, { headers: { "cache-control": "no-cache" }, cache: "no-store" }).catch(() => null);
+  const payload = response ? await response.json().catch(() => null) : null;
+  if (!response?.ok || !payload?.ok || !Array.isArray(payload.rows)) throw new Error("No se pudo leer Google Sheets; lote abortado sin envíos.");
+  return payload;
+}
+
+async function pendingPaymentReceiptPhones(env) {
+  await ensureWhatsAppAutomationTable(env);
+  const rows = await env.DB.prepare(`SELECT DISTINCT phone FROM whatsapp_automation_cases
+    WHERE case_type='payment' AND status IN ('suggested','reviewing')`).all();
+  return new Set((rows.results || []).map((item) => normalizeWhatsAppPhone(item.phone)).filter(Boolean));
+}
+
+function billingAutomationTemplateDefinition(stage) {
+  const definition = BILLING_AUTOMATION_TEMPLATES[stage];
+  return definition ? {
+    name: definition.name,
+    language: "es_CL",
+    category: "UTILITY",
+    components: [
+      { type: "BODY", text: definition.text },
+      { type: "BUTTONS", buttons: [
+        { type: "QUICK_REPLY", text: "Ya pagué" },
+        { type: "QUICK_REPLY", text: "Necesito link de pago" },
+        { type: "QUICK_REPLY", text: "Hablar con ejecutivo" },
+      ] },
+    ],
+  } : null;
+}
+
+async function syncBillingAutomationTemplates(env, createMissing = false) {
+  const credentials = await getWhatsAppCredentials(env);
+  if (!credentials.accessToken || !credentials.wabaId) return { ok: false, error: "Faltan credenciales WABA.", templates: [] };
+  const endpoint = `https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.wabaId)}/message_templates`;
+  const response = await fetch(`${endpoint}?fields=name,status,language,category,rejected_reason&limit=200`, {
+    headers: { authorization: `Bearer ${credentials.accessToken}` },
+  }).catch(() => null);
+  const payload = response ? await response.json().catch(() => ({})) : {};
+  if (!response?.ok) return { ok: false, error: payload.error?.message || "Meta no permitió consultar plantillas.", templates: [] };
+  let existing = Array.isArray(payload.data) ? payload.data : [];
+  const created = [];
+  if (createMissing) {
+    for (const stage of Object.keys(BILLING_AUTOMATION_TEMPLATES)) {
+      const definition = billingAutomationTemplateDefinition(stage);
+      if (existing.some((item) => item.name === definition.name && item.language === definition.language)) continue;
+      const createdResponse = await fetch(endpoint, {
+        method: "POST",
+        headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
+        body: JSON.stringify(definition),
+      }).catch(() => null);
+      const createdPayload = createdResponse ? await createdResponse.json().catch(() => ({})) : {};
+      created.push({ name: definition.name, ok: Boolean(createdResponse?.ok), response: sanitizeMetaDiagnostic(createdPayload) });
+    }
+    if (created.some((item) => item.ok)) {
+      const refreshed = await fetch(`${endpoint}?fields=name,status,language,category,rejected_reason&limit=200`, {
+        headers: { authorization: `Bearer ${credentials.accessToken}` },
+      }).catch(() => null);
+      const refreshedPayload = refreshed ? await refreshed.json().catch(() => ({})) : {};
+      if (refreshed?.ok && Array.isArray(refreshedPayload.data)) existing = refreshedPayload.data;
+    }
   }
-  const response = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/messages`, {
+  const templates = Object.entries(BILLING_AUTOMATION_TEMPLATES).map(([stage, definition]) => {
+    const found = existing.find((item) => item.name === definition.name && item.language === "es_CL");
+    return { stage, name: definition.name, status: found?.status || "NOT_FOUND", language: found?.language || "es_CL", category: found?.category || "UTILITY", rejectedReason: found?.rejected_reason || null };
+  });
+  return { ok: true, templates, created };
+}
+
+async function sendBillingAutomationTemplate(env, stage, phone) {
+  const credentials = await getWhatsAppCredentials(env);
+  const definition = billingAutomationTemplateDefinition(stage);
+  const endpoint = `https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/messages`;
+  const response = await fetch(endpoint, {
     method: "POST",
     headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      recipient_type: "individual",
-      to: normalizeWhatsAppPhone(customer.phone),
-      type: "template",
-      template: { name: templateName, language: { code: languageCode } },
-    }),
-  }).catch((error) => ({ ok: false, status: 0, json: async () => ({ error: { message: String(error?.message || error) } }) }));
-  const meta = await response.json().catch(() => ({}));
-  return {
-    ok: Boolean(response.ok),
-    messageId: meta.messages?.[0]?.id || null,
-    templateName,
-    error: response.ok ? null : (meta.error?.message || "Error al enviar por WhatsApp"),
-    errorCode: response.ok ? null : meta.error?.code,
-  };
+    body: JSON.stringify({ messaging_product: "whatsapp", recipient_type: "individual", to: phone, type: "template", template: { name: definition.name, language: { code: definition.language } } }),
+  }).catch(() => null);
+  const payload = response ? await response.json().catch(() => ({})) : {};
+  return { ok: Boolean(response?.ok && payload.messages?.[0]?.id), httpStatus: response?.status || 0, messageId: payload.messages?.[0]?.id || null, errorCode: payload.error?.code || null, error: payload.error?.message || null };
 }
 
-async function upsertSuspensionQueue(env, preview) {
+async function updateBillingAutomationStatus(env, item) {
   await ensureBillingAutomationTables(env);
-  for (const customer of preview.eligible) {
-    await env.DB.prepare(`INSERT INTO billing_suspension_queue
-      (billing_month, phone, customer_id, customer_name, sector, plan, amount, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))
-      ON CONFLICT(billing_month, phone) DO UPDATE SET
-        customer_id=excluded.customer_id, customer_name=excluded.customer_name, sector=excluded.sector,
-        plan=excluded.plan, amount=excluded.amount, updated_at=datetime('now')`)
-      .bind(preview.billingMonth, normalizeWhatsAppPhone(customer.phone), customer.customerId || null,
-        customer.customerName || null, customer.sector || null, customer.plan || null, customer.amount || null).run();
+  await env.DB.prepare(`UPDATE billing_automation_sends SET status=?, error_code=?, error_message=?, updated_at=datetime('now') WHERE message_id=?`)
+    .bind(item.status, item.error?.code ? String(item.error.code) : null, item.error?.message || item.error?.error_data?.details || null, item.messageId).run();
+}
+
+async function revalidateBillingRecipient(env, phone, date = new Date()) {
+  const source = await fetchFreshBillingSource(env);
+  const parsed = billingEligibilityFromRows(source.rows, date, await pendingPaymentReceiptPhones(env));
+  if (!parsed.ok) throw new Error(parsed.error);
+  return parsed.eligible.find((item) => item.phone === phone) || null;
+}
+
+async function reconcileBillingSuspensionQueue(env, month, parsed) {
+  if (!parsed?.ok) return;
+  for (const item of parsed.excluded) {
+    const status = item.reason === "paid" ? "paid" : item.reason === "inactive_or_suspended" ? "suspended" : null;
+    if (!status) continue;
+    await env.DB.prepare(`UPDATE billing_suspension_queue SET status=?,updated_at=datetime('now')
+      WHERE billing_month=? AND phone=? AND status='pending'`).bind(status, month, item.phone).run();
   }
 }
 
-async function notifyCarlosBillingSummary(env, credentials, preview, result) {
-  if (!preview.eligible.length) return;
-  const detail = `${preview.eligible.length} cliente(s) siguen pendientes de pago al día 23. La lista quedó preparada en Operaciones > Cobranza automática > Pendientes de suspensión. Enviados: ${result.sent}; fallidos: ${result.failed}.`;
-  await notifyStaff(env, credentials, "carlos", "Cobranza día 23", `${preview.eligible.length} pendientes de suspensión`,
-    normalizeWhatsAppPhone(env.STAFF_PHONE_CARLOS), detail, { sourceMessageId: `billing-${preview.billingMonth}-day23` }).catch(() => null);
-}
-
-async function runBillingAutomation(env, now) {
-  const clock = chileBillingClock(now || new Date());
-  const credentials = await getWhatsAppCredentials(env);
-  const templateState = await ensureBillingAutomationTemplates(env, credentials).catch((error) => ({ ok: false, error: String(error?.message || error), templates: [] }));
-  const stage = billingAutomationStage(clock.day);
-  if (!stage) return { ok: true, skipped: true, reason: "not_scheduled_day", chileDay: clock.day, templates: templateState };
-  const preview = await buildBillingAutomationPreview(env, now || new Date());
-  const currentTemplateName = billingAutomationTemplateName(env, stage);
-  const currentTemplate = (templateState.templates || []).find((item) => item.stage === stage && item.name === currentTemplateName);
-  if (!currentTemplate || currentTemplate.status !== "APPROVED") {
-    return {
-      ok: false, stage, billingMonth: preview.billingMonth, eligible: preview.eligible.length,
-      sent: 0, skipped: 0, failed: 0, reason: "template_not_approved",
-      template: currentTemplate || { stage, name: currentTemplateName, status: "UNKNOWN" },
-      templates: templateState,
-    };
+async function runBillingAutomation(env, options = {}) {
+  await ensureBillingAutomationTables(env);
+  const date = options.date || new Date();
+  const stage = options.stage || billingStageForDate(date);
+  const month = billingMonthKey(date);
+  const templateState = await syncBillingAutomationTemplates(env, true);
+  if (!stage) return { ok: true, skipped: true, reason: "not_scheduled_day", month, templates: templateState.templates || [] };
+  if (!BILLING_AUTOMATION_TEMPLATES[stage]) return { ok: false, error: "Etapa de cobranza inválida." };
+  let source;
+  try { source = await fetchFreshBillingSource(env); } catch (error) {
+    await env.DB.prepare("INSERT INTO billing_automation_runs (billing_month,stage,status,details) VALUES (?,?,'aborted',?)").bind(month, stage, String(error.message || error)).run();
+    return { ok: false, aborted: true, error: String(error.message || error) };
   }
-  const results = [];
-  for (const customer of preview.eligible) {
-    const phone = normalizeWhatsAppPhone(customer.phone);
-    const existing = await env.DB.prepare(
-      "SELECT status,message_id FROM billing_automation_sends WHERE billing_month=? AND stage=? AND phone=?"
-    ).bind(preview.billingMonth, stage, phone).first();
-    if (existing) {
-      results.push({ phone, ok: existing.status !== "failed", skipped: true, status: existing.status, messageId: existing.message_id || null });
-      continue;
-    }
-    await env.DB.prepare(`INSERT OR IGNORE INTO billing_automation_sends
-      (billing_month,stage,phone,customer_id,customer_name,amount,status,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,'pending',datetime('now'),datetime('now'))`)
-      .bind(preview.billingMonth, stage, phone, customer.customerId || null, customer.customerName || null, customer.amount || null).run();
-
-    // Revalidar inmediatamente antes de cada envío para evitar cobrar a alguien que cambió de estado
-    // durante la misma ejecución. Si Sheets deja de responder, se aborta el lote completo.
-    const fresh = await buildBillingAutomationPreview(env, now || new Date());
-    const stillEligible = fresh.eligible.some((item) => normalizeComparablePhone(item.phone) === normalizeComparablePhone(phone));
-    if (!stillEligible) {
-      await env.DB.prepare("UPDATE billing_automation_sends SET status='skipped',error_message='Cliente dejó de ser elegible antes del envío',updated_at=datetime('now') WHERE billing_month=? AND stage=? AND phone=?")
-        .bind(preview.billingMonth, stage, phone).run();
-      results.push({ phone, ok: true, skipped: true, status: "skipped" });
-      continue;
-    }
-
-    const sent = await sendBillingAutomationTemplate(env, credentials, customer, stage);
-    await env.DB.prepare("UPDATE billing_automation_sends SET status=?,message_id=?,error_message=?,updated_at=datetime('now') WHERE billing_month=? AND stage=? AND phone=?")
-      .bind(sent.ok ? "accepted" : "failed", sent.messageId || null, sent.error || null, preview.billingMonth, stage, phone).run();
-    if (sent.messageId) await saveWhatsAppStatus(env, { messageId: sent.messageId, recipient: phone, status: "accepted" }).catch(() => null);
-    results.push({ phone, ok: sent.ok, messageId: sent.messageId || null, templateName: sent.templateName, error: sent.error || undefined });
-  }
-  const sentCount = results.filter((item) => item.ok && !item.skipped).length;
-  const skippedCount = results.filter((item) => item.skipped).length;
-  const failedCount = results.filter((item) => !item.ok).length;
-
+  const parsed = billingEligibilityFromRows(source.rows, date, await pendingPaymentReceiptPhones(env));
+  if (!parsed.ok) return { ok: false, aborted: true, error: parsed.error };
+  await reconcileBillingSuspensionQueue(env, month, parsed);
   if (stage === "day23") {
-    // La lista se genera con el estado fresco posterior al envío. El envío no suspende servicios:
-    // solo prepara la cola para decisión/ejecución humana.
-    const finalPreview = await buildBillingAutomationPreview(env, now || new Date());
-    await upsertSuspensionQueue(env, finalPreview);
-    await notifyCarlosBillingSummary(env, credentials, finalPreview, { sent: sentCount, failed: failedCount });
+    for (const item of parsed.eligible) {
+      await env.DB.prepare(`INSERT INTO billing_suspension_queue
+        (billing_month,phone,customer_id,customer_name,sector,plan,amount,status,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,'pending',datetime('now'),datetime('now'))
+        ON CONFLICT(billing_month,phone) DO UPDATE SET customer_id=excluded.customer_id,customer_name=excluded.customer_name,
+          sector=excluded.sector,plan=excluded.plan,amount=excluded.amount,updated_at=datetime('now')`)
+        .bind(month, item.phone, item.customerId, item.customerName, item.sector, item.plan, item.amount).run();
+    }
   }
+  const template = (templateState.templates || []).find((item) => item.stage === stage);
+  if (!templateState.ok || template?.status !== "APPROVED") {
+    await env.DB.prepare(`INSERT INTO billing_automation_runs
+      (billing_month,stage,status,eligible_count,excluded_count,details) VALUES (?,?,'blocked',?,?,?)`)
+      .bind(month, stage, parsed.eligible.length, parsed.excluded.length, `Plantilla ${template?.status || "NOT_FOUND"}`).run();
+    return { ok: false, blocked: true, error: "La plantilla de Meta no está aprobada.", month, stage, template, eligible: parsed.eligible.length, excluded: parsed.excluded.length };
+  }
+  let sent = 0;
+  let failed = 0;
+  for (const candidate of parsed.eligible) {
+    const previous = await env.DB.prepare(`SELECT status FROM billing_automation_sends
+      WHERE billing_month=? AND stage=? AND phone=? AND is_test=0`).bind(month, stage, candidate.phone).first();
+    if (previous && ["accepted", "sent", "delivered", "read"].includes(previous.status)) continue;
+    let item;
+    try { item = await revalidateBillingRecipient(env, candidate.phone, date); } catch (error) {
+      await env.DB.prepare(`INSERT INTO billing_automation_runs
+        (billing_month,stage,status,eligible_count,excluded_count,sent_count,failed_count,details)
+        VALUES (?,?,'aborted',?,?,?,?,?)`).bind(month, stage, parsed.eligible.length, parsed.excluded.length, sent, failed, String(error.message || error)).run();
+      return { ok: false, aborted: true, error: "Google Sheets falló durante la revalidación; lote detenido.", sent, failed };
+    }
+    if (!item) continue;
+    await env.DB.prepare(`INSERT INTO billing_automation_sends
+      (billing_month,stage,phone,customer_id,customer_name,amount,template_name,status,is_test,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,'pending',0,datetime('now'),datetime('now'))
+      ON CONFLICT(billing_month,stage,phone) WHERE is_test=0 DO UPDATE SET status='pending',error_code=NULL,error_message=NULL,updated_at=datetime('now')`)
+      .bind(month, stage, item.phone, item.customerId, item.customerName, item.amount, template.name).run();
+    const result = await sendBillingAutomationTemplate(env, stage, item.phone);
+    await env.DB.prepare(`UPDATE billing_automation_sends SET status=?,message_id=?,error_code=?,error_message=?,updated_at=datetime('now')
+      WHERE billing_month=? AND stage=? AND phone=? AND is_test=0`)
+      .bind(result.ok ? "accepted" : "failed", result.messageId, result.errorCode ? String(result.errorCode) : null, result.error, month, stage, item.phone).run();
+    if (result.ok) sent += 1; else failed += 1;
+  }
+  if (stage === "day23" && parsed.eligible.length) {
+    await notifyStaff(env, await getWhatsAppCredentials(env), "carlos", "Cobranza automática", "Lista de suspensión", "interno",
+      `${parsed.eligible.length} cliente(s) pendientes de suspensión por un total de ${formatCurrency(parsed.eligible.reduce((sum, item) => sum + item.amount, 0))}. Revisar Operaciones.`,
+      { billingRequestId: `suspension-${month}`, sourceMessageId: `billing-${month}-day23` }).catch(() => null);
+  }
+  await env.DB.prepare(`INSERT INTO billing_automation_runs
+    (billing_month,stage,status,eligible_count,excluded_count,sent_count,failed_count,details)
+    VALUES (?,?,'completed',?,?,?,?,?)`).bind(month, stage, parsed.eligible.length, parsed.excluded.length, sent, failed, null).run();
+  return { ok: failed === 0, month, stage, eligible: parsed.eligible.length, excluded: parsed.excluded.length, sent, failed, templates: templateState.templates };
+}
 
+async function billingAutomationDashboard(env) {
+  await ensureBillingAutomationTables(env);
+  const month = billingMonthKey();
+  const source = await fetchFreshBillingSource(env).catch(() => null);
+  const parsed = source ? billingEligibilityFromRows(source.rows, new Date(), await pendingPaymentReceiptPhones(env)) : null;
+  if (parsed?.ok) await reconcileBillingSuspensionQueue(env, month, parsed);
+  const sends = await env.DB.prepare(`SELECT stage,status,COUNT(*) AS count FROM billing_automation_sends
+    WHERE billing_month=? AND is_test=0 GROUP BY stage,status`).bind(month).all();
+  const queue = await env.DB.prepare(`SELECT id,billing_month,phone,customer_id,customer_name,sector,plan,amount,status,created_at,updated_at
+    FROM billing_suspension_queue WHERE billing_month=? ORDER BY created_at DESC`).bind(month).all();
+  const templates = await syncBillingAutomationTemplates(env, false);
+  const queueRows = queue.results || [];
   return {
-    ok: failedCount === 0,
-    stage,
-    billingMonth: preview.billingMonth,
-    eligible: preview.eligible.length,
-    sent: sentCount,
-    skipped: skippedCount,
-    failed: failedCount,
-    results,
+    ok: true, month, sourceFresh: Boolean(source), pending: parsed?.eligible.length ?? null, excluded: parsed?.excluded.length ?? null,
+    pendingAmount: parsed ? parsed.eligible.reduce((sum, item) => sum + item.amount, 0) : null,
+    sends: sends.results || [], queue: queueRows,
+    queuePending: queueRows.filter((item) => item.status === "pending").length,
+    queueAmount: queueRows.filter((item) => item.status === "pending").reduce((sum, item) => sum + Number(item.amount || 0), 0),
+    templates: templates.templates || [], templateError: templates.ok ? null : templates.error,
   };
-}
-
-function decodeBase64UrlJson(value) {
-  const normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
-  const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
-  return JSON.parse(atob(padded));
-}
-
-async function verifyGitHubActionsOidc(request) {
-  const token = String(request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
-  const parts = token.split(".");
-  if (parts.length !== 3) return false;
-  let header, payload;
-  try { header = decodeBase64UrlJson(parts[0]); payload = decodeBase64UrlJson(parts[1]); } catch { return false; }
-  if (header.alg !== "RS256" || !header.kid) return false;
-  if (payload.iss !== "https://token.actions.githubusercontent.com") return false;
-  if (payload.aud !== "bpgo-billing-automation") return false;
-  if (payload.repository !== "bpgo12/bpgo-operaciones" || payload.ref !== "refs/heads/main") return false;
-  if (!["schedule", "workflow_dispatch"].includes(String(payload.event_name || ""))) return false;
-  const now = Math.floor(Date.now() / 1000);
-  if (Number(payload.exp || 0) < now || Number(payload.iat || 0) > now + 60) return false;
-  const jwksResponse = await fetch("https://token.actions.githubusercontent.com/.well-known/jwks", { cache: "no-store" }).catch(() => null);
-  const jwks = await jwksResponse?.json().catch(() => null);
-  const jwk = jwks?.keys?.find((key) => key.kid === header.kid);
-  if (!jwk) return false;
-  const key = await crypto.subtle.importKey("jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]).catch(() => null);
-  if (!key) return false;
-  const signature = fromBase64Url(parts[2]);
-  const signed = encoder.encode(`${parts[0]}.${parts[1]}`);
-  return crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, signature, signed).catch(() => false);
 }
 
 async function sendBillingMessages(request, env) {
@@ -2053,6 +1992,36 @@ async function readSession(request, secret) {
   if (expected !== token) return null;
   const payload = JSON.parse(atob(parts[0].replace(/-/g, "+").replace(/_/g, "/")));
   return payload.exp > Date.now() ? payload : null;
+}
+
+async function verifyBillingAutomationOidc(request) {
+  const token = String(request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  let header;
+  let claims;
+  try {
+    header = JSON.parse(new TextDecoder().decode(fromBase64Url(parts[0])));
+    claims = JSON.parse(new TextDecoder().decode(fromBase64Url(parts[1])));
+  } catch { return null; }
+  if (header.alg !== "RS256" || !header.kid) return null;
+  const jwksResponse = await fetch("https://token.actions.githubusercontent.com/.well-known/jwks").catch(() => null);
+  const jwks = jwksResponse ? await jwksResponse.json().catch(() => ({})) : {};
+  const jwk = Array.isArray(jwks.keys) ? jwks.keys.find((item) => item.kid === header.kid && item.kty === "RSA") : null;
+  if (!jwk) return null;
+  const key = await crypto.subtle.importKey("jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]).catch(() => null);
+  if (!key) return null;
+  const validSignature = await crypto.subtle.verify({ name: "RSASSA-PKCS1-v1_5" }, key, fromBase64Url(parts[2]), encoder.encode(`${parts[0]}.${parts[1]}`)).catch(() => false);
+  const now = Math.floor(Date.now() / 1000);
+  const audience = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+  const validClaims = claims.iss === "https://token.actions.githubusercontent.com"
+    && audience.includes("bpgo-billing-automation")
+    && claims.repository === "bpgo12/bpgo-operaciones"
+    && claims.ref === "refs/heads/main"
+    && ["schedule", "workflow_dispatch"].includes(claims.event_name)
+    && claims.workflow_ref === "bpgo12/bpgo-operaciones/.github/workflows/billing-automation.yml@refs/heads/main"
+    && Number(claims.exp) > now && Number(claims.iat) <= now + 60 && (!claims.nbf || Number(claims.nbf) <= now + 60);
+  return validSignature && validClaims ? claims : null;
 }
 
 export default {
@@ -2221,6 +2190,11 @@ export default {
           status: item.status,
           error: item.errors?.[0] || null,
         }).catch(() => null);
+        await updateBillingAutomationStatus(env, {
+          messageId: item.id,
+          status: item.status,
+          error: item.errors?.[0] || null,
+        }).catch(() => null);
       }
       const manualEchoesSaved = await saveManualWhatsAppEchoes(env, changes).catch(() => 0);
       const inboundChanges = inboundOnlyChanges(changes);
@@ -2349,6 +2323,59 @@ export default {
           updatedAt: row.updated_at,
         } : null,
       });
+    }
+
+    if (url.pathname === "/api/billing/automation/run" && request.method === "POST") {
+      const oidc = await verifyBillingAutomationOidc(request);
+      if (!oidc) return Response.json({ ok: false, error: "Ejecución automática no autorizada." }, { status: 401 });
+      const result = await runBillingAutomation(env);
+      return Response.json(result, { status: result.ok || result.skipped || result.blocked ? 200 : 502 });
+    }
+
+    if (url.pathname === "/api/billing/automation" && request.method === "GET") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      return Response.json(await billingAutomationDashboard(env));
+    }
+
+    if (url.pathname === "/api/billing/automation/templates" && request.method === "POST") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session || session.role !== "super_admin") return Response.json({ ok: false, error: "Solo un superadministrador puede crear plantillas." }, { status: 403 });
+      const result = await syncBillingAutomationTemplates(env, true);
+      return Response.json(result, { status: result.ok ? 200 : 502 });
+    }
+
+    if (url.pathname === "/api/billing/automation/test" && request.method === "POST") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session || session.role !== "super_admin") return Response.json({ ok: false, error: "Solo un superadministrador puede ejecutar pruebas." }, { status: 403 });
+      const body = await request.json().catch(() => ({}));
+      const stage = String(body.stage || "");
+      const phone = normalizeWhatsAppPhone(body.phone);
+      if (!BILLING_AUTOMATION_TEMPLATES[stage] || !/^56\d{9}$/.test(phone)) return Response.json({ ok: false, error: "Etapa o teléfono de prueba inválido." }, { status: 400 });
+      const templates = await syncBillingAutomationTemplates(env, false);
+      const template = templates.templates?.find((item) => item.stage === stage);
+      if (template?.status !== "APPROVED") return Response.json({ ok: false, error: `Plantilla ${template?.status || "NOT_FOUND"}; no se envió.` }, { status: 409 });
+      const result = await sendBillingAutomationTemplate(env, stage, phone);
+      await ensureBillingAutomationTables(env);
+      await env.DB.prepare(`INSERT INTO billing_automation_sends
+        (billing_month,stage,phone,template_name,status,message_id,error_code,error_message,is_test,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,1,datetime('now'),datetime('now'))`)
+        .bind(billingMonthKey(), stage, phone, template.name, result.ok ? "accepted" : "failed", result.messageId,
+          result.errorCode ? String(result.errorCode) : null, result.error).run();
+      return Response.json({ ok: result.ok, test: true, stage, phone, messageId: result.messageId, error: result.error }, { status: result.ok ? 200 : 422 });
+    }
+
+    if (url.pathname === "/api/billing/automation/queue" && request.method === "PATCH") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      const body = await request.json().catch(() => ({}));
+      const id = Number(body.id);
+      const status = String(body.status || "");
+      if (!Number.isInteger(id) || !["pending", "suspended", "paid", "dismissed"].includes(status)) return Response.json({ ok: false, error: "Registro o estado inválido." }, { status: 400 });
+      await ensureBillingAutomationTables(env);
+      const result = await env.DB.prepare("UPDATE billing_suspension_queue SET status=?,updated_at=datetime('now') WHERE id=?").bind(status, id).run();
+      if (!result.meta?.changes) return Response.json({ ok: false, error: "Registro no encontrado." }, { status: 404 });
+      return Response.json({ ok: true, id, status });
     }
 
     if (url.pathname === "/api/whatsapp/send-billing" && request.method === "POST") {
@@ -2737,72 +2764,6 @@ export default {
       return Response.json({ ok: true, key, value });
     }
 
-    if (url.pathname === "/api/billing/automation/preview" && request.method === "GET") {
-      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
-      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
-      try {
-        const preview = await buildBillingAutomationPreview(env, new Date());
-        return Response.json(preview, { headers: { "cache-control": "no-store" } });
-      } catch (error) {
-        return Response.json({ ok: false, error: String(error?.message || error) }, { status: 503 });
-      }
-    }
-
-    if (url.pathname === "/api/billing/automation/run" && request.method === "POST") {
-      if (!(await verifyGitHubActionsOidc(request))) {
-        return Response.json({ ok: false, error: "Ejecución automática no autorizada." }, { status: 401 });
-      }
-      try {
-        const result = await runBillingAutomation(env, new Date());
-        return Response.json(result, { status: result.ok ? 200 : 207, headers: { "cache-control": "no-store" } });
-      } catch (error) {
-        return Response.json({ ok: false, error: String(error?.message || error) }, { status: 503 });
-      }
-    }
-
-    if (url.pathname === "/api/billing/automation/suspensions" && request.method === "GET") {
-      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
-      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
-      await ensureBillingAutomationTables(env);
-      const month = String(url.searchParams.get("month") || billingMonthKey(new Date())).trim();
-      const rows = await env.DB.prepare(`SELECT id,billing_month,phone,customer_id,customer_name,sector,plan,amount,status,created_at,updated_at
-        FROM billing_suspension_queue WHERE billing_month=? ORDER BY customer_name COLLATE NOCASE ASC`).bind(month).all();
-      return Response.json({ ok: true, billingMonth: month, items: rows.results || [] }, { headers: { "cache-control": "no-store" } });
-    }
-
-    if (url.pathname === "/api/billing/automation/suspensions" && request.method === "PATCH") {
-      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
-      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
-      const body = await request.json().catch(() => ({}));
-      const id = Number(body.id);
-      const status = String(body.status || "").trim();
-      if (!Number.isInteger(id) || !["pending", "suspended", "dismissed", "paid"].includes(status)) {
-        return Response.json({ ok: false, error: "Registro o estado inválido." }, { status: 400 });
-      }
-      await ensureBillingAutomationTables(env);
-      const result = await env.DB.prepare("UPDATE billing_suspension_queue SET status=?,updated_at=datetime('now') WHERE id=?")
-        .bind(status, id).run();
-      return Response.json({ ok: Boolean(result.meta?.changes), id, status }, { status: result.meta?.changes ? 200 : 404 });
-    }
-
-    if (url.pathname === "/api/billing/automation/templates" && request.method === "GET") {
-      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
-      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
-      const credentials = await getWhatsAppCredentials(env);
-      const result = await ensureBillingAutomationTemplates(env, credentials).catch((error) => ({ ok: false, error: String(error?.message || error), templates: [] }));
-      return Response.json(result, { status: result.ok ? 200 : 207, headers: { "cache-control": "no-store" } });
-    }
-
-    if (url.pathname === "/api/billing/automation/history" && request.method === "GET") {
-      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
-      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
-      await ensureBillingAutomationTables(env);
-      const month = String(url.searchParams.get("month") || billingMonthKey(new Date())).trim();
-      const rows = await env.DB.prepare(`SELECT billing_month,stage,phone,customer_id,customer_name,amount,message_id,status,error_message,created_at,updated_at
-        FROM billing_automation_sends WHERE billing_month=? ORDER BY created_at DESC`).bind(month).all();
-      return Response.json({ ok: true, billingMonth: month, items: rows.results || [] }, { headers: { "cache-control": "no-store" } });
-    }
-
     if (url.pathname === "/api/whatsapp/status" && request.method === "GET") {
       const credentials = await getWhatsAppCredentials(env);
       const checks = [
@@ -2847,7 +2808,7 @@ export default {
     }
 
     const assetResponse = await env.ASSETS.fetch(request);
-    if (url.pathname === "/" || url.pathname === "/index.html" || url.pathname === "/assets/index-bulk-v28.js" || url.pathname === "/assets/password-save-v6.js" || url.pathname === "/assets/sheets-resilience-v9.js" || url.pathname === "/assets/mobile-ux-v11.js" || url.pathname === "/assets/billing-mobile-search-v12.js" || url.pathname === "/assets/billing-automation-v1.js" || url.pathname === "/assets/mobile-tables-v13.js" || url.pathname === "/assets/technician-shifts-v15.js" || url.pathname === "/assets/agenda-shift-guard-v24.js" || url.pathname === "/assets/enterprise-v22.js" || url.pathname === "/assets/planta-externa-entry.js" || url.pathname === "/assets/operations-points-v29.js" || url.pathname === "/assets/whatsapp-onboarding-v43.js" || url.pathname === "/assets/whatsapp-test-v41.js" || url.pathname === "/assets/mobile-v5.css" || url.pathname === "/assets/enterprise-v22.css" || url.pathname === "/assets/operations-points-v29.css" || url.pathname === "/assets/whatsapp-onboarding-v42.css") {
+    if (url.pathname === "/" || url.pathname === "/index.html" || url.pathname === "/assets/index-bulk-v28.js" || url.pathname === "/assets/password-save-v6.js" || url.pathname === "/assets/sheets-resilience-v9.js" || url.pathname === "/assets/billing-automation-v1.js" || url.pathname === "/assets/billing-automation-v1.css" || url.pathname === "/assets/mobile-ux-v11.js" || url.pathname === "/assets/billing-mobile-search-v12.js" || url.pathname === "/assets/mobile-tables-v13.js" || url.pathname === "/assets/technician-shifts-v15.js" || url.pathname === "/assets/agenda-shift-guard-v24.js" || url.pathname === "/assets/enterprise-v22.js" || url.pathname === "/assets/planta-externa-entry.js" || url.pathname === "/assets/operations-points-v29.js" || url.pathname === "/assets/whatsapp-onboarding-v43.js" || url.pathname === "/assets/whatsapp-test-v41.js" || url.pathname === "/assets/mobile-v5.css" || url.pathname === "/assets/enterprise-v22.css" || url.pathname === "/assets/operations-points-v29.css" || url.pathname === "/assets/whatsapp-onboarding-v42.css") {
       const headers = new Headers(assetResponse.headers);
       headers.set("cache-control", "no-store, no-cache, must-revalidate, max-age=0");
       headers.set("pragma", "no-cache");
