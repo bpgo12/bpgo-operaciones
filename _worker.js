@@ -205,12 +205,12 @@ function classifyInboundMessage(message) {
   const text = String(message.text || "").toLocaleLowerCase("es-CL");
   const paymentWords = /\b(pagu[eé]|pago|pagado|transfer|dep[oó]sito|comprobante|boleta)\b/.test(text);
   const faultWords = /\b(sin internet|sin conexi[oó]n|no tengo internet|no funciona|falla|corte|fibra|router|los roja|luz roja|intermitente|lento)\b/.test(text);
-  const hasReceipt = Boolean(message.mediaId) && ["image", "document"].includes(message.type);
-  if (paymentWords || hasReceipt) {
+  const hasPaymentAttachment = paymentWords && Boolean(message.mediaId) && ["image", "document"].includes(message.type);
+  if (paymentWords) {
     return {
       type: "payment",
-      confidence: paymentWords && hasReceipt ? 96 : hasReceipt ? 82 : 70,
-      summary: hasReceipt ? "Comprobante de pago recibido para validación." : "Cliente informa un pago; falta revisar el comprobante.",
+      confidence: hasPaymentAttachment ? 96 : 70,
+      summary: hasPaymentAttachment ? "Comprobante de pago recibido para validación." : "Cliente informa un pago; falta revisar el comprobante.",
       serviceMonth: inferServiceMonth(text, message.createdAt),
       amount: inferAmount(text),
     };
@@ -221,6 +221,24 @@ function classifyInboundMessage(message) {
   return { type: "general", confidence: 35, summary: "Consulta general pendiente de atención.", serviceMonth: null, amount: null };
 }
 
+function inboundMessageText(message) {
+  return message.text?.body || message.image?.caption || message.document?.caption || message.button?.text
+    || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || message.document?.filename || null;
+}
+
+function hasExplicitPaymentIntent(value) {
+  return /\b(pagu[eé]|pago|pagado|transferencia|transfer[ií]|dep[oó]sito|comprobante)\b/i.test(String(value || ""));
+}
+
+function hasStrongReceiptEvidence(action, message) {
+  if (hasExplicitPaymentIntent(message.customerText)) return true;
+  if (message.mediaType !== "image" || !message.mediaId) return false;
+  const evidence = new Set(Array.isArray(action.receipt_evidence) ? action.receipt_evidence : []);
+  const identity = ["receipt_title", "bank", "transaction_id"].some((item) => evidence.has(item));
+  const transaction = ["amount", "date_time", "recipient", "origin_account", "destination_account"].filter((item) => evidence.has(item)).length;
+  return evidence.size >= 3 && identity && transaction >= 2;
+}
+
 function normalizeComparablePhone(value) {
   const phone = normalizeWhatsAppPhone(value);
   return phone.length >= 8 ? phone.slice(-8) : phone;
@@ -229,22 +247,54 @@ function normalizeComparablePhone(value) {
 async function findCustomerForWhatsApp(env, phone, fallbackName) {
   const row = await env.DB.prepare("SELECT data FROM app_state WHERE id = 'main'").first().catch(() => null);
   const state = row?.data ? JSON.parse(row.data) : null;
-  const collections = [state?.billingCustomers, state?.customers].filter(Array.isArray);
   const wanted = normalizeComparablePhone(phone);
-  for (const customer of collections.flat()) {
+  const monthName = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"][new Date().getMonth()];
+  const billingRecords = (Array.isArray(state?.billingRecords) ? state.billingRecords : []).filter((record) => {
+    const candidate = normalizeComparablePhone(record.phone || record.whatsapp || record.telefono || "");
+    const recordMonth = String(record.billingMonth || record.month || "").toLocaleLowerCase("es-CL");
+    return wanted && candidate === wanted && recordMonth.includes(monthName);
+  });
+  if (billingRecords.length) {
+    const customer = billingRecords[0];
+    const rawBalance = customer.amount ?? customer.saldo ?? customer.deuda;
+    const hasExplicitBalance = rawBalance !== null && rawBalance !== undefined && String(rawBalance).trim() !== "" && Number.isFinite(Number(rawBalance));
+    const status = String(customer.status || "").trim();
+    const adjustmentText = [customer.notes, customer.note, customer.observations, customer.adjustment, customer.discount, status].filter(Boolean).join(" ");
+    return {
+      id: String(customer.id || customer.rut || customer.customerName || ""),
+      name: customer.customerName || customer.name || fallbackName || null,
+      address: customer.address || customer.direccion || null,
+      balance: hasExplicitBalance ? Number(rawBalance) : null,
+      dueDate: customer.dueDate || customer.vencimiento || null,
+      paymentStatus: status || null,
+      billingAuthoritative: billingRecords.length === 1,
+      billingAmbiguous: billingRecords.length !== 1 || /descuento|ajuste|revisar|inconsisten/i.test(adjustmentText),
+    };
+  }
+  const billingCustomers = Array.isArray(state?.billingCustomers) ? state.billingCustomers : [];
+  const regularCustomers = Array.isArray(state?.customers) ? state.customers : [];
+  for (const collection of [billingCustomers, regularCustomers]) {
+    for (const customer of collection) {
     const candidate = normalizeComparablePhone(customer.phone || customer.whatsapp || customer.telefono || "");
     if (wanted && candidate && wanted === candidate) {
+      const rawBalance = customer.amount ?? customer.saldo ?? customer.deuda;
+      const hasExplicitBalance = rawBalance !== null && rawBalance !== undefined && String(rawBalance).trim() !== "" && Number.isFinite(Number(rawBalance));
+      const status = String(customer.status || "").trim();
+      const adjustmentText = [customer.notes, customer.note, customer.observations, customer.adjustment, customer.discount, status].filter(Boolean).join(" ");
       return {
         id: String(customer.id || customer.rut || customer.name || ""),
         name: customer.name || customer.client || fallbackName || null,
         address: customer.address || customer.direccion || null,
-        balance: customer.amount ?? customer.saldo ?? customer.deuda ?? null,
+        balance: hasExplicitBalance ? Number(rawBalance) : null,
         dueDate: customer.dueDate || customer.vencimiento || null,
-        paymentStatus: customer.status || null,
+        paymentStatus: status || null,
+        billingAuthoritative: false,
+        billingAmbiguous: /descuento|ajuste|revisar|inconsisten/i.test(adjustmentText),
       };
     }
+    }
   }
-  return { id: null, name: fallbackName || null, address: null, balance: null, dueDate: null, paymentStatus: null };
+  return { id: null, name: fallbackName || null, address: null, balance: null, dueDate: null, paymentStatus: null, billingAuthoritative: false, billingAmbiguous: false };
 }
 
 async function ensureWhatsAppBotTables(env) {
@@ -828,7 +878,7 @@ function missingInstallationFields(lead) {
 const BOT_SYSTEM_PROMPT = `Eres el asistente de WhatsApp de BPGO, un proveedor de internet/TV cable en Chile. Respondes en español, tono cercano y breve (2-4 frases, sin inventar información que no tengas).
 
 Reglas duras, nunca las rompas:
-- NUNCA confirmes ni marques un pago como "recibido" o "verificado" en el sistema. Si el cliente dice que pagó o envía un comprobante (imagen o PDF, en cualquier formato de banco/app, no todos se ven iguales), solo agradece la recepción y explica que el equipo lo va a revisar (usa la acción "payment_ack"). Si en la imagen del comprobante puedes leer CLARAMENTE el monto pagado y la fecha del pago, ponlos en "extracted_amount" (solo el número, sin $ ni puntos) y "extracted_date" (como aparezca, ej. "15-09-2026"). Si no los ves con certeza, déjalos vacíos: nunca inventes un monto o fecha.
+- NUNCA confirmes ni marques un pago como "recibido" o "verificado" en el sistema. Una imagen cualquiera NO es un comprobante. Usa "payment_ack" solo si el texto/caption dice explícitamente que pagó/envía comprobante, o si el adjunto muestra claramente un comprobante bancario y puedes enumerar al menos 3 señales reales en receipt_evidence (por ejemplo: título de comprobante, banco, monto, fecha/hora, cuentas, destinatario o número de operación). Una foto de router, perfil, catálogo u otra imagen es general/técnica, nunca pago. Si sí es comprobante, solo agradece y explica que el equipo lo revisará. Nunca inventes monto, fecha ni evidencia.
 - Si el cliente pide el link/enlace para pagar, pregunta dónde pagar, cómo pagar online o quiere pagar su plan, responde directamente con el único portal oficial: https://bpgo.cl/pagar. No escales este caso ni inventes otro enlace.
 - Si el cliente pregunta cuánto debe, cuándo vence su pago, o el estado de su cuenta: usa EXCLUSIVAMENTE el dato de "Cliente identificado" (saldo/vencimiento) que te doy abajo, con la acción "reply". Nunca inventes un monto o fecha. Si ese dato no está disponible o el cliente no fue identificado, dilo claramente y usa "escalate".
 - "billing_review_request" (Descuento por corte) es SOLO para cuando el cliente pide explícitamente el descuento/ajuste, o pregunta directamente cuánto le van a cobrar o descontar por los días sin servicio (ej. "me van a descontar esos días?", "cuánto tengo que pagar si estuve sin internet", "quiero que me hagan un descuento"). Si el cliente SOLO está reportando la falla y respondiendo tu diagnóstico técnico (aunque mencione hace cuántos días o desde qué hora no tiene servicio), eso NO es un pedido de descuento -- sigue el flujo de diagnóstico técnico normal de más abajo, NO uses "billing_review_request" solo porque haya un número de días de por medio. Cuando sí corresponda billing_review_request: NUNCA calcules ni menciones ningún monto, descuento o total ajustado, bajo ninguna circunstancia. Eso solo lo decide un humano. Usa "reply" para preguntar cuántos días exactos estuvo sin servicio si no te lo ha dicho, y cuando lo tengas usa la acción "billing_review_request" con "days_without_service" (número) y un resumen en "reason" — nunca en "text" va un monto.
@@ -840,8 +890,37 @@ Reglas duras, nunca las rompas:
 Debes responder SIEMPRE llamando a la herramienta bpgo_bot_action con una única acción.`;
 
 function formatCurrency(value) {
+  if (value === null || value === undefined || String(value).trim() === "") return null;
   const amount = Number(value);
   return Number.isFinite(amount) ? `$${amount.toLocaleString("es-CL")}` : null;
+}
+
+const BILLING_REVIEW_REPLY = "Voy a dejar esta consulta para revisión del equipo antes de confirmarte el monto.";
+
+function isBalanceQuestion(value) {
+  const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ");
+  return /\b(saldo|deuda|estado de (mi )?cuenta|cuanto (debo|pago|tengo que pagar)|que tengo que pagar)\b/.test(text);
+}
+
+function authoritativeBalanceAction(customer) {
+  if (!customer?.id || !customer.billingAuthoritative || customer.billingAmbiguous) {
+    return { action: "escalate", text: BILLING_REVIEW_REPLY, reason: "billing_balance_not_authoritative" };
+  }
+  const amount = customer.balance;
+  const status = String(customer.paymentStatus || "").trim();
+  if (!Number.isFinite(amount) || amount < 0 || !status) {
+    return { action: "escalate", text: BILLING_REVIEW_REPLY, reason: "billing_balance_missing_or_ambiguous" };
+  }
+  if (amount === 0) {
+    if (!/^(pagado|sin deuda|al d[ií]a)$/i.test(status)) {
+      return { action: "escalate", text: BILLING_REVIEW_REPLY, reason: "billing_zero_not_confirmed" };
+    }
+    return { action: "reply", text: "Tu registro vigente figura pagado y sin deuda pendiente." };
+  }
+  if (!/^(pendiente|vencido|suspendido)$/i.test(status)) {
+    return { action: "escalate", text: BILLING_REVIEW_REPLY, reason: "billing_status_inconsistent" };
+  }
+  return { action: "reply", text: `Tu saldo pendiente registrado es de ${formatCurrency(amount)}.` };
 }
 
 const PAYMENT_PORTAL_REPLY = "Puedes pagar tu mensualidad en el portal oficial de BP GO:\nhttps://bpgo.cl/pagar";
@@ -855,13 +934,15 @@ function isPaymentLinkRequest(value) {
 
 async function callBotResponder(env, context, inboundMessage, media) {
   if (isPaymentLinkRequest(inboundMessage?.text)) return { action: "reply", text: PAYMENT_PORTAL_REPLY };
+  if (isBalanceQuestion(inboundMessage?.text)) return authoritativeBalanceAction(context.customer);
   if (!env.OPENAI_API_KEY) return { action: "escalate", reason: "bot_not_configured" };
   let customerLine = "No se pudo identificar al cliente en el sistema por su número.";
   if (context.customer?.name) {
     const balanceText = formatCurrency(context.customer.balance);
     const details = [
       context.customer.address ? `dirección ${context.customer.address}` : null,
-      balanceText ? `saldo pendiente ${balanceText}` : "sin saldo pendiente registrado",
+      context.customer.billingAuthoritative && balanceText ? `saldo registrado ${balanceText}` : "saldo no disponible para confirmación automática",
+      context.customer.paymentStatus ? `estado ${context.customer.paymentStatus}` : null,
       context.customer.dueDate ? `vencimiento ${context.customer.dueDate}` : null,
     ].filter(Boolean).join(", ");
     customerLine = `Cliente identificado: ${context.customer.name} (${details}).`;
@@ -874,7 +955,7 @@ async function callBotResponder(env, context, inboundMessage, media) {
   if (media && media.mimeType.startsWith("image/")) {
     userContent.push({ type: "image_url", image_url: { url: `data:${media.mimeType};base64,${media.base64}` } });
   } else if (media) {
-    mediaNote = "\n\n(El cliente adjuntó un documento, probablemente un comprobante en PDF, que no se puede visualizar aquí.)";
+    mediaNote = "\n\n(El cliente adjuntó un documento que no se puede visualizar aquí. NO asumas que es comprobante; solo trátalo como pago si el texto/caption lo indica explícitamente.)";
   }
   userContent.push({
     type: "text",
@@ -908,6 +989,7 @@ async function callBotResponder(env, context, inboundMessage, media) {
               reason: { type: "string", description: "Motivo de la visita/incidencia/revisión de cobro o de la escalación." },
               extracted_amount: { type: "number", description: "Monto pagado, solo si se lee con certeza en la imagen del comprobante (payment_ack)." },
               extracted_date: { type: "string", description: "Fecha del pago, solo si se lee con certeza en la imagen del comprobante (payment_ack)." },
+              receipt_evidence: { type: "array", items: { type: "string", enum: ["receipt_title", "bank", "amount", "date_time", "origin_account", "destination_account", "recipient", "transaction_id"] }, description: "Señales visibles reales del comprobante. Mínimo 3 para payment_ack sin texto explícito." },
               days_without_service: { type: "number", description: "Cantidad de días que el cliente dijo haber estado sin servicio (billing_review_request)." },
             },
             required: ["action"],
@@ -992,6 +1074,19 @@ async function executeBotAction(env, credentials, phone, action, message) {
     const caseRow = message.messageId ? await env.DB.prepare(
       "SELECT id, reported_name FROM whatsapp_automation_cases WHERE source_message_id = ?"
     ).bind(message.messageId).first() : null;
+    if (!hasStrongReceiptEvidence(action, message)) {
+      if (caseRow) {
+        await env.DB.prepare(`UPDATE whatsapp_automation_cases SET case_type='general', confidence=35,
+          summary='Imagen o documento recibido sin evidencia suficiente de pago.', amount=NULL, service_month=NULL,
+          updated_at=datetime('now') WHERE id=?`).bind(caseRow.id).run();
+      }
+      await sendBotReply(env, credentials, phone, "Recibí la imagen. ¿En qué podemos ayudarte con ella?", preferAudio);
+      return;
+    }
+    if (caseRow) {
+      await env.DB.prepare(`UPDATE whatsapp_automation_cases SET case_type='payment', confidence=96,
+        summary='Comprobante de pago recibido para validación.', updated_at=datetime('now') WHERE id=?`).bind(caseRow.id).run();
+    }
     if (caseRow && (Number.isFinite(Number(action.extracted_amount)) || action.extracted_date)) {
       await env.DB.prepare(`UPDATE whatsapp_automation_cases SET
         amount = COALESCE(?, amount), service_month = COALESCE(?, service_month), updated_at = datetime('now')
@@ -1179,7 +1274,7 @@ async function runBotForInboundMessages(env, changes) {
           continue;
         }
         const preferAudio = message.type === "audio";
-        let text = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || null;
+        let text = inboundMessageText(message);
         if (preferAudio && message.audio?.id) {
           text = await transcribeWhatsAppAudio(env, credentials, message.audio.id).catch(() => null);
           if (text) {
@@ -1316,7 +1411,10 @@ async function runBotForInboundMessages(env, changes) {
         if (mediaId) media = await fetchWhatsAppMediaBase64(credentials, mediaId).catch(() => null);
         const context = await buildBotContext(env, phone, name);
         const action = await callBotResponder(env, context, { type: message.type || "unknown", text }, media);
-        await executeBotAction(env, credentials, phone, action, { customerName: name, messageId: message.id, preferAudio, customerText: text });
+        await executeBotAction(env, credentials, phone, action, {
+          customerName: name, messageId: message.id, preferAudio, customerText: text,
+          mediaId, mediaType: message.type || "unknown",
+        });
       } catch {
         await setBotSessionMode(env, phone, "human", "bot_exception").catch(() => null);
       }
@@ -1346,7 +1444,7 @@ async function saveInboundWhatsAppMessages(env, changes) {
     const value = change.value || {};
     const name = value.contacts?.[0]?.profile?.name || null;
     for (const message of (Array.isArray(value.messages) ? value.messages : [])) {
-      const text = message.text?.body || message.button?.text || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || null;
+      const text = inboundMessageText(message);
       const mediaId = message.image?.id || message.document?.id || message.audio?.id || message.video?.id || null;
       await env.DB.prepare(`INSERT OR IGNORE INTO whatsapp_inbox_messages
         (message_id, phone, customer_name, direction, message_type, message_text, media_id, created_at, raw_json)
@@ -1370,6 +1468,61 @@ async function saveInboundWhatsAppMessages(env, changes) {
     }
   }
   return saved;
+}
+
+function extractWhatsAppMessageEchoes(changes) {
+  const echoes = [];
+  for (const change of changes) {
+    const value = change.value || {};
+    const candidates = [value.message_echoes, value.smb_message_echoes];
+    if (change.field === "smb_message_echoes") candidates.push(value.messages, value.data);
+    // Algunos payloads de coexistencia llegan bajo "messages", pero el mensaje saliente incluye
+    // destinatario (to); un inbound normal solo trae from.
+    if (Array.isArray(value.messages)) candidates.push(value.messages.filter((message) => message?.to));
+    for (const list of candidates) if (Array.isArray(list)) echoes.push(...list);
+  }
+  return Array.from(new Map(echoes.filter((item) => item?.id).map((item) => [item.id, item])).values());
+}
+
+async function isKnownApiOutboundMessage(env, messageId) {
+  await ensureWhatsAppInboxTable(env);
+  await ensureWhatsAppStatusTable(env);
+  await ensureStaffNotificationsLogTable(env);
+  const inbox = await env.DB.prepare("SELECT 1 AS found FROM whatsapp_inbox_messages WHERE message_id=? AND direction='outbound'").bind(messageId).first();
+  if (inbox) return true;
+  const status = await env.DB.prepare("SELECT 1 AS found FROM whatsapp_message_status WHERE message_id=?").bind(messageId).first();
+  if (status) return true;
+  const staff = await env.DB.prepare("SELECT 1 AS found FROM staff_notifications_log WHERE message_id=? OR fallback_message_id=?").bind(messageId, messageId).first();
+  if (staff) return true;
+  return false;
+}
+
+async function saveManualWhatsAppEchoes(env, changes) {
+  const echoes = extractWhatsAppMessageEchoes(changes);
+  let saved = 0;
+  for (const message of echoes) {
+    if (await isKnownApiOutboundMessage(env, message.id)) continue;
+    const phone = normalizeWhatsAppPhone(message.to || message.recipient_id);
+    if (!phone) continue;
+    const text = inboundMessageText(message);
+    const mediaId = message.image?.id || message.document?.id || message.audio?.id || message.video?.id || null;
+    await ensureWhatsAppInboxTable(env);
+    await env.DB.prepare(`INSERT OR IGNORE INTO whatsapp_inbox_messages
+      (message_id, phone, direction, message_type, message_text, media_id, created_at, raw_json)
+      VALUES (?, ?, 'outbound', ?, ?, ?, ?, ?)`)
+      .bind(message.id, phone, message.type || "unknown", text, mediaId,
+        new Date(Number(message.timestamp || 0) * 1000 || Date.now()).toISOString(), JSON.stringify(message)).run();
+    await setBotSessionMode(env, phone, "human", "manual_whatsapp_reply");
+    saved += 1;
+  }
+  return saved;
+}
+
+function inboundOnlyChanges(changes) {
+  return changes.filter((change) => change.field !== "smb_message_echoes").map((change) => ({
+    ...change,
+    value: { ...change.value, messages: Array.isArray(change.value?.messages) ? change.value.messages.filter((message) => !message?.to) : change.value?.messages },
+  }));
 }
 
 async function sendBillingMessages(request, env) {
@@ -1634,10 +1787,12 @@ export default {
           error: item.errors?.[0] || null,
         }).catch(() => null);
       }
-      const messagesSaved = await saveInboundWhatsAppMessages(env, changes).catch(() => 0);
-      const botTask = runBotForInboundMessages(env, changes).catch(() => null);
+      const manualEchoesSaved = await saveManualWhatsAppEchoes(env, changes).catch(() => 0);
+      const inboundChanges = inboundOnlyChanges(changes);
+      const messagesSaved = await saveInboundWhatsAppMessages(env, inboundChanges).catch(() => 0);
+      const botTask = runBotForInboundMessages(env, inboundChanges).catch(() => null);
       if (ctx?.waitUntil) ctx.waitUntil(botTask); else await botTask;
-      return Response.json({ ok: true, received: statuses.length, messagesSaved });
+      return Response.json({ ok: true, received: statuses.length, messagesSaved, manualEchoesSaved });
     }
 
     if (url.pathname === "/api/whatsapp/inbox" && request.method === "GET") {
@@ -1722,6 +1877,9 @@ export default {
       if (!phone || !messageText) return Response.json({ ok: false, error: "Falta teléfono o mensaje." }, { status: 400 });
       const credentials = await getWhatsAppCredentials(env);
       if (!credentials.accessToken || !credentials.phoneNumberId) return Response.json({ ok: false, error: "WhatsApp todavía no está conectado." }, { status: 409 });
+      // La conversación queda en atención humana ANTES de enviar. Así, si entra un mensaje del
+      // cliente mientras Meta procesa la respuesta, el bot no compite con el operador.
+      await setBotSessionMode(env, phone, "human", "manual_reply", session);
       const endpoint = `https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/messages`;
       const metaResponse = await fetch(endpoint, {
         method: "POST",
@@ -1736,7 +1894,6 @@ export default {
         (message_id, phone, direction, message_type, message_text, created_at, raw_json)
         VALUES (?, ?, 'outbound', 'text', ?, ?, ?)`)
         .bind(messageId, phone, messageText, new Date().toISOString(), JSON.stringify(meta)).run();
-      await setBotSessionMode(env, phone, "human", "manual_reply", session);
       return Response.json({ ok: true, messageId });
     }
 

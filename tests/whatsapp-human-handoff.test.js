@@ -14,6 +14,9 @@ assert.match(worker, /if \(await getBotSessionMode\(env, message\.from\) !== "hu
 assert.match(worker, /whatsapp_bot_session_events/);
 assert.match(worker, /setBotSessionMode\(env, phone, mode, mode === "human" \? "manual_takeover" : "manual_reactivated", session\)/);
 assert.match(worker, /setBotSessionMode\(env, phone, "human", "manual_reply", session\)/);
+assert.match(worker, /manual_whatsapp_reply/);
+assert.match(worker, /extractWhatsAppMessageEchoes/);
+assert.match(worker, /isKnownApiOutboundMessage/);
 assert.match(inbox, /Tomar conversación/);
 assert.match(inbox, /Reactivar bot/);
 assert.match(inbox, /data-conversation-mode/);
