@@ -82,10 +82,11 @@
     const content = root.querySelector("[data-ba-content]");
     content.innerHTML = '<div class="ba-empty">Actualizando cobranza…</div>';
     try {
-      const [preview, suspensions, history] = await Promise.all([
+      const [preview, suspensions, history, templates] = await Promise.all([
         api("/api/billing/automation/preview?ts=" + Date.now()),
         api("/api/billing/automation/suspensions?ts=" + Date.now()),
-        api("/api/billing/automation/history?ts=" + Date.now())
+        api("/api/billing/automation/history?ts=" + Date.now()),
+        api("/api/billing/automation/templates?ts=" + Date.now())
       ]);
       const pendingSusp = (suspensions.items || []).filter(function (item) { return item.status === "pending"; });
       const sends = history.items || [];
@@ -102,7 +103,14 @@
           '</div></td></tr>';
       }).join("");
 
+      const templateRows = (templates.templates || []).map(function (item) {
+        const ok = item.status === "APPROVED";
+        const label = ok ? "Aprobada" : item.status === "PENDING_REVIEW" || item.status === "PENDING" ? "Pendiente de Meta" : item.status;
+        return '<article class="ba-kpi"><span>' + escapeHtml(item.stage === "day20" ? "Plantilla día 20" : item.stage === "day22" ? "Plantilla día 22" : "Plantilla día 23") + '</span><strong style="font-size:15px">' + escapeHtml(label || "Sin estado") + '</strong><small>' + escapeHtml(item.name || "") + '</small></article>';
+      }).join("");
+
       content.innerHTML =
+        '<section class="ba-panel"><h2>Plantillas WhatsApp</h2><div class="ba-note">Los envíos automáticos solo se ejecutan cuando la plantilla del día está aprobada por Meta.</div><div class="ba-grid">' + templateRows + '</div></section>' +
         '<div class="ba-grid">' +
           '<article class="ba-kpi"><span>Pendientes actuales</span><strong>' + Number(preview.totals && preview.totals.eligible || 0) + '</strong></article>' +
           '<article class="ba-kpi"><span>Avisos día 20</span><strong>' + day20 + '</strong></article>' +
