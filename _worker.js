@@ -230,6 +230,15 @@ function hasExplicitPaymentIntent(value) {
   return /\b(pagu[eé]|pago|pagado|transferencia|transfer[ií]|dep[oó]sito|comprobante)\b/i.test(String(value || ""));
 }
 
+function isPlausibleAccountName(value) {
+  const name = String(value || "").trim().replace(/\s+/g, " ");
+  if (name.length < 5 || name.length > 120 || /\d|https?:|@/.test(name)) return false;
+  const normalized = name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  if (/^(gracias|listo|si|no|ya|correcto|ese es|esta pagado|ahi esta pagado|ya pague|pagado)(\b|[.!])/i.test(normalized)) return false;
+  const words = name.split(" ").filter(Boolean);
+  return words.length >= 2 && words.length <= 6 && words.every((word) => /^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ'-]{2,}$/.test(word));
+}
+
 function hasStrongReceiptEvidence(action, message) {
   if (hasExplicitPaymentIntent(message.customerText)) return true;
   if (message.mediaType !== "image" || !message.mediaId) return false;
@@ -261,6 +270,7 @@ async function findCustomerForWhatsApp(env, phone, fallbackName) {
     const status = String(customer.status || "").trim();
     const adjustmentText = [customer.notes, customer.note, customer.observations, customer.adjustment, customer.discount, status].filter(Boolean).join(" ");
     return {
+      matchedByPhone: true,
       id: String(customer.id || customer.rut || customer.customerName || ""),
       name: customer.customerName || customer.name || fallbackName || null,
       address: customer.address || customer.direccion || null,
@@ -282,6 +292,7 @@ async function findCustomerForWhatsApp(env, phone, fallbackName) {
       const status = String(customer.status || "").trim();
       const adjustmentText = [customer.notes, customer.note, customer.observations, customer.adjustment, customer.discount, status].filter(Boolean).join(" ");
       return {
+        matchedByPhone: true,
         id: String(customer.id || customer.rut || customer.name || ""),
         name: customer.name || customer.client || fallbackName || null,
         address: customer.address || customer.direccion || null,
@@ -294,7 +305,7 @@ async function findCustomerForWhatsApp(env, phone, fallbackName) {
     }
     }
   }
-  return { id: null, name: fallbackName || null, address: null, balance: null, dueDate: null, paymentStatus: null, billingAuthoritative: false, billingAmbiguous: false };
+  return { matchedByPhone: false, id: null, name: fallbackName || null, address: null, balance: null, dueDate: null, paymentStatus: null, billingAuthoritative: false, billingAmbiguous: false };
 }
 
 async function ensureWhatsAppBotTables(env) {
@@ -875,14 +886,16 @@ function missingInstallationFields(lead) {
   return fields.filter(([, value]) => !String(value || "").trim()).map(([field]) => INSTALLATION_FIELD_LABELS[field]);
 }
 
-const BOT_SYSTEM_PROMPT = `Eres el asistente de WhatsApp de BPGO, un proveedor de internet/TV cable en Chile. Respondes en español, tono cercano y breve (2-4 frases, sin inventar información que no tengas).
+const BOT_SYSTEM_PROMPT = `Eres el asistente de WhatsApp de BPGO, un proveedor de internet/TV cable en Chile. Respondes en español, tono cercano, profesional y chileno neutro. Normalmente usa 1-2 frases y como máximo un emoji cuando aporte.
 
 Reglas duras, nunca las rompas:
+- Usa el historial reciente como una conversación continua. Interpreta respuestas cortas (sí, no, ya, listo, correcto, ese, números, fechas o colores) según la última pregunta de BPGO. No vuelvas a pedir nombre, sector, dirección, plan, problema, días sin servicio, reinicio del router ni titular si ya aparecen en el historial o en Cliente identificado.
+- Responde directamente. No repitas saludos, despedidas ni lo que el cliente acaba de decir. Evita cierres genéricos como "Estoy aquí para ayudarte", "Si tienes más preguntas", "No dudes en contactarnos" o "Quedo atento".
 - NUNCA confirmes ni marques un pago como "recibido" o "verificado" en el sistema. Una imagen cualquiera NO es un comprobante. Usa "payment_ack" solo si el texto/caption dice explícitamente que pagó/envía comprobante, o si el adjunto muestra claramente un comprobante bancario y puedes enumerar al menos 3 señales reales en receipt_evidence (por ejemplo: título de comprobante, banco, monto, fecha/hora, cuentas, destinatario o número de operación). Una foto de router, perfil, catálogo u otra imagen es general/técnica, nunca pago. Si sí es comprobante, solo agradece y explica que el equipo lo revisará. Nunca inventes monto, fecha ni evidencia.
 - Si el cliente pide el link/enlace para pagar, pregunta dónde pagar, cómo pagar online o quiere pagar su plan, responde directamente con el único portal oficial: https://bpgo.cl/pagar. No escales este caso ni inventes otro enlace.
 - Si el cliente pregunta cuánto debe, cuándo vence su pago, o el estado de su cuenta: usa EXCLUSIVAMENTE el dato de "Cliente identificado" (saldo/vencimiento) que te doy abajo, con la acción "reply". Nunca inventes un monto o fecha. Si ese dato no está disponible o el cliente no fue identificado, dilo claramente y usa "escalate".
 - "billing_review_request" (Descuento por corte) es SOLO para cuando el cliente pide explícitamente el descuento/ajuste, o pregunta directamente cuánto le van a cobrar o descontar por los días sin servicio (ej. "me van a descontar esos días?", "cuánto tengo que pagar si estuve sin internet", "quiero que me hagan un descuento"). Si el cliente SOLO está reportando la falla y respondiendo tu diagnóstico técnico (aunque mencione hace cuántos días o desde qué hora no tiene servicio), eso NO es un pedido de descuento -- sigue el flujo de diagnóstico técnico normal de más abajo, NO uses "billing_review_request" solo porque haya un número de días de por medio. Cuando sí corresponda billing_review_request: NUNCA calcules ni menciones ningún monto, descuento o total ajustado, bajo ninguna circunstancia. Eso solo lo decide un humano. Usa "reply" para preguntar cuántos días exactos estuvo sin servicio si no te lo ha dicho, y cuando lo tengas usa la acción "billing_review_request" con "days_without_service" (número) y un resumen en "reason" — nunca en "text" va un monto.
-- Si el cliente reporta una falla técnica (sin internet, lento, intermitente, etc.) y NO pidió una visita ni un descuento todavía, NO uses "visit_request" de inmediato. Primero hace diagnóstico progresivo con la acción "reply", preguntando UNA cosa a la vez (color/estado de la luz del router, si ya reinició el equipo, si afecta a todos los dispositivos o solo uno, hace cuánto/desde cuándo empezó). Sigue así hasta que el cliente confirme que afecta a todos los dispositivos, ya respondió 2-3 preguntas y el problema sigue, o pida explícitamente una visita/técnico. En ese momento usa "visit_request" con un resumen COMPLETO en "reason" -- no una frase corta: incluye todo lo que el cliente contó (color/estado de la luz, si reinició el router y qué pasó, si afecta a todos los dispositivos o solo uno, hace cuánto/desde cuándo, y cualquier otro detalle que haya dado) para que el técnico que llegue a terreno ya sepa qué está pasando sin tener que volver a preguntar (el sistema se encarga por su cuenta de pedir el nombre del titular si hace falta, no necesitas preguntarlo tú). Nunca confirmes un horario exacto, solo di que quedó registrada la solicitud. Este es el flujo normal para "estoy sin internet" -- billing_review_request NUNCA reemplaza este flujo, son cosas distintas (una es mandar un técnico, la otra es un descuento que el cliente pidió aparte).
+- Si el cliente reporta una falla técnica (sin internet, lento, intermitente, etc.) y NO pidió una visita ni un descuento todavía, NO uses "visit_request" de inmediato. Haz diagnóstico progresivo y pregunta UNA sola cosa por respuesta, sin repetir lo ya contestado: primero luz del router, luego reinicio por 2 minutos, después si afecta a todos los dispositivos y finalmente desde cuándo comenzó. Para lentitud, comienza preguntando si ocurre en todos los equipos o solo en uno. Sigue así hasta que el cliente confirme que afecta a todos los dispositivos, ya respondió 2-3 preguntas y el problema sigue, o pida explícitamente una visita/técnico. En ese momento usa "visit_request" con un resumen COMPLETO en "reason" -- no una frase corta: incluye todo lo que el cliente contó (color/estado de la luz, si reinició el router y qué pasó, si afecta a todos los dispositivos o solo uno, hace cuánto/desde cuándo, y cualquier otro detalle que haya dado) para que el técnico que llegue a terreno ya sepa qué está pasando sin tener que volver a preguntar (el sistema se encarga por su cuenta de pedir el nombre del titular si hace falta, no necesitas preguntarlo tú). Nunca confirmes un horario exacto, solo di que quedó registrada la solicitud. Este es el flujo normal para "estoy sin internet" -- billing_review_request NUNCA reemplaza este flujo, son cosas distintas (una es mandar un técnico, la otra es un descuento que el cliente pidió aparte).
 - Reserva la acción "escalate" solo para: el cliente pide explícitamente hablar con una persona, insulta, hace un reclamo grave, o pregunta algo puntual que no sabes con certeza (fuera de las FAQs y de los datos de cliente dados). Si el mensaje es corto, ambiguo, tiene errores de tipeo, o simplemente no lo entiendes (ej. "hol", una palabra suelta, algo cortado), NUNCA escales por eso solo: usa "reply" y pide amablemente que repita o aclare qué necesita. Escala únicamente si ya pediste aclaración y el cliente sigue sin poder comunicar lo que necesita.
 - Si el cliente escribe porque quiere CONTRATAR internet por primera vez (no es cliente ya identificado, o pide un nuevo punto/dirección), usa la acción "new_customer_request" y no digas nada más tú: el sistema se encarga de preguntar el sector, pedir la ubicación, revisar factibilidad con el equipo y mostrar los planes, todo por su cuenta.
 - Para todo lo demás (preguntas frecuentes, saludos, consultas generales que sí puedes responder con las FAQs dadas), usa la acción "reply".
@@ -923,7 +936,7 @@ function authoritativeBalanceAction(customer) {
   return { action: "reply", text: `Tu saldo pendiente registrado es de ${formatCurrency(amount)}.` };
 }
 
-const PAYMENT_PORTAL_REPLY = "Puedes pagar tu mensualidad en el portal oficial de BP GO:\nhttps://bpgo.cl/pagar";
+const PAYMENT_PORTAL_REPLY = "Puedes pagar tu mensualidad acá:\nhttps://bpgo.cl/pagar";
 
 function isPaymentLinkRequest(value) {
   const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
@@ -932,9 +945,16 @@ function isPaymentLinkRequest(value) {
     || /\bpagar\s+(?:el|mi|la)?\s*(?:plan|mensualidad)\b/.test(text);
 }
 
+function briefCourtesyReply(value) {
+  const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z\s]/g, " ").replace(/\s+/g, " ").trim();
+  return /^(gracias|muchas gracias|vale gracias|ok gracias)$/.test(text) ? "De nada 👍" : null;
+}
+
 async function callBotResponder(env, context, inboundMessage, media) {
   if (isPaymentLinkRequest(inboundMessage?.text)) return { action: "reply", text: PAYMENT_PORTAL_REPLY };
   if (isBalanceQuestion(inboundMessage?.text)) return authoritativeBalanceAction(context.customer);
+  const courtesy = briefCourtesyReply(inboundMessage?.text);
+  if (courtesy) return { action: "reply", text: courtesy };
   if (!env.OPENAI_API_KEY) return { action: "escalate", reason: "bot_not_configured" };
   let customerLine = "No se pudo identificar al cliente en el sistema por su número.";
   if (context.customer?.name) {
@@ -1094,7 +1114,9 @@ async function executeBotAction(env, credentials, phone, action, message) {
         .bind(Number.isFinite(Number(action.extracted_amount)) ? Math.round(Number(action.extracted_amount)) : null,
           action.extracted_date || null, caseRow.id).run();
     }
-    const known = caseRow?.reported_name || await getKnownAccountName(env, phone);
+    const matchedCustomer = await findCustomerForWhatsApp(env, phone, message.customerName);
+    const known = caseRow?.reported_name || await getKnownAccountName(env, phone)
+      || (matchedCustomer.matchedByPhone ? matchedCustomer.name : null);
     if (known) {
       if (caseRow && !caseRow.reported_name) {
         await env.DB.prepare("UPDATE whatsapp_automation_cases SET reported_name = ? WHERE id = ?").bind(known, caseRow.id).run();
@@ -1118,9 +1140,10 @@ async function executeBotAction(env, credentials, phone, action, message) {
     // no lo conocíamos ya (ver whatsapp_pending_visits en runBotForInboundMessages) -- nunca se
     // confía en que el modelo lo haya preguntado o lo recuerde, para que esto sea predecible.
     await ensureWhatsAppBotTables(env);
-    const known = await getKnownAccountName(env, phone);
+    const matchedCustomer = await findCustomerForWhatsApp(env, phone, message.customerName);
+    const known = await getKnownAccountName(env, phone) || (matchedCustomer.matchedByPhone ? matchedCustomer.name : null);
     if (known) {
-      const customer = await findCustomerForWhatsApp(env, phone, message.customerName);
+      const customer = matchedCustomer;
       const transcript = await buildRecentTranscript(env, phone);
       const visitRow = await env.DB.prepare(`INSERT INTO whatsapp_visit_requests (phone, customer_id, customer_name, reported_name, preferred_date, reason, status, created_at, transcript)
         VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'), ?) RETURNING id`)
@@ -1142,9 +1165,10 @@ async function executeBotAction(env, credentials, phone, action, message) {
     // los días sin servicio y el nombre del titular para que un humano calcule el ajuste.
     await ensureWhatsAppBotTables(env);
     const days = Number.isFinite(Number(action.days_without_service)) ? Math.round(Number(action.days_without_service)) : null;
-    const known = await getKnownAccountName(env, phone);
+    const matchedCustomer = await findCustomerForWhatsApp(env, phone, message.customerName);
+    const known = await getKnownAccountName(env, phone) || (matchedCustomer.matchedByPhone ? matchedCustomer.name : null);
     if (known) {
-      const customer = await findCustomerForWhatsApp(env, phone, message.customerName);
+      const customer = matchedCustomer;
       const transcript = await buildRecentTranscript(env, phone);
       const billingRow = await env.DB.prepare(`INSERT INTO whatsapp_billing_requests (phone, customer_id, customer_name, reported_name, days_without_service, reason, status, created_at, transcript)
         VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'), ?) RETURNING id`)
@@ -1363,6 +1387,10 @@ async function runBotForInboundMessages(env, changes) {
           // Estábamos esperando el nombre del titular para completar una visita/incidencia
           // pendiente: se captura en código, sin pasar por la IA (más confiable y más barato).
           const reportedName = String(text).trim().slice(0, 200);
+          if (!isPlausibleAccountName(reportedName)) {
+            await sendBotReply(env, credentials, phone, "Necesito el nombre del titular del servicio, por ejemplo: Juan Pérez.", preferAudio);
+            continue;
+          }
           const customer = await findCustomerForWhatsApp(env, phone, reportedName);
           const transcript = await buildRecentTranscript(env, phone);
           const visitRow = await env.DB.prepare(`INSERT INTO whatsapp_visit_requests (phone, customer_id, customer_name, reported_name, preferred_date, reason, status, created_at, transcript)
@@ -1379,6 +1407,10 @@ async function runBotForInboundMessages(env, changes) {
           // Mismo mecanismo determinístico que las visitas: el próximo mensaje del cliente se
           // toma como el nombre del titular para el comprobante que ya quedó registrado.
           const reportedName = String(text).trim().slice(0, 200);
+          if (!isPlausibleAccountName(reportedName)) {
+            await sendBotReply(env, credentials, phone, "Necesito el nombre del titular del servicio, por ejemplo: Juan Pérez.", preferAudio);
+            continue;
+          }
           if (pendingPayment.case_id) {
             await ensureWhatsAppAutomationTable(env);
             await env.DB.prepare("UPDATE whatsapp_automation_cases SET reported_name = ?, updated_at = datetime('now') WHERE id = ?")
@@ -1395,6 +1427,10 @@ async function runBotForInboundMessages(env, changes) {
           // Mismo mecanismo: el nombre del titular se captura del próximo mensaje, nunca se le
           // pide al modelo que calcule ni mencione un monto de descuento.
           const reportedName = String(text).trim().slice(0, 200);
+          if (!isPlausibleAccountName(reportedName)) {
+            await sendBotReply(env, credentials, phone, "Necesito el nombre del titular del servicio, por ejemplo: Juan Pérez.", preferAudio);
+            continue;
+          }
           const customer = await findCustomerForWhatsApp(env, phone, reportedName);
           const transcript = await buildRecentTranscript(env, phone);
           const billingRow = await env.DB.prepare(`INSERT INTO whatsapp_billing_requests (phone, customer_id, customer_name, reported_name, days_without_service, reason, status, created_at, transcript)
