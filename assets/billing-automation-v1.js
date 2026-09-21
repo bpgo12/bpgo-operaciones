@@ -2,174 +2,128 @@
   "use strict";
 
   const TOKEN_KEY = "bpgo-operaciones-auth-token";
-  let active = false;
 
-  function authHeaders(extra) {
-    const token = sessionStorage.getItem(TOKEN_KEY) || "";
-    return Object.assign({ authorization: "Bearer " + token }, extra || {});
-  }
-
-  function escapeHtml(value) {
-    return String(value == null ? "" : value).replace(/[&<>"']/g, function (char) {
-      return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" })[char];
-    });
+  function authHeaders(json) {
+    const headers = new Headers(json ? { "content-type": "application/json" } : {});
+    const token = sessionStorage.getItem(TOKEN_KEY);
+    if (token) headers.set("authorization", "Bearer " + token);
+    return headers;
   }
 
   function money(value) {
-    return "$" + Number(value || 0).toLocaleString("es-CL");
+    return Number.isFinite(Number(value)) ? "$" + Number(value).toLocaleString("es-CL") : "—";
   }
 
-  function ensureStyles() {
-    if (document.getElementById("billing-automation-v1-style")) return;
-    const style = document.createElement("style");
-    style.id = "billing-automation-v1-style";
-    style.textContent = `
-      #billing-automation-overlay{position:fixed;inset:0 0 0 260px;background:#f6f7f9;z-index:60;overflow:auto;padding:28px}
-      #billing-automation-overlay[hidden]{display:none}
-      .ba-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:20px}
-      .ba-head h1{margin:3px 0 6px}.ba-head p{margin:0;color:#667085}
-      .ba-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:18px}
-      .ba-kpi,.ba-panel{background:#fff;border:1px solid #e4e7ec;border-radius:14px;padding:16px}
-      .ba-kpi span{display:block;color:#667085;font-size:13px}.ba-kpi strong{display:block;font-size:26px;margin-top:5px}
-      .ba-panel{margin-bottom:18px}.ba-panel h2{margin:0 0 12px;font-size:18px}
-      .ba-table-wrap{overflow:auto}.ba-table{width:100%;border-collapse:collapse;min-width:860px}
-      .ba-table th,.ba-table td{padding:10px 8px;border-bottom:1px solid #eef0f2;text-align:left;font-size:13px}
-      .ba-table th{color:#667085;font-weight:600}.ba-badge{display:inline-flex;padding:4px 8px;border-radius:999px;background:#f2f4f7;font-size:12px}
-      .ba-badge.pending{background:#fff4e5}.ba-badge.suspended{background:#fee4e2}.ba-badge.paid{background:#ecfdf3}
-      .ba-actions{display:flex;gap:6px;flex-wrap:wrap}.ba-btn{border:1px solid #d0d5dd;background:#fff;border-radius:8px;padding:7px 10px;cursor:pointer}
-      .ba-btn.primary{background:#101828;color:#fff;border-color:#101828}.ba-empty{padding:24px;text-align:center;color:#667085}
-      .ba-note{padding:12px 14px;border-radius:10px;background:#f9fafb;color:#475467;font-size:13px;margin-bottom:14px}
-      @media(max-width:900px){#billing-automation-overlay{inset:0;padding:18px}.ba-grid{grid-template-columns:repeat(2,1fr)}}
-    `;
-    document.head.appendChild(style);
+  function templateLabel(status) {
+    return status === "APPROVED" ? "Aprobada" : status === "PENDING" ? "Pendiente de Meta" : status === "REJECTED" ? "Rechazada" : "No encontrada";
   }
 
-  function ensureNav() {
-    const nav = document.querySelector(".sidebar .nav");
-    if (!nav || nav.querySelector("[data-billing-automation-nav]")) return;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.dataset.billingAutomationNav = "true";
-    button.textContent = "Cobranza automática";
-    const billing = Array.from(nav.querySelectorAll("button")).find(function (item) {
-      return /cobranza/i.test(item.textContent || "") && !item.dataset.billingAutomationNav;
-    });
-    if (billing && billing.nextSibling) nav.insertBefore(button, billing.nextSibling); else nav.appendChild(button);
-  }
-
-  function overlay() {
-    let root = document.getElementById("billing-automation-overlay");
-    if (root) return root;
-    root = document.createElement("div");
-    root.id = "billing-automation-overlay";
-    root.hidden = true;
-    root.innerHTML = '<div class="ba-head"><div><small>COBRANZA</small><h1>Cobranza automática</h1><p>Días 20, 22 y 23 · sincronizada con el estado actual de cobranza.</p></div><div class="ba-actions"><button class="ba-btn" data-ba-refresh>Actualizar</button><button class="ba-btn" data-ba-close>Cerrar</button></div></div><div data-ba-content><div class="ba-empty">Cargando…</div></div>';
-    document.body.appendChild(root);
-    return root;
+  function countStage(data, stage) {
+    return (data.sends || []).filter(function (item) {
+      return item.stage === stage && ["accepted", "sent", "delivered", "read"].includes(item.status);
+    }).reduce(function (sum, item) { return sum + Number(item.count || 0); }, 0);
   }
 
   async function api(path, options) {
-    const response = await fetch(path, Object.assign({ cache: "no-store" }, options || {}, {
-      headers: authHeaders((options && options.headers) || {})
-    }));
-    const data = await response.json().catch(function () { return {}; });
-    if (!response.ok) throw new Error(data.error || "No se pudo cargar la información.");
-    return data;
+    const init = Object.assign({}, options || {});
+    init.headers = authHeaders(Boolean(init.body));
+    const response = await fetch(path, init);
+    const payload = await response.json().catch(function () { return {}; });
+    if (!response.ok) throw new Error(payload.error || "No se pudo completar la operación.");
+    return payload;
   }
 
-  async function load() {
-    const root = overlay();
-    const content = root.querySelector("[data-ba-content]");
-    content.innerHTML = '<div class="ba-empty">Actualizando cobranza…</div>';
-    try {
-      const [preview, suspensions, history, templates] = await Promise.all([
-        api("/api/billing/automation/preview?ts=" + Date.now()),
-        api("/api/billing/automation/suspensions?ts=" + Date.now()),
-        api("/api/billing/automation/history?ts=" + Date.now()),
-        api("/api/billing/automation/templates?ts=" + Date.now())
-      ]);
-      const pendingSusp = (suspensions.items || []).filter(function (item) { return item.status === "pending"; });
-      const sends = history.items || [];
-      const day20 = sends.filter(function (item) { return item.stage === "day20" && item.status !== "failed"; }).length;
-      const day22 = sends.filter(function (item) { return item.stage === "day22" && item.status !== "failed"; }).length;
-      const day23 = sends.filter(function (item) { return item.stage === "day23" && item.status !== "failed"; }).length;
-
-      const rows = (suspensions.items || []).map(function (item) {
-        return '<tr><td><strong>' + escapeHtml(item.customer_name || "Sin nombre") + '</strong><br><small>' + escapeHtml(item.phone || "") + '</small></td>' +
-          '<td>' + escapeHtml(item.sector || "—") + '</td><td>' + escapeHtml(item.plan || "—") + '</td><td>' + money(item.amount) + '</td>' +
-          '<td><span class="ba-badge ' + escapeHtml(item.status) + '">' + escapeHtml(item.status === "pending" ? "Pendiente de suspensión" : item.status === "suspended" ? "Suspendido" : item.status === "paid" ? "Pagado" : "Descartado") + '</span></td>' +
-          '<td><div class="ba-actions">' +
-          (item.status === "pending" ? '<button class="ba-btn primary" data-ba-status="suspended" data-id="' + item.id + '">Marcar suspendido</button><button class="ba-btn" data-ba-status="paid" data-id="' + item.id + '">Ya pagó</button><button class="ba-btn" data-ba-status="dismissed" data-id="' + item.id + '">Descartar</button>' : '') +
+  function render(panel, data) {
+    panel.querySelector(".billing-auto-content").innerHTML =
+      '<div class="billing-auto-head"><div><p class="eyebrow">Automatización segura</p><h2>Cobranza automática</h2>' +
+      '<p class="muted">Revalida Google Sheets antes de cada envío. Días 20, 22 y 23 (hora de Chile).</p></div>' +
+      '<button class="btn billing-auto-refresh" type="button">Actualizar</button></div>' +
+      '<div class="billing-auto-kpis">' +
+      '<span><strong>' + (data.pending == null ? "—" : data.pending) + '</strong>Pendientes actuales</span>' +
+      '<span><strong>' + countStage(data, "day20") + '</strong>Enviados día 20</span>' +
+      '<span><strong>' + countStage(data, "day22") + '</strong>Enviados día 22</span>' +
+      '<span><strong>' + countStage(data, "day23") + '</strong>Enviados día 23</span>' +
+      '<span><strong>' + (data.excluded == null ? "—" : data.excluded) + '</strong>Excluidos</span>' +
+      '<span><strong>' + data.queuePending + '</strong>Pendientes suspensión</span>' +
+      '<span><strong>' + money(data.pendingAmount) + '</strong>Monto pendiente</span>' +
+      '</div>' +
+      (data.sourceFresh ? "" : '<div class="notice danger">Google Sheets no respondió. No se autorizarán envíos automáticos.</div>') +
+      '<h3>Estado de plantillas Meta</h3><div class="billing-auto-templates">' +
+      (data.templates || []).map(function (item) {
+        return '<div><code>' + item.name + '</code><span class="pill ' + (item.status === "APPROVED" ? "done" : item.status === "REJECTED" ? "high" : "review") + '">' + templateLabel(item.status) + '</span>' +
+          (item.rejectedReason ? '<small>' + item.rejectedReason + '</small>' : "") + '</div>';
+      }).join("") + '</div>' +
+      '<details class="billing-auto-test"><summary>Modo prueba</summary><div class="billing-auto-test-row">' +
+      '<select aria-label="Etapa de prueba"><option value="day20">Día 20</option><option value="day22">Día 22</option><option value="day23">Día 23</option></select>' +
+      '<input aria-label="Teléfono de prueba" placeholder="56912345678" inputmode="numeric">' +
+      '<button class="btn secondary billing-auto-test-send" type="button">Enviar prueba</button></div>' +
+      '<small>Solo envía al teléfono indicado y registra el envío como prueba.</small></details>' +
+      '<h3>Clientes pendientes de suspensión</h3>' +
+      '<div class="table-wrap"><table><thead><tr><th>Cliente</th><th>Teléfono</th><th>Sector</th><th>Plan</th><th>Monto</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>' +
+      (data.queue || []).map(function (item) {
+        return '<tr data-id="' + item.id + '"><td>' + (item.customer_name || "Sin nombre") + '</td><td>' + item.phone + '</td><td>' + (item.sector || "—") + '</td><td>' + (item.plan || "—") + '</td><td>' + money(item.amount) + '</td><td>' + item.status + '</td><td><div class="actions">' +
+          '<button class="btn small billing-queue-action" data-status="suspended" type="button">Marcar suspendido</button>' +
+          '<button class="btn small secondary billing-queue-action" data-status="paid" type="button">Ya pagó</button>' +
+          '<button class="btn small secondary billing-queue-action" data-status="dismissed" type="button">Descartar</button>' +
+          '<a class="btn small secondary" target="_blank" rel="noreferrer" href="https://wa.me/' + item.phone + '">Abrir WhatsApp</a>' +
           '</div></td></tr>';
-      }).join("");
+      }).join("") + ((data.queue || []).length ? "" : '<tr><td colspan="7">No hay clientes en la lista del mes.</td></tr>') +
+      '</tbody></table></div><div class="billing-auto-message" aria-live="polite"></div>';
+  }
 
-      const templateRows = (templates.templates || []).map(function (item) {
-        const ok = item.status === "APPROVED";
-        const label = ok ? "Aprobada" : item.status === "PENDING_REVIEW" || item.status === "PENDING" ? "Pendiente de Meta" : item.status;
-        return '<article class="ba-kpi"><span>' + escapeHtml(item.stage === "day20" ? "Plantilla día 20" : item.stage === "day22" ? "Plantilla día 22" : "Plantilla día 23") + '</span><strong style="font-size:15px">' + escapeHtml(label || "Sin estado") + '</strong><small>' + escapeHtml(item.name || "") + '</small></article>';
-      }).join("");
-
-      content.innerHTML =
-        '<section class="ba-panel"><h2>Plantillas WhatsApp</h2><div class="ba-note">Los envíos automáticos solo se ejecutan cuando la plantilla del día está aprobada por Meta.</div><div class="ba-grid">' + templateRows + '</div></section>' +
-        '<div class="ba-grid">' +
-          '<article class="ba-kpi"><span>Pendientes actuales</span><strong>' + Number(preview.totals && preview.totals.eligible || 0) + '</strong></article>' +
-          '<article class="ba-kpi"><span>Avisos día 20</span><strong>' + day20 + '</strong></article>' +
-          '<article class="ba-kpi"><span>Avisos día 22</span><strong>' + day22 + '</strong></article>' +
-          '<article class="ba-kpi"><span>Pendientes suspensión</span><strong>' + pendingSusp.length + '</strong></article>' +
-        '</div>' +
-        '<section class="ba-panel"><h2>Estado de automatización</h2><div class="ba-note">Cada ejecución vuelve a revisar el estado actual. Pagados, cortados, suspendidos, monto $0 y comprobantes pendientes quedan fuera del envío. Día 23 no suspende automáticamente: prepara esta lista para revisión humana.</div>' +
-          '<div class="ba-grid"><article class="ba-kpi"><span>Registros del mes</span><strong>' + Number(preview.totals && preview.totals.records || 0) + '</strong></article><article class="ba-kpi"><span>Elegibles ahora</span><strong>' + Number(preview.totals && preview.totals.eligible || 0) + '</strong></article><article class="ba-kpi"><span>Excluidos</span><strong>' + Number(preview.totals && preview.totals.excluded || 0) + '</strong></article><article class="ba-kpi"><span>Avisos día 23</span><strong>' + day23 + '</strong></article></div></section>' +
-        '<section class="ba-panel"><h2>Lista de clientes para suspensión</h2>' +
-          (rows ? '<div class="ba-table-wrap"><table class="ba-table"><thead><tr><th>Cliente</th><th>Sector</th><th>Plan</th><th>Monto</th><th>Estado</th><th>Acciones</th></tr></thead><tbody>' + rows + '</tbody></table></div>' : '<div class="ba-empty">Todavía no existe lista de suspensión para este mes.</div>') +
-        '</section>';
+  async function load(panel, syncTemplates) {
+    const message = panel.querySelector(".billing-auto-message");
+    try {
+      panel.classList.add("loading");
+      if (syncTemplates) await api("/api/billing/automation/templates", { method: "POST", body: "{}" });
+      const data = await api("/api/billing/automation", { cache: "no-store" });
+      render(panel, data);
     } catch (error) {
-      content.innerHTML = '<div class="ba-empty">' + escapeHtml(error.message || "No se pudo cargar la cobranza automática.") + '</div>';
+      if (message) message.textContent = error.message;
+      else panel.querySelector(".billing-auto-content").innerHTML = '<div class="notice danger">' + error.message + '</div>';
+    } finally {
+      panel.classList.remove("loading");
     }
   }
 
-  function activate() {
-    active = true;
-    ensureStyles();
-    const root = overlay();
-    root.hidden = false;
-    load();
-  }
-
-  function close() {
-    active = false;
-    const root = document.getElementById("billing-automation-overlay");
-    if (root) root.hidden = true;
-  }
-
-  document.addEventListener("click", async function (event) {
-    if (event.target.closest("[data-billing-automation-nav]")) { event.preventDefault(); activate(); return; }
-    if (event.target.closest("[data-ba-close]")) { close(); return; }
-    if (event.target.closest("[data-ba-refresh]")) { load(); return; }
-    const statusButton = event.target.closest("[data-ba-status]");
-    if (statusButton) {
-      statusButton.disabled = true;
-      try {
-        await api("/api/billing/automation/suspensions", {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ id: Number(statusButton.dataset.id), status: statusButton.dataset.baStatus })
-        });
-        await load();
-      } catch (error) {
-        window.alert(error.message || "No se pudo actualizar.");
-        statusButton.disabled = false;
+  function install() {
+    if (document.getElementById("billing-automation-panel")) return;
+    const heading = Array.from(document.querySelectorAll("h1,h2")).find(function (item) { return item.textContent.trim() === "Pagos pendientes"; });
+    if (!heading) return;
+    const anchor = heading.closest("section") || heading.parentElement;
+    const panel = document.createElement("section");
+    panel.id = "billing-automation-panel";
+    panel.className = "panel billing-automation-panel";
+    panel.innerHTML = '<div class="billing-auto-content"><p>Cargando cobranza automática…</p></div>';
+    anchor.insertAdjacentElement("afterend", panel);
+    panel.addEventListener("click", async function (event) {
+      const refresh = event.target.closest(".billing-auto-refresh");
+      if (refresh) return load(panel, true);
+      const action = event.target.closest(".billing-queue-action");
+      if (action) {
+        const row = action.closest("tr");
+        try {
+          await api("/api/billing/automation/queue", { method: "PATCH", body: JSON.stringify({ id: Number(row.dataset.id), status: action.dataset.status }) });
+          await load(panel, false);
+        } catch (error) { window.alert(error.message); }
+        return;
       }
-    }
-    const normalNav = event.target.closest(".sidebar .nav button:not([data-billing-automation-nav])");
-    if (normalNav && active) close();
-  }, true);
-
-  function scan() {
-    ensureStyles();
-    ensureNav();
+      const test = event.target.closest(".billing-auto-test-send");
+      if (test) {
+        const container = test.closest(".billing-auto-test");
+        const stage = container.querySelector("select").value;
+        const phone = container.querySelector("input").value.trim();
+        if (!window.confirm("Enviar SOLO una prueba " + stage + " al teléfono " + phone + "? No se enviará a la cartera.")) return;
+        try {
+          const result = await api("/api/billing/automation/test", { method: "POST", body: JSON.stringify({ stage: stage, phone: phone }) });
+          window.alert(result.ok ? "Prueba aceptada por Meta." : "Meta rechazó la prueba.");
+        } catch (error) { window.alert(error.message); }
+      }
+    });
+    load(panel, false);
   }
 
-  new MutationObserver(scan).observe(document.documentElement, { childList: true, subtree: true });
-  document.addEventListener("DOMContentLoaded", scan);
-  scan();
+  new MutationObserver(install).observe(document.documentElement, { childList: true, subtree: true });
+  document.addEventListener("DOMContentLoaded", install);
+  install();
 })();

@@ -1,36 +1,41 @@
-name: Cobranza automatica BPGO
+name: Cobranza automática BPGO
 
 on:
-  push:
-    branches: ["main"]
-    paths: [".github/workflows/billing-automation.yml"]
   schedule:
-    - cron: "0 14 * * *"
+    - cron: "15 13 * * *"
   workflow_dispatch:
 
-permissions:
-  contents: read
-  id-token: write
+concurrency:
+  group: bpgo-cobranza-automatica
+  cancel-in-progress: false
 
 jobs:
   billing:
+    name: Revisar y ejecutar cobranza diaria
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - name: Obtener token OIDC
+      - name: Obtener identidad OIDC de GitHub
         id: oidc
         shell: bash
         run: |
-          RESPONSE="$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=bpgo-billing-automation")"
-          TOKEN="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' <<< "$RESPONSE")"
-          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+          token_response="$(curl --fail --silent --show-error \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=bpgo-billing-automation")"
+          token="$(printf '%s' "$token_response" | jq -r '.value')"
+          test -n "$token" && test "$token" != "null"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
 
-      - name: Ejecutar cobranza automatica
+      - name: Ejecutar revisión diaria
         shell: bash
         env:
           OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
         run: |
-          curl --fail-with-body --silent --show-error \
+          curl --fail --silent --show-error \
+            --retry 2 --retry-all-errors \
             -X POST \
-            -H "Authorization: Bearer $OIDC_TOKEN" \
+            -H "Authorization: Bearer ${OIDC_TOKEN}" \
             -H "Content-Type: application/json" \
             https://operaciones.bpgo.cl/api/billing/automation/run
