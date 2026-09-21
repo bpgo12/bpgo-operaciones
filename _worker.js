@@ -1695,6 +1695,176 @@ async function buildBillingAutomationPreview(env, now) {
   };
 }
 
+
+function chileBillingClock(date) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Santiago", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(date || new Date()).reduce((acc, item) => {
+    if (item.type !== "literal") acc[item.type] = item.value;
+    return acc;
+  }, {});
+  return {
+    year: Number(parts.year), month: Number(parts.month), day: Number(parts.day),
+    hour: Number(parts.hour), minute: Number(parts.minute),
+    monthKey: \`\${parts.year}-\${parts.month}\`,
+  };
+}
+
+function billingAutomationStage(day) {
+  if (day === 20) return "day20";
+  if (day === 22) return "day22";
+  if (day === 23) return "day23";
+  return null;
+}
+
+function billingAutomationTemplateName(env, stage) {
+  if (stage === "day20") return String(env.WHATSAPP_BILLING_TEMPLATE_DAY20 || env.WHATSAPP_TEMPLATE_NAME || "recordatorio_pago_bpgo").trim();
+  if (stage === "day22") return String(env.WHATSAPP_BILLING_TEMPLATE_DAY22 || env.WHATSAPP_TEMPLATE_NAME || "recordatorio_pago_bpgo").trim();
+  if (stage === "day23") return String(env.WHATSAPP_BILLING_TEMPLATE_DAY23 || "aviso_suspension_pago_bpgo").trim();
+  return "";
+}
+
+async function sendBillingAutomationTemplate(env, credentials, customer, stage) {
+  const templateName = billingAutomationTemplateName(env, stage);
+  const languageCode = String(env.WHATSAPP_TEMPLATE_LANGUAGE || "es_CL").trim();
+  if (!templateName || !credentials.accessToken || !credentials.phoneNumberId) {
+    return { ok: false, error: "Configuracion de WhatsApp incompleta.", templateName };
+  }
+  const response = await fetch(\`https://graph.facebook.com/v25.0/\${encodeURIComponent(credentials.phoneNumberId)}/messages\`, {
+    method: "POST",
+    headers: { authorization: \`Bearer \${credentials.accessToken}\`, "content-type": "application/json" },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      recipient_type: "individual",
+      to: normalizeWhatsAppPhone(customer.phone),
+      type: "template",
+      template: { name: templateName, language: { code: languageCode } },
+    }),
+  }).catch((error) => ({ ok: false, status: 0, json: async () => ({ error: { message: String(error?.message || error) } }) }));
+  const meta = await response.json().catch(() => ({}));
+  return {
+    ok: Boolean(response.ok),
+    messageId: meta.messages?.[0]?.id || null,
+    templateName,
+    error: response.ok ? null : (meta.error?.message || "Error al enviar por WhatsApp"),
+    errorCode: response.ok ? null : meta.error?.code,
+  };
+}
+
+async function upsertSuspensionQueue(env, preview) {
+  await ensureBillingAutomationTables(env);
+  for (const customer of preview.eligible) {
+    await env.DB.prepare(\`INSERT INTO billing_suspension_queue
+      (billing_month, phone, customer_id, customer_name, sector, plan, amount, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))
+      ON CONFLICT(billing_month, phone) DO UPDATE SET
+        customer_id=excluded.customer_id, customer_name=excluded.customer_name, sector=excluded.sector,
+        plan=excluded.plan, amount=excluded.amount, updated_at=datetime('now')\`)
+      .bind(preview.billingMonth, normalizeWhatsAppPhone(customer.phone), customer.customerId || null,
+        customer.customerName || null, customer.sector || null, customer.plan || null, customer.amount || null).run();
+  }
+}
+
+async function notifyCarlosBillingSummary(env, credentials, preview, result) {
+  if (!preview.eligible.length) return;
+  const detail = \`\${preview.eligible.length} cliente(s) siguen pendientes de pago al día 23. La lista quedó preparada en Operaciones > Cobranza automática > Pendientes de suspensión. Enviados: \${result.sent}; fallidos: \${result.failed}.\`;
+  await notifyStaff(env, credentials, "carlos", "Cobranza día 23", \`\${preview.eligible.length} pendientes de suspensión\`,
+    normalizeWhatsAppPhone(env.STAFF_PHONE_CARLOS), detail, { sourceMessageId: \`billing-\${preview.billingMonth}-day23\` }).catch(() => null);
+}
+
+async function runBillingAutomation(env, now) {
+  const clock = chileBillingClock(now || new Date());
+  const stage = billingAutomationStage(clock.day);
+  if (!stage) return { ok: true, skipped: true, reason: "not_scheduled_day", chileDay: clock.day };
+  const preview = await buildBillingAutomationPreview(env, now || new Date());
+  const credentials = await getWhatsAppCredentials(env);
+  const results = [];
+  for (const customer of preview.eligible) {
+    const phone = normalizeWhatsAppPhone(customer.phone);
+    const existing = await env.DB.prepare(
+      "SELECT status,message_id FROM billing_automation_sends WHERE billing_month=? AND stage=? AND phone=?"
+    ).bind(preview.billingMonth, stage, phone).first();
+    if (existing) {
+      results.push({ phone, ok: existing.status !== "failed", skipped: true, status: existing.status, messageId: existing.message_id || null });
+      continue;
+    }
+    await env.DB.prepare(\`INSERT OR IGNORE INTO billing_automation_sends
+      (billing_month,stage,phone,customer_id,customer_name,amount,status,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,'pending',datetime('now'),datetime('now'))\`)
+      .bind(preview.billingMonth, stage, phone, customer.customerId || null, customer.customerName || null, customer.amount || null).run();
+
+    // Revalidar inmediatamente antes de cada envío para evitar cobrar a alguien que cambió de estado
+    // durante la misma ejecución. Si Sheets deja de responder, se aborta el lote completo.
+    const fresh = await buildBillingAutomationPreview(env, now || new Date());
+    const stillEligible = fresh.eligible.some((item) => normalizeComparablePhone(item.phone) === normalizeComparablePhone(phone));
+    if (!stillEligible) {
+      await env.DB.prepare("UPDATE billing_automation_sends SET status='skipped',error_message='Cliente dejó de ser elegible antes del envío',updated_at=datetime('now') WHERE billing_month=? AND stage=? AND phone=?")
+        .bind(preview.billingMonth, stage, phone).run();
+      results.push({ phone, ok: true, skipped: true, status: "skipped" });
+      continue;
+    }
+
+    const sent = await sendBillingAutomationTemplate(env, credentials, customer, stage);
+    await env.DB.prepare("UPDATE billing_automation_sends SET status=?,message_id=?,error_message=?,updated_at=datetime('now') WHERE billing_month=? AND stage=? AND phone=?")
+      .bind(sent.ok ? "accepted" : "failed", sent.messageId || null, sent.error || null, preview.billingMonth, stage, phone).run();
+    if (sent.messageId) await saveWhatsAppStatus(env, { messageId: sent.messageId, recipient: phone, status: "accepted" }).catch(() => null);
+    results.push({ phone, ok: sent.ok, messageId: sent.messageId || null, templateName: sent.templateName, error: sent.error || undefined });
+  }
+  const sentCount = results.filter((item) => item.ok && !item.skipped).length;
+  const skippedCount = results.filter((item) => item.skipped).length;
+  const failedCount = results.filter((item) => !item.ok).length;
+
+  if (stage === "day23") {
+    // La lista se genera con el estado fresco posterior al envío. El envío no suspende servicios:
+    // solo prepara la cola para decisión/ejecución humana.
+    const finalPreview = await buildBillingAutomationPreview(env, now || new Date());
+    await upsertSuspensionQueue(env, finalPreview);
+    await notifyCarlosBillingSummary(env, credentials, finalPreview, { sent: sentCount, failed: failedCount });
+  }
+
+  return {
+    ok: failedCount === 0,
+    stage,
+    billingMonth: preview.billingMonth,
+    eligible: preview.eligible.length,
+    sent: sentCount,
+    skipped: skippedCount,
+    failed: failedCount,
+    results,
+  };
+}
+
+function decodeBase64UrlJson(value) {
+  const normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
+  return JSON.parse(atob(padded));
+}
+
+async function verifyGitHubActionsOidc(request) {
+  const token = String(request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
+  const parts = token.split(".");
+  if (parts.length !== 3) return false;
+  let header, payload;
+  try { header = decodeBase64UrlJson(parts[0]); payload = decodeBase64UrlJson(parts[1]); } catch { return false; }
+  if (header.alg !== "RS256" || !header.kid) return false;
+  if (payload.iss !== "https://token.actions.githubusercontent.com") return false;
+  if (payload.aud !== "bpgo-billing-automation") return false;
+  if (payload.repository !== "bpgo12/bpgo-operaciones" || payload.ref !== "refs/heads/main") return false;
+  if (!["schedule", "workflow_dispatch"].includes(String(payload.event_name || ""))) return false;
+  const now = Math.floor(Date.now() / 1000);
+  if (Number(payload.exp || 0) < now || Number(payload.iat || 0) > now + 60) return false;
+  const jwksResponse = await fetch("https://token.actions.githubusercontent.com/.well-known/jwks", { cache: "no-store" }).catch(() => null);
+  const jwks = await jwksResponse?.json().catch(() => null);
+  const jwk = jwks?.keys?.find((key) => key.kid === header.kid);
+  if (!jwk) return false;
+  const key = await crypto.subtle.importKey("jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]).catch(() => null);
+  if (!key) return false;
+  const signature = fromBase64Url(parts[2]);
+  const signed = encoder.encode(\`\${parts[0]}.\${parts[1]}\`);
+  return crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, signature, signed).catch(() => false);
+}
+
 async function sendBillingMessages(request, env) {
   const body = await request.json().catch(() => ({}));
   const records = Array.isArray(body.records) ? body.records.slice(0, 50) : [];
@@ -2481,6 +2651,53 @@ export default {
       } catch (error) {
         return Response.json({ ok: false, error: String(error?.message || error) }, { status: 503 });
       }
+    }
+
+    if (url.pathname === "/api/billing/automation/run" && request.method === "POST") {
+      if (!(await verifyGitHubActionsOidc(request))) {
+        return Response.json({ ok: false, error: "Ejecución automática no autorizada." }, { status: 401 });
+      }
+      try {
+        const result = await runBillingAutomation(env, new Date());
+        return Response.json(result, { status: result.ok ? 200 : 207, headers: { "cache-control": "no-store" } });
+      } catch (error) {
+        return Response.json({ ok: false, error: String(error?.message || error) }, { status: 503 });
+      }
+    }
+
+    if (url.pathname === "/api/billing/automation/suspensions" && request.method === "GET") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      await ensureBillingAutomationTables(env);
+      const month = String(url.searchParams.get("month") || billingMonthKey(new Date())).trim();
+      const rows = await env.DB.prepare(\`SELECT id,billing_month,phone,customer_id,customer_name,sector,plan,amount,status,created_at,updated_at
+        FROM billing_suspension_queue WHERE billing_month=? ORDER BY customer_name COLLATE NOCASE ASC\`).bind(month).all();
+      return Response.json({ ok: true, billingMonth: month, items: rows.results || [] }, { headers: { "cache-control": "no-store" } });
+    }
+
+    if (url.pathname === "/api/billing/automation/suspensions" && request.method === "PATCH") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      const body = await request.json().catch(() => ({}));
+      const id = Number(body.id);
+      const status = String(body.status || "").trim();
+      if (!Number.isInteger(id) || !["pending", "suspended", "dismissed", "paid"].includes(status)) {
+        return Response.json({ ok: false, error: "Registro o estado inválido." }, { status: 400 });
+      }
+      await ensureBillingAutomationTables(env);
+      const result = await env.DB.prepare("UPDATE billing_suspension_queue SET status=?,updated_at=datetime('now') WHERE id=?")
+        .bind(status, id).run();
+      return Response.json({ ok: Boolean(result.meta?.changes), id, status }, { status: result.meta?.changes ? 200 : 404 });
+    }
+
+    if (url.pathname === "/api/billing/automation/history" && request.method === "GET") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      await ensureBillingAutomationTables(env);
+      const month = String(url.searchParams.get("month") || billingMonthKey(new Date())).trim();
+      const rows = await env.DB.prepare(\`SELECT billing_month,stage,phone,customer_id,customer_name,amount,message_id,status,error_message,created_at,updated_at
+        FROM billing_automation_sends WHERE billing_month=? ORDER BY created_at DESC\`).bind(month).all();
+      return Response.json({ ok: true, billingMonth: month, items: rows.results || [] }, { headers: { "cache-control": "no-store" } });
     }
 
     if (url.pathname === "/api/whatsapp/status" && request.method === "GET") {
