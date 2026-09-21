@@ -205,12 +205,13 @@ function classifyInboundMessage(message) {
   const text = String(message.text || "").toLocaleLowerCase("es-CL");
   const paymentWords = /\b(pagu[eé]|pago|pagado|transfer|dep[oó]sito|comprobante|boleta)\b/.test(text);
   const faultWords = /\b(sin internet|sin conexi[oó]n|no tengo internet|no funciona|falla|corte|fibra|router|los roja|luz roja|intermitente|lento)\b/.test(text);
-  const hasReceipt = Boolean(message.mediaId) && ["image", "document"].includes(message.type);
-  if (paymentWords || hasReceipt) {
+  const hasPaymentMedia = Boolean(message.mediaId) && ["image", "document"].includes(message.type);
+  const hasReceipt = paymentWords && hasPaymentMedia;
+  if (paymentWords) {
     return {
       type: "payment",
-      confidence: paymentWords && hasReceipt ? 96 : hasReceipt ? 82 : 70,
-      summary: hasReceipt ? "Comprobante de pago recibido para validación." : "Cliente informa un pago; falta revisar el comprobante.",
+      confidence: hasReceipt ? 96 : 70,
+      summary: hasReceipt ? "Cliente indica que adjuntó un comprobante para validación." : "Cliente informa un pago; falta revisar el comprobante.",
       serviceMonth: inferServiceMonth(text, message.createdAt),
       amount: inferAmount(text),
     };
@@ -830,7 +831,8 @@ const BOT_SYSTEM_PROMPT = `Eres el asistente de WhatsApp de BPGO, un proveedor d
 Reglas duras, nunca las rompas:
 - NUNCA confirmes ni marques un pago como "recibido" o "verificado" en el sistema. Si el cliente dice que pagó o envía un comprobante (imagen o PDF, en cualquier formato de banco/app, no todos se ven iguales), solo agradece la recepción y explica que el equipo lo va a revisar (usa la acción "payment_ack"). Si en la imagen del comprobante puedes leer CLARAMENTE el monto pagado y la fecha del pago, ponlos en "extracted_amount" (solo el número, sin $ ni puntos) y "extracted_date" (como aparezca, ej. "15-09-2026"). Si no los ves con certeza, déjalos vacíos: nunca inventes un monto o fecha.
 - Si el cliente pide el link/enlace para pagar, pregunta dónde pagar, cómo pagar online o quiere pagar su plan, responde directamente con el único portal oficial: https://bpgo.cl/pagar. No escales este caso ni inventes otro enlace.
-- Si el cliente pregunta cuánto debe, cuándo vence su pago, o el estado de su cuenta: usa EXCLUSIVAMENTE el dato de "Cliente identificado" (saldo/vencimiento) que te doy abajo, con la acción "reply". Nunca inventes un monto o fecha. Si ese dato no está disponible o el cliente no fue identificado, dilo claramente y usa "escalate".
+- Si el cliente pregunta cuánto debe, cuándo vence su pago, o el estado de su cuenta: usa EXCLUSIVAMENTE el dato de "Cliente identificado" (saldo/vencimiento) que te doy abajo, con la acción "reply". Nunca inventes un monto o fecha. "Saldo no disponible para confirmar automáticamente" NUNCA significa $0 ni "no debes pagar". Si el saldo no está confirmado, usa "escalate" para revisión humana.
+- Una imagen o documento por sí solo NUNCA es un comprobante. Usa "payment_ack" solo si el texto del cliente dice claramente que pagó/envía comprobante, o si la imagen muestra inequívocamente un comprobante bancario/transferencia con señales como monto, banco, fecha, destinatario o número de operación. Fotos genéricas, catálogos, routers u otras imágenes no son pagos.
 - "billing_review_request" (Descuento por corte) es SOLO para cuando el cliente pide explícitamente el descuento/ajuste, o pregunta directamente cuánto le van a cobrar o descontar por los días sin servicio (ej. "me van a descontar esos días?", "cuánto tengo que pagar si estuve sin internet", "quiero que me hagan un descuento"). Si el cliente SOLO está reportando la falla y respondiendo tu diagnóstico técnico (aunque mencione hace cuántos días o desde qué hora no tiene servicio), eso NO es un pedido de descuento -- sigue el flujo de diagnóstico técnico normal de más abajo, NO uses "billing_review_request" solo porque haya un número de días de por medio. Cuando sí corresponda billing_review_request: NUNCA calcules ni menciones ningún monto, descuento o total ajustado, bajo ninguna circunstancia. Eso solo lo decide un humano. Usa "reply" para preguntar cuántos días exactos estuvo sin servicio si no te lo ha dicho, y cuando lo tengas usa la acción "billing_review_request" con "days_without_service" (número) y un resumen en "reason" — nunca en "text" va un monto.
 - Si el cliente reporta una falla técnica (sin internet, lento, intermitente, etc.) y NO pidió una visita ni un descuento todavía, NO uses "visit_request" de inmediato. Primero hace diagnóstico progresivo con la acción "reply", preguntando UNA cosa a la vez (color/estado de la luz del router, si ya reinició el equipo, si afecta a todos los dispositivos o solo uno, hace cuánto/desde cuándo empezó). Sigue así hasta que el cliente confirme que afecta a todos los dispositivos, ya respondió 2-3 preguntas y el problema sigue, o pida explícitamente una visita/técnico. En ese momento usa "visit_request" con un resumen COMPLETO en "reason" -- no una frase corta: incluye todo lo que el cliente contó (color/estado de la luz, si reinició el router y qué pasó, si afecta a todos los dispositivos o solo uno, hace cuánto/desde cuándo, y cualquier otro detalle que haya dado) para que el técnico que llegue a terreno ya sepa qué está pasando sin tener que volver a preguntar (el sistema se encarga por su cuenta de pedir el nombre del titular si hace falta, no necesitas preguntarlo tú). Nunca confirmes un horario exacto, solo di que quedó registrada la solicitud. Este es el flujo normal para "estoy sin internet" -- billing_review_request NUNCA reemplaza este flujo, son cosas distintas (una es mandar un técnico, la otra es un descuento que el cliente pidió aparte).
 - Reserva la acción "escalate" solo para: el cliente pide explícitamente hablar con una persona, insulta, hace un reclamo grave, o pregunta algo puntual que no sabes con certeza (fuera de las FAQs y de los datos de cliente dados). Si el mensaje es corto, ambiguo, tiene errores de tipeo, o simplemente no lo entiendes (ej. "hol", una palabra suelta, algo cortado), NUNCA escales por eso solo: usa "reply" y pide amablemente que repita o aclare qué necesita. Escala únicamente si ya pediste aclaración y el cliente sigue sin poder comunicar lo que necesita.
@@ -840,8 +842,20 @@ Reglas duras, nunca las rompas:
 Debes responder SIEMPRE llamando a la herramienta bpgo_bot_action con una única acción.`;
 
 function formatCurrency(value) {
+  if (value === null || value === undefined || String(value).trim() === "") return null;
   const amount = Number(value);
-  return Number.isFinite(amount) ? `$${amount.toLocaleString("es-CL")}` : null;
+  return Number.isFinite(amount) ? `${amount.toLocaleString("es-CL")}` : null;
+}
+
+function confirmedBalanceText(customer) {
+  if (!customer) return null;
+  if (customer.balance === null || customer.balance === undefined || String(customer.balance).trim() === "") return null;
+  const amount = Number(customer.balance);
+  if (!Number.isFinite(amount)) return null;
+  if (amount > 0) return `saldo pendiente ${amount.toLocaleString("es-CL")}`;
+  const status = String(customer.paymentStatus || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  if (amount === 0 && /pagad|al dia|sin deuda/.test(status)) return "sin deuda pendiente confirmada";
+  return null;
 }
 
 const PAYMENT_PORTAL_REPLY = "Puedes pagar tu mensualidad en el portal oficial de BP GO:\nhttps://bpgo.cl/pagar";
@@ -858,10 +872,10 @@ async function callBotResponder(env, context, inboundMessage, media) {
   if (!env.OPENAI_API_KEY) return { action: "escalate", reason: "bot_not_configured" };
   let customerLine = "No se pudo identificar al cliente en el sistema por su número.";
   if (context.customer?.name) {
-    const balanceText = formatCurrency(context.customer.balance);
+    const balanceText = confirmedBalanceText(context.customer);
     const details = [
       context.customer.address ? `dirección ${context.customer.address}` : null,
-      balanceText ? `saldo pendiente ${balanceText}` : "sin saldo pendiente registrado",
+      balanceText || "saldo no disponible para confirmar automáticamente",
       context.customer.dueDate ? `vencimiento ${context.customer.dueDate}` : null,
     ].filter(Boolean).join(", ");
     customerLine = `Cliente identificado: ${context.customer.name} (${details}).`;
@@ -992,6 +1006,10 @@ async function executeBotAction(env, credentials, phone, action, message) {
     const caseRow = message.messageId ? await env.DB.prepare(
       "SELECT id, reported_name FROM whatsapp_automation_cases WHERE source_message_id = ?"
     ).bind(message.messageId).first() : null;
+    if (caseRow) {
+      await env.DB.prepare("UPDATE whatsapp_automation_cases SET case_type='payment', confidence=CASE WHEN confidence < 95 THEN 95 ELSE confidence END, summary='Comprobante de pago identificado para validación.', updated_at=datetime('now') WHERE id=?")
+        .bind(caseRow.id).run().catch(() => null);
+    }
     if (caseRow && (Number.isFinite(Number(action.extracted_amount)) || action.extracted_date)) {
       await env.DB.prepare(`UPDATE whatsapp_automation_cases SET
         amount = COALESCE(?, amount), service_month = COALESCE(?, service_month), updated_at = datetime('now')
@@ -1339,6 +1357,30 @@ async function createAutomationCase(env, message) {
     .run();
 }
 
+async function saveBusinessAppEchoesAndPauseBot(env, changes) {
+  await ensureWhatsAppInboxTable(env);
+  let saved = 0;
+  for (const change of changes) {
+    if (change?.field !== "smb_message_echoes") continue;
+    const value = change.value || {};
+    const echoes = Array.isArray(value.message_echoes) ? value.message_echoes : [];
+    for (const echo of echoes) {
+      const phone = normalizeWhatsAppPhone(echo.to);
+      if (!phone || !echo.id) continue;
+      const text = echo.text?.body || echo.button?.text || echo.interactive?.button_reply?.title || echo.interactive?.list_reply?.title || null;
+      const mediaId = echo.image?.id || echo.document?.id || echo.audio?.id || echo.video?.id || null;
+      await env.DB.prepare(`INSERT OR IGNORE INTO whatsapp_inbox_messages
+        (message_id, phone, direction, message_type, message_text, media_id, created_at, raw_json)
+        VALUES (?, ?, 'outbound', ?, ?, ?, ?, ?)`)
+        .bind(echo.id, phone, echo.type || "unknown", text, mediaId,
+          new Date(Number(echo.timestamp || 0) * 1000).toISOString(), JSON.stringify(echo)).run();
+      await setBotSessionMode(env, phone, "human", "manual_whatsapp_reply");
+      saved += 1;
+    }
+  }
+  return saved;
+}
+
 async function saveInboundWhatsAppMessages(env, changes) {
   await ensureWhatsAppInboxTable(env);
   let saved = 0;
@@ -1634,10 +1676,11 @@ export default {
           error: item.errors?.[0] || null,
         }).catch(() => null);
       }
+      const manualEchoesSaved = await saveBusinessAppEchoesAndPauseBot(env, changes).catch(() => 0);
       const messagesSaved = await saveInboundWhatsAppMessages(env, changes).catch(() => 0);
       const botTask = runBotForInboundMessages(env, changes).catch(() => null);
       if (ctx?.waitUntil) ctx.waitUntil(botTask); else await botTask;
-      return Response.json({ ok: true, received: statuses.length, messagesSaved });
+      return Response.json({ ok: true, received: statuses.length, messagesSaved, manualEchoesSaved });
     }
 
     if (url.pathname === "/api/whatsapp/inbox" && request.method === "GET") {
@@ -1645,6 +1688,14 @@ export default {
       if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
       await ensureWhatsAppInboxTable(env);
       await ensureWhatsAppBotTables(env);
+      const inboxCredentials = await getWhatsAppCredentials(env);
+      if (inboxCredentials.accessToken && inboxCredentials.wabaId) {
+        fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(inboxCredentials.wabaId)}/subscribed_apps`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${inboxCredentials.accessToken}`, "content-type": "application/json" },
+          body: JSON.stringify({ subscribed_fields: ["messages", "smb_message_echoes"] }),
+        }).catch(() => null);
+      }
       const rows = await env.DB.prepare(`SELECT message_id, phone, customer_name, direction, message_type,
         message_text, media_id, created_at FROM whatsapp_inbox_messages ORDER BY created_at DESC LIMIT 300`).all();
       const sessions = await env.DB.prepare(`SELECT phone, mode, escalation_reason, updated_by_user_id,
@@ -1888,7 +1939,7 @@ export default {
       const subscriptionResponse = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(wabaId)}/subscribed_apps`, {
         method: "POST",
         headers: { authorization: `Bearer ${accessToken}`, "content-type": "application/json" },
-        body: JSON.stringify({ subscribed_fields: ["messages"] }),
+        body: JSON.stringify({ subscribed_fields: ["messages", "smb_message_echoes"] }),
       });
       const subscriptionPayload = await subscriptionResponse.json().catch(() => ({}));
       if (!subscriptionResponse.ok || subscriptionPayload.success !== true) {
