@@ -1,6 +1,9 @@
 name: Cobranza automatica BPGO
 
 on:
+  push:
+    branches: ["main"]
+    paths: [".github/workflows/billing-automation.yml"]
   schedule:
     - cron: "0 14 * * *"
   workflow_dispatch:
