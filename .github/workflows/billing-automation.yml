@@ -1,0 +1,33 @@
+name: Cobranza automatica BPGO
+
+on:
+  schedule:
+    - cron: "0 14 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  billing:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Obtener token OIDC
+        id: oidc
+        shell: bash
+        run: |
+          RESPONSE="$(curl -sSf -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=bpgo-billing-automation")"
+          TOKEN="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' <<< "$RESPONSE")"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Ejecutar cobranza automatica
+        shell: bash
+        env:
+          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
+        run: |
+          curl --fail-with-body --silent --show-error \
+            -X POST \
+            -H "Authorization: Bearer $OIDC_TOKEN" \
+            -H "Content-Type: application/json" \
+            https://operaciones.bpgo.cl/api/billing/automation/run
