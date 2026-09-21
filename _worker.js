@@ -1561,6 +1561,140 @@ function inboundOnlyChanges(changes) {
   }));
 }
 
+async function ensureBillingAutomationTables(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS billing_automation_sends (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    billing_month TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    customer_id TEXT,
+    customer_name TEXT,
+    amount INTEGER,
+    message_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    error_message TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(billing_month, stage, phone)
+  )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS billing_suspension_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    billing_month TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    customer_id TEXT,
+    customer_name TEXT,
+    sector TEXT,
+    plan TEXT,
+    amount INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(billing_month, phone)
+  )`).run();
+}
+
+function billingMonthKey(date) {
+  const current = date || new Date();
+  return `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function billingMonthName(date) {
+  const current = date || new Date();
+  return SPANISH_MONTH_NAMES[current.getMonth()];
+}
+
+function normalizedBillingStatus(value) {
+  return String(value || "").trim().toLocaleLowerCase("es-CL");
+}
+
+async function loadCortadoPhones(env) {
+  const syncUrl = "https://script.google.com/macros/s/AKfycbxQWG6fkP1_V8quAUCGN0q2kDtHq5nT4kmOXjTtqdkP9kBaEx_KoE0KAwnG39QhxJvd/exec?cortados=1&token=bpgo_sheets_sync_2026_seguro";
+  const response = await fetch(syncUrl, { cache: "no-store" }).catch(() => null);
+  const payload = await response?.json().catch(() => null);
+  if (!response?.ok || !payload?.ok) throw new Error("No se pudo validar clientes cortados en Google Sheets.");
+  return new Set((Array.isArray(payload.cortados) ? payload.cortados : []).map(normalizeComparablePhone).filter(Boolean));
+}
+
+async function buildBillingAutomationPreview(env, now) {
+  await ensureWhatsAppBotTables(env);
+  await ensureBillingAutomationTables(env);
+  const row = await env.DB.prepare("SELECT data FROM app_state WHERE id = 'main'").first();
+  const state = row?.data ? JSON.parse(row.data) : {};
+  const monthName = billingMonthName(now);
+  const monthKey = billingMonthKey(now);
+  const cortados = await loadCortadoPhones(env);
+  const pendingPaymentRows = await env.DB.prepare("SELECT phone FROM whatsapp_pending_payments").all().catch(() => ({ results: [] }));
+  const pendingPayments = new Set((pendingPaymentRows.results || []).map((item) => normalizeComparablePhone(item.phone)).filter(Boolean));
+  const customerByPhone = new Map();
+  for (const customer of (Array.isArray(state.billingCustomers) ? state.billingCustomers : [])) {
+    const key = normalizeComparablePhone(customer.phone || customer.whatsapp || customer.telefono || "");
+    if (key) customerByPhone.set(key, customer);
+  }
+  const currentRecords = (Array.isArray(state.billingRecords) ? state.billingRecords : []).filter((record) => {
+    const recordMonth = String(record.billingMonth || record.month || "").toLocaleLowerCase("es-CL");
+    return recordMonth.includes(monthName);
+  });
+  const seen = new Set();
+  const eligible = [];
+  const excluded = [];
+  for (const record of currentRecords) {
+    const phone = normalizeWhatsAppPhone(record.phone || record.whatsapp || record.telefono || "");
+    const comparablePhone = normalizeComparablePhone(phone);
+    const customer = customerByPhone.get(comparablePhone) || {};
+    const customerId = String(record.customerId || record.customer_id || record.id || customer.id || customer.rut || "").trim();
+    const customerName = record.customerName || record.name || customer.customerName || customer.name || "Sin nombre";
+    const amountRaw = record.amount ?? record.saldo ?? record.deuda ?? customer.amount ?? customer.saldo ?? customer.deuda;
+    const amount = Number(amountRaw);
+    const status = normalizedBillingStatus(record.status);
+    const active = customer.active !== false;
+    const reasons = [];
+    if (!phone || !/^\d{8,15}$/.test(phone)) reasons.push("telefono_invalido");
+    if (seen.has(comparablePhone)) reasons.push("duplicado");
+    if (status === "pagado" || status === "pago confirmado") reasons.push("pagado");
+    if (!Number.isFinite(amount) || amount <= 0) reasons.push("monto_cero_o_invalido");
+    if (!active) reasons.push("inactivo_o_suspendido");
+    if (cortados.has(comparablePhone)) reasons.push("cortado");
+    if (pendingPayments.has(comparablePhone)) reasons.push("comprobante_pendiente");
+    if (reasons.length) {
+      excluded.push({ customerId, customerName, phone, amount: Number.isFinite(amount) ? amount : null, status: record.status || "", reasons });
+      continue;
+    }
+    seen.add(comparablePhone);
+    eligible.push({
+      customerId,
+      customerName,
+      phone,
+      sector: record.sector || customer.sector || "",
+      plan: record.plan || record.planName || customer.plan || customer.planName || "",
+      amount: Math.round(amount),
+      billingMonth: monthKey,
+      status: record.status || "Pendiente",
+    });
+  }
+  const sends = await env.DB.prepare("SELECT billing_month,stage,phone,status,message_id,created_at FROM billing_automation_sends WHERE billing_month=?")
+    .bind(monthKey).all().catch(() => ({ results: [] }));
+  const sentByStage = {};
+  for (const item of (sends.results || [])) {
+    (sentByStage[item.stage] ||= new Set()).add(normalizeComparablePhone(item.phone));
+  }
+  return {
+    ok: true,
+    billingMonth: monthKey,
+    monthName,
+    source: "app_state + Google Sheets cortados",
+    eligible,
+    excluded,
+    totals: {
+      records: currentRecords.length,
+      eligible: eligible.length,
+      excluded: excluded.length,
+      alreadySentDay20: sentByStage.day20?.size || 0,
+      alreadySentDay22: sentByStage.day22?.size || 0,
+      alreadySentDay23: sentByStage.day23?.size || 0,
+    },
+  };
+}
+
 async function sendBillingMessages(request, env) {
   const body = await request.json().catch(() => ({}));
   const records = Array.isArray(body.records) ? body.records.slice(0, 50) : [];
@@ -2336,6 +2470,17 @@ export default {
       await env.DB.prepare(`INSERT INTO bpgo_bot_faq (key, value, updated_at) VALUES (?, ?, datetime('now'))
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`).bind(key, value).run();
       return Response.json({ ok: true, key, value });
+    }
+
+    if (url.pathname === "/api/billing/automation/preview" && request.method === "GET") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      try {
+        const preview = await buildBillingAutomationPreview(env, new Date());
+        return Response.json(preview, { headers: { "cache-control": "no-store" } });
+      } catch (error) {
+        return Response.json({ ok: false, error: String(error?.message || error) }, { status: 503 });
+      }
     }
 
     if (url.pathname === "/api/whatsapp/status" && request.method === "GET") {
