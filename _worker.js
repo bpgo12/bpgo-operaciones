@@ -1707,7 +1707,7 @@ function chileBillingClock(date) {
   return {
     year: Number(parts.year), month: Number(parts.month), day: Number(parts.day),
     hour: Number(parts.hour), minute: Number(parts.minute),
-    monthKey: \`\${parts.year}-\${parts.month}\`,
+    monthKey: `${parts.year}-${parts.month}`,
   };
 }
 
@@ -1776,8 +1776,8 @@ async function ensureBillingAutomationTemplates(env, credentials) {
         ? String(env.WHATSAPP_BILLING_TEMPLATE_DAY22 || definition.name).trim()
         : String(env.WHATSAPP_BILLING_TEMPLATE_DAY23 || definition.name).trim();
     const lookup = await fetch(
-      \`https://graph.facebook.com/v25.0/\${encodeURIComponent(credentials.wabaId)}/message_templates?name=\${encodeURIComponent(configuredName)}&fields=name,status,language,category&limit=20\`,
-      { headers: { authorization: \`Bearer \${credentials.accessToken}\` }, cache: "no-store" }
+      `https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.wabaId)}/message_templates?name=${encodeURIComponent(configuredName)}&fields=name,status,language,category&limit=20`,
+      { headers: { authorization: `Bearer ${credentials.accessToken}` }, cache: "no-store" }
     ).catch(() => null);
     const payload = await lookup?.json().catch(() => ({}));
     const existing = Array.isArray(payload?.data)
@@ -1793,9 +1793,9 @@ async function ensureBillingAutomationTemplates(env, credentials) {
       results.push({ stage, name: configuredName, status: "NOT_FOUND", existing: false });
       continue;
     }
-    const create = await fetch(\`https://graph.facebook.com/v25.0/\${encodeURIComponent(credentials.wabaId)}/message_templates\`, {
+    const create = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.wabaId)}/message_templates`, {
       method: "POST",
-      headers: { authorization: \`Bearer \${credentials.accessToken}\`, "content-type": "application/json" },
+      headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
       body: JSON.stringify(definition),
     }).catch(() => null);
     const created = await create?.json().catch(() => ({}));
@@ -1815,9 +1815,9 @@ async function sendBillingAutomationTemplate(env, credentials, customer, stage) 
   if (!templateName || !credentials.accessToken || !credentials.phoneNumberId) {
     return { ok: false, error: "Configuracion de WhatsApp incompleta.", templateName };
   }
-  const response = await fetch(\`https://graph.facebook.com/v25.0/\${encodeURIComponent(credentials.phoneNumberId)}/messages\`, {
+  const response = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/messages`, {
     method: "POST",
-    headers: { authorization: \`Bearer \${credentials.accessToken}\`, "content-type": "application/json" },
+    headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
     body: JSON.stringify({
       messaging_product: "whatsapp",
       recipient_type: "individual",
@@ -1839,12 +1839,12 @@ async function sendBillingAutomationTemplate(env, credentials, customer, stage) 
 async function upsertSuspensionQueue(env, preview) {
   await ensureBillingAutomationTables(env);
   for (const customer of preview.eligible) {
-    await env.DB.prepare(\`INSERT INTO billing_suspension_queue
+    await env.DB.prepare(`INSERT INTO billing_suspension_queue
       (billing_month, phone, customer_id, customer_name, sector, plan, amount, status, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))
       ON CONFLICT(billing_month, phone) DO UPDATE SET
         customer_id=excluded.customer_id, customer_name=excluded.customer_name, sector=excluded.sector,
-        plan=excluded.plan, amount=excluded.amount, updated_at=datetime('now')\`)
+        plan=excluded.plan, amount=excluded.amount, updated_at=datetime('now')`)
       .bind(preview.billingMonth, normalizeWhatsAppPhone(customer.phone), customer.customerId || null,
         customer.customerName || null, customer.sector || null, customer.plan || null, customer.amount || null).run();
   }
@@ -1852,9 +1852,9 @@ async function upsertSuspensionQueue(env, preview) {
 
 async function notifyCarlosBillingSummary(env, credentials, preview, result) {
   if (!preview.eligible.length) return;
-  const detail = \`\${preview.eligible.length} cliente(s) siguen pendientes de pago al día 23. La lista quedó preparada en Operaciones > Cobranza automática > Pendientes de suspensión. Enviados: \${result.sent}; fallidos: \${result.failed}.\`;
-  await notifyStaff(env, credentials, "carlos", "Cobranza día 23", \`\${preview.eligible.length} pendientes de suspensión\`,
-    normalizeWhatsAppPhone(env.STAFF_PHONE_CARLOS), detail, { sourceMessageId: \`billing-\${preview.billingMonth}-day23\` }).catch(() => null);
+  const detail = `${preview.eligible.length} cliente(s) siguen pendientes de pago al día 23. La lista quedó preparada en Operaciones > Cobranza automática > Pendientes de suspensión. Enviados: ${result.sent}; fallidos: ${result.failed}.`;
+  await notifyStaff(env, credentials, "carlos", "Cobranza día 23", `${preview.eligible.length} pendientes de suspensión`,
+    normalizeWhatsAppPhone(env.STAFF_PHONE_CARLOS), detail, { sourceMessageId: `billing-${preview.billingMonth}-day23` }).catch(() => null);
 }
 
 async function runBillingAutomation(env, now) {
@@ -1884,9 +1884,9 @@ async function runBillingAutomation(env, now) {
       results.push({ phone, ok: existing.status !== "failed", skipped: true, status: existing.status, messageId: existing.message_id || null });
       continue;
     }
-    await env.DB.prepare(\`INSERT OR IGNORE INTO billing_automation_sends
+    await env.DB.prepare(`INSERT OR IGNORE INTO billing_automation_sends
       (billing_month,stage,phone,customer_id,customer_name,amount,status,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,'pending',datetime('now'),datetime('now'))\`)
+      VALUES (?,?,?,?,?,?,'pending',datetime('now'),datetime('now'))`)
       .bind(preview.billingMonth, stage, phone, customer.customerId || null, customer.customerName || null, customer.amount || null).run();
 
     // Revalidar inmediatamente antes de cada envío para evitar cobrar a alguien que cambió de estado
@@ -1956,7 +1956,7 @@ async function verifyGitHubActionsOidc(request) {
   const key = await crypto.subtle.importKey("jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]).catch(() => null);
   if (!key) return false;
   const signature = fromBase64Url(parts[2]);
-  const signed = encoder.encode(\`\${parts[0]}.\${parts[1]}\`);
+  const signed = encoder.encode(`${parts[0]}.${parts[1]}`);
   return crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, signature, signed).catch(() => false);
 }
 
@@ -2765,8 +2765,8 @@ export default {
       if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
       await ensureBillingAutomationTables(env);
       const month = String(url.searchParams.get("month") || billingMonthKey(new Date())).trim();
-      const rows = await env.DB.prepare(\`SELECT id,billing_month,phone,customer_id,customer_name,sector,plan,amount,status,created_at,updated_at
-        FROM billing_suspension_queue WHERE billing_month=? ORDER BY customer_name COLLATE NOCASE ASC\`).bind(month).all();
+      const rows = await env.DB.prepare(`SELECT id,billing_month,phone,customer_id,customer_name,sector,plan,amount,status,created_at,updated_at
+        FROM billing_suspension_queue WHERE billing_month=? ORDER BY customer_name COLLATE NOCASE ASC`).bind(month).all();
       return Response.json({ ok: true, billingMonth: month, items: rows.results || [] }, { headers: { "cache-control": "no-store" } });
     }
 
@@ -2798,8 +2798,8 @@ export default {
       if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
       await ensureBillingAutomationTables(env);
       const month = String(url.searchParams.get("month") || billingMonthKey(new Date())).trim();
-      const rows = await env.DB.prepare(\`SELECT billing_month,stage,phone,customer_id,customer_name,amount,message_id,status,error_message,created_at,updated_at
-        FROM billing_automation_sends WHERE billing_month=? ORDER BY created_at DESC\`).bind(month).all();
+      const rows = await env.DB.prepare(`SELECT billing_month,stage,phone,customer_id,customer_name,amount,message_id,status,error_message,created_at,updated_at
+        FROM billing_automation_sends WHERE billing_month=? ORDER BY created_at DESC`).bind(month).all();
       return Response.json({ ok: true, billingMonth: month, items: rows.results || [] }, { headers: { "cache-control": "no-store" } });
     }
 
