@@ -32,8 +32,11 @@ vm.runInContext(`
   ${functionSource("classifyInboundMessage")}
   ${functionSource("hasExplicitPaymentIntent")}
   ${functionSource("hasStrongReceiptEvidence")}
+  ${functionSource("isPlausibleAccountName")}
+  ${functionSource("isPaymentLinkRequest")}
+  ${functionSource("briefCourtesyReply")}
   ${functionSource("extractWhatsAppMessageEchoes")}
-  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, extractWhatsAppMessageEchoes };
+  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, briefCourtesyReply, extractWhatsAppMessageEchoes };
 `, context);
 
 const api = context.api;
@@ -58,6 +61,16 @@ assert.equal(api.hasStrongReceiptEvidence({ receipt_evidence: ["amount", "date_t
 assert.equal(api.hasStrongReceiptEvidence({}, { mediaId: "1", mediaType: "document", customerText: "" }), false);
 assert.equal(api.hasStrongReceiptEvidence({}, { mediaId: "1", mediaType: "document", customerText: "te envío el comprobante" }), true);
 
+assert.equal(api.isPlausibleAccountName("Juan Pérez"), true);
+assert.equal(api.isPlausibleAccountName("María González Soto"), true);
+for (const value of ["gracias", "ya pagué", "ahí está pagado gracias", "listo", "sí", "correcto", "ese es"]) {
+  assert.equal(api.isPlausibleAccountName(value), false, `${value} must not be stored as a name`);
+}
+for (const value of ["Me manda el link para pagar", "Dónde pago", "Pásame el enlace de pago", "Quiero pagar el plan"]) {
+  assert.equal(api.isPaymentLinkRequest(value), true, `${value} must use the official payment portal`);
+}
+assert.equal(api.briefCourtesyReply("Gracias"), "De nada 👍");
+
 const echoes = api.extractWhatsAppMessageEchoes([{ field: "smb_message_echoes", value: { messages: [{ id: "manual-1", to: "56911111111" }] } }]);
 assert.equal(echoes.length, 1);
 assert.equal(echoes[0].id, "manual-1");
@@ -65,6 +78,10 @@ assert.equal(echoes[0].id, "manual-1");
 assert.doesNotMatch(worker, /sin saldo pendiente registrado/);
 assert.match(worker, /setBotSessionMode\(env, phone, "human", "manual_whatsapp_reply"\)/);
 assert.match(worker, /if \(await isKnownApiOutboundMessage\(env, message\.id\)\) continue/);
+assert.match(worker, /matchedCustomer\.matchedByPhone \? matchedCustomer\.name/);
+assert.match(worker, /Interpreta respuestas cortas \(sí, no, ya, listo, correcto, ese, números, fechas o colores\) según la última pregunta/);
+assert.match(worker, /pregunta UNA sola cosa por respuesta/);
+assert.match(worker, /Necesito el nombre del titular del servicio, por ejemplo: Juan Pérez\./);
 const replyRoute = worker.slice(worker.indexOf('url.pathname === "/api/whatsapp/reply"'), worker.indexOf('url.pathname === "/api/whatsapp/message-status"'));
 assert.ok(replyRoute.indexOf('setBotSessionMode(env, phone, "human", "manual_reply", session)') < replyRoute.indexOf("await fetch(endpoint"));
 
