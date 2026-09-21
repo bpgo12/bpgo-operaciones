@@ -2766,6 +2766,8 @@ export default {
 
     if (url.pathname === "/api/whatsapp/status" && request.method === "GET") {
       const credentials = await getWhatsAppCredentials(env);
+      const billingTemplateStatus = await syncBillingAutomationTemplates(env, false)
+        .catch((error) => ({ ok: false, error: String(error?.message || error), templates: [] }));
       const checks = [
         { key: "WHATSAPP_ACCESS_TOKEN", configured: Boolean(credentials.accessToken) },
         { key: "WHATSAPP_PHONE_NUMBER_ID", configured: Boolean(credentials.phoneNumberId) },
@@ -2797,6 +2799,8 @@ export default {
         checkedAt: new Date().toISOString(),
         credentialSource: credentials.source,
         connectedAt: credentials.connectedAt,
+        billingTemplates: billingTemplateStatus.templates || [],
+        billingTemplatesError: billingTemplateStatus.ok ? null : billingTemplateStatus.error,
       });
     }
 
