@@ -1719,10 +1719,94 @@ function billingAutomationStage(day) {
 }
 
 function billingAutomationTemplateName(env, stage) {
-  if (stage === "day20") return String(env.WHATSAPP_BILLING_TEMPLATE_DAY20 || env.WHATSAPP_TEMPLATE_NAME || "recordatorio_pago_bpgo").trim();
-  if (stage === "day22") return String(env.WHATSAPP_BILLING_TEMPLATE_DAY22 || env.WHATSAPP_TEMPLATE_NAME || "recordatorio_pago_bpgo").trim();
+  if (stage === "day20") return String(env.WHATSAPP_BILLING_TEMPLATE_DAY20 || "recordatorio_pago_bpgo_dia20").trim();
+  if (stage === "day22") return String(env.WHATSAPP_BILLING_TEMPLATE_DAY22 || "recordatorio_pago_bpgo_dia22").trim();
   if (stage === "day23") return String(env.WHATSAPP_BILLING_TEMPLATE_DAY23 || "aviso_suspension_pago_bpgo").trim();
   return "";
+}
+
+
+function billingAutomationTemplateDefinition(stage) {
+  const commonButtons = {
+    type: "BUTTONS",
+    buttons: [
+      { type: "QUICK_REPLY", text: "Ya pagué" },
+      { type: "QUICK_REPLY", text: "Necesito link de pago" },
+      { type: "QUICK_REPLY", text: "Hablar con ejecutivo" },
+    ],
+  };
+  if (stage === "day20") return {
+    name: "recordatorio_pago_bpgo_dia20",
+    language: "es_CL",
+    category: "UTILITY",
+    components: [
+      { type: "BODY", text: "Hola. Te recordamos que tu mensualidad BP GO se encuentra pendiente de pago. Puedes regularizarla en https://bpgo.cl/pagar. Si ya pagaste, envíanos tu comprobante por este medio. BP GO" },
+      commonButtons,
+    ],
+  };
+  if (stage === "day22") return {
+    name: "recordatorio_pago_bpgo_dia22",
+    language: "es_CL",
+    category: "UTILITY",
+    components: [
+      { type: "BODY", text: "Hola. Tu mensualidad BP GO continúa pendiente de pago. Para evitar la suspensión del servicio, puedes regularizarla en https://bpgo.cl/pagar. Si ya pagaste, envíanos tu comprobante por este medio. BP GO" },
+      commonButtons,
+    ],
+  };
+  if (stage === "day23") return {
+    name: "aviso_suspension_pago_bpgo",
+    language: "es_CL",
+    category: "UTILITY",
+    components: [
+      { type: "BODY", text: "Estimado/a, según nuestros registros tu mensualidad BP GO continúa pendiente. Si no regularizas el pago durante hoy, el servicio será suspendido por no pago. Puedes pagar en https://bpgo.cl/pagar. Si ya pagaste, envíanos tu comprobante por este medio. BP GO" },
+      commonButtons,
+    ],
+  };
+  return null;
+}
+
+async function ensureBillingAutomationTemplates(env, credentials) {
+  if (!credentials?.accessToken || !credentials?.wabaId) return { ok: false, error: "Falta WABA o token de Meta.", templates: [] };
+  const results = [];
+  for (const stage of ["day20", "day22", "day23"]) {
+    const definition = billingAutomationTemplateDefinition(stage);
+    const configuredName = stage === "day20"
+      ? String(env.WHATSAPP_BILLING_TEMPLATE_DAY20 || definition.name).trim()
+      : stage === "day22"
+        ? String(env.WHATSAPP_BILLING_TEMPLATE_DAY22 || definition.name).trim()
+        : String(env.WHATSAPP_BILLING_TEMPLATE_DAY23 || definition.name).trim();
+    const lookup = await fetch(
+      \`https://graph.facebook.com/v25.0/\${encodeURIComponent(credentials.wabaId)}/message_templates?name=\${encodeURIComponent(configuredName)}&fields=name,status,language,category&limit=20\`,
+      { headers: { authorization: \`Bearer \${credentials.accessToken}\` }, cache: "no-store" }
+    ).catch(() => null);
+    const payload = await lookup?.json().catch(() => ({}));
+    const existing = Array.isArray(payload?.data)
+      ? payload.data.find((item) => item.name === configuredName && item.language === "es_CL")
+      : null;
+    if (existing) {
+      results.push({ stage, name: configuredName, status: existing.status || "UNKNOWN", existing: true });
+      continue;
+    }
+    // Si el nombre fue personalizado por variable de entorno no se crea automáticamente:
+    // puede corresponder a una plantilla administrada manualmente en Meta.
+    if (configuredName !== definition.name) {
+      results.push({ stage, name: configuredName, status: "NOT_FOUND", existing: false });
+      continue;
+    }
+    const create = await fetch(\`https://graph.facebook.com/v25.0/\${encodeURIComponent(credentials.wabaId)}/message_templates\`, {
+      method: "POST",
+      headers: { authorization: \`Bearer \${credentials.accessToken}\`, "content-type": "application/json" },
+      body: JSON.stringify(definition),
+    }).catch(() => null);
+    const created = await create?.json().catch(() => ({}));
+    results.push({
+      stage, name: configuredName,
+      status: create?.ok ? "PENDING_REVIEW" : "CREATE_FAILED",
+      existing: false,
+      error: create?.ok ? null : (created?.error?.message || "Meta rechazó la creación de la plantilla."),
+    });
+  }
+  return { ok: results.every((item) => !["CREATE_FAILED", "NOT_FOUND"].includes(item.status)), templates: results };
 }
 
 async function sendBillingAutomationTemplate(env, credentials, customer, stage) {
@@ -1775,10 +1859,21 @@ async function notifyCarlosBillingSummary(env, credentials, preview, result) {
 
 async function runBillingAutomation(env, now) {
   const clock = chileBillingClock(now || new Date());
-  const stage = billingAutomationStage(clock.day);
-  if (!stage) return { ok: true, skipped: true, reason: "not_scheduled_day", chileDay: clock.day };
-  const preview = await buildBillingAutomationPreview(env, now || new Date());
   const credentials = await getWhatsAppCredentials(env);
+  const templateState = await ensureBillingAutomationTemplates(env, credentials).catch((error) => ({ ok: false, error: String(error?.message || error), templates: [] }));
+  const stage = billingAutomationStage(clock.day);
+  if (!stage) return { ok: true, skipped: true, reason: "not_scheduled_day", chileDay: clock.day, templates: templateState };
+  const preview = await buildBillingAutomationPreview(env, now || new Date());
+  const currentTemplateName = billingAutomationTemplateName(env, stage);
+  const currentTemplate = (templateState.templates || []).find((item) => item.stage === stage && item.name === currentTemplateName);
+  if (!currentTemplate || currentTemplate.status !== "APPROVED") {
+    return {
+      ok: false, stage, billingMonth: preview.billingMonth, eligible: preview.eligible.length,
+      sent: 0, skipped: 0, failed: 0, reason: "template_not_approved",
+      template: currentTemplate || { stage, name: currentTemplateName, status: "UNKNOWN" },
+      templates: templateState,
+    };
+  }
   const results = [];
   for (const customer of preview.eligible) {
     const phone = normalizeWhatsAppPhone(customer.phone);
@@ -2688,6 +2783,14 @@ export default {
       const result = await env.DB.prepare("UPDATE billing_suspension_queue SET status=?,updated_at=datetime('now') WHERE id=?")
         .bind(status, id).run();
       return Response.json({ ok: Boolean(result.meta?.changes), id, status }, { status: result.meta?.changes ? 200 : 404 });
+    }
+
+    if (url.pathname === "/api/billing/automation/templates" && request.method === "GET") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      const credentials = await getWhatsAppCredentials(env);
+      const result = await ensureBillingAutomationTemplates(env, credentials).catch((error) => ({ ok: false, error: String(error?.message || error), templates: [] }));
+      return Response.json(result, { status: result.ok ? 200 : 207, headers: { "cache-control": "no-store" } });
     }
 
     if (url.pathname === "/api/billing/automation/history" && request.method === "GET") {
