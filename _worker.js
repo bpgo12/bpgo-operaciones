@@ -867,8 +867,30 @@ function isPaymentLinkRequest(value) {
     || /\bpagar\s+(?:el|mi|la)?\s*(?:plan|mensualidad)\b/.test(text);
 }
 
+function isBalanceQuestion(value) {
+  const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
+  return /\b(cuanto|cuánto)\b.{0,40}\b(pagar|debo|deuda|saldo)\b/.test(text)
+    || /\b(saldo|deuda)\b/.test(text)
+    || /\bque\s+tengo\s+que\s+pagar\b/.test(text)
+    || /\bvalor\s+a\s+pagar\b/.test(text);
+}
+
+function authoritativeBalanceReply(customer) {
+  if (!customer) return null;
+  const raw = customer.balance;
+  if (raw === null || raw === undefined || String(raw).trim() === "") return null;
+  const amount = Number(raw);
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  return `El valor pendiente registrado para este período es de ${amount.toLocaleString("es-CL")}.`;
+}
+
 async function callBotResponder(env, context, inboundMessage, media) {
   if (isPaymentLinkRequest(inboundMessage?.text)) return { action: "reply", text: PAYMENT_PORTAL_REPLY };
+  if (isBalanceQuestion(inboundMessage?.text)) {
+    const balanceReply = authoritativeBalanceReply(context?.customer);
+    if (balanceReply) return { action: "reply", text: balanceReply };
+    return { action: "escalate", reason: "balance_not_authoritative", text: "Voy a dejar esta consulta para revisión del equipo antes de confirmarte el monto." };
+  }
   if (!env.OPENAI_API_KEY) return { action: "escalate", reason: "bot_not_configured" };
   let customerLine = "No se pudo identificar al cliente en el sistema por su número.";
   if (context.customer?.name) {
