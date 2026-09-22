@@ -72,6 +72,9 @@ for (const value of ["gracias", "ya pagué", "ahí está pagado gracias", "listo
 for (const value of ["Me manda el link para pagar", "Dónde pago", "Pásame el enlace de pago", "Quiero pagar el plan"]) {
   assert.equal(api.isPaymentLinkRequest(value), true, `${value} must use the official payment portal`);
 }
+for (const value of ["La cuenta para depositar sigue siendo la misma cierto", "¿Cuál es la cuenta para depositar?", "Mándame la cuenta para transferir", "¿Puedo pagar por caja vecina?"]) {
+  assert.equal(api.isAlternativePaymentRequest(value), true, `${value} must use transfer fallback`);
+}
 assert.equal(api.briefCourtesyReply("Gracias"), "De nada 👍");
 assert.equal(api.externalConnectivityPaymentReply("a la tarde cancelo esta mala la señal donde trabajo"), "Entendido, puedes realizar el pago más tarde cuando tengas mejor conexión.");
 assert.equal(api.externalConnectivityPaymentReply("en la tarde pago, tengo poca cobertura en la minera"), "Entendido, puedes realizar el pago más tarde cuando tengas mejor conexión.");
