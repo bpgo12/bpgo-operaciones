@@ -946,7 +946,9 @@ function isAlternativePaymentRequest(value) {
   const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
   const linkProblem = /\b(link|enlace|pagina|portal)\b/.test(text) && /\b(no funciona|no me funciona|no puedo|no carga|error|problema|complica|complicado)\b/.test(text);
   const asksAlternative = /\b(otra forma|otra opcion|alternativa)\b.{0,30}\b(pago|pagar)\b/.test(text)
-    || /\b(transferencia|transferir|caja ?vecina|datos bancarios|datos para pagar|numero de cuenta|cuenta bancaria)\b/.test(text);
+    || /\b(transferencia|transferir|caja ?vecina|datos bancarios|datos para pagar|numero de cuenta|cuenta bancaria|cuenta para depositar|depositar|deposito)\b/.test(text)
+    || /\b(cuenta|datos)\b.{0,35}\b(depositar|transferir|pagar)\b/.test(text)
+    || /\b(cuenta|datos)\b.{0,45}\b(sigue|siguen|misma|mismos)\b/.test(text);
   return linkProblem || asksAlternative;
 }
 
