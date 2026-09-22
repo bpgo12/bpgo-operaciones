@@ -939,7 +939,8 @@ function authoritativeBalanceAction(customer) {
   return { action: "reply", text: `Tu saldo pendiente registrado es de ${formatCurrency(amount)}.` };
 }
 
-const PAYMENT_PORTAL_REPLY = "Puedes pagar tu mensualidad acá:\nhttps://bpgo.cl/pagar";\nconst PAYMENT_TRANSFER_REPLY = "Si el link de pago no te funciona, puedes pagar por transferencia o CajaVecina con estos datos:\nBanco Estado\nCuenta corriente\nBP GO\nRUT 77.463.597-1\nN° de cuenta 39100126196\nCorreo: consultorabpconnection@gmail.com\n\nCuando realices el pago, envíanos el comprobante por este medio.";
+const PAYMENT_PORTAL_REPLY = "Puedes pagar tu mensualidad acá:\nhttps://bpgo.cl/pagar";
+const PAYMENT_TRANSFER_REPLY = "Si el link de pago no te funciona, puedes pagar por transferencia o CajaVecina con estos datos:\nBanco Estado\nCuenta corriente\nBP GO\nRUT 77.463.597-1\nN° de cuenta 39100126196\nCorreo: consultorabpconnection@gmail.com\n\nCuando realices el pago, envíanos el comprobante por este medio.";
 
 function isAlternativePaymentRequest(value) {
   const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
@@ -997,7 +998,8 @@ function isExecutiveQuickReply(value) {
 }
 
 async function callBotResponder(env, context, inboundMessage, media) {
-  if (isAlternativePaymentRequest(inboundMessage?.text)) return { action: "reply", text: PAYMENT_TRANSFER_REPLY };\n  if (isPaymentLinkRequest(inboundMessage?.text)) return { action: "reply", text: PAYMENT_PORTAL_REPLY };
+  if (isAlternativePaymentRequest(inboundMessage?.text)) return { action: "reply", text: PAYMENT_TRANSFER_REPLY };
+  if (isPaymentLinkRequest(inboundMessage?.text)) return { action: "reply", text: PAYMENT_PORTAL_REPLY };
   if (isPaidQuickReply(inboundMessage?.text)) return { action: "reply", text: context.hasPendingReceipt
     ? "Tu comprobante ya está en revisión."
     : "Perfecto. Envíame el comprobante para dejarlo en revisión." };
