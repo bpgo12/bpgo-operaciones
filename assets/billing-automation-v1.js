@@ -95,7 +95,9 @@
     panel.id = "billing-automation-panel";
     panel.className = "panel billing-automation-panel";
     panel.innerHTML = '<div class="billing-auto-content"><p>Cargando cobranza automática…</p></div>';
-    anchor.insertAdjacentElement("afterend", panel);
+    const main = document.querySelector("main");
+    if (main) main.appendChild(panel);
+    else anchor.parentElement.insertAdjacentElement("afterend", panel);
     panel.addEventListener("click", async function (event) {
       const refresh = event.target.closest(".billing-auto-refresh");
       if (refresh) return load(panel, true);
