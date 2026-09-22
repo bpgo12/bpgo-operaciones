@@ -1,6 +1,15 @@
 (function () {
   "use strict";
 
+  const TOKEN_KEY = "bpgo-operaciones-auth-token";
+
+  function authHeaders(json) {
+    const headers = new Headers(json ? { "content-type": "application/json" } : {});
+    const token = sessionStorage.getItem(TOKEN_KEY);
+    if (token) headers.set("authorization", "Bearer " + token);
+    return headers;
+  }
+
   const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" })[char]);
   const statusLabel = (value) => ({ pending: "Pendiente", scheduled: "Agendada", resolved: "Resuelta", dismissed: "Descartada" })[value] || value;
   let active = false;
@@ -144,7 +153,7 @@
   // como descuento por corte (billing-requests) según cómo siga la conversación -- para el
   // equipo de Operaciones ambas son "tengo un cliente sin servicio", así que se muestran juntas.
   async function fetchList(endpoint, source) {
-    const response = await fetch(endpoint, { cache: "no-store" });
+    const response = await fetch(endpoint, { cache: "no-store", headers: authHeaders(false) });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || "No se pudo cargar las incidencias.");
     return (data.requests || []).map((item) => Object.assign({}, item, { _source: source }));
@@ -191,7 +200,7 @@
     const endpoint = source === "billing" ? "/api/whatsapp/billing-requests" : "/api/whatsapp/visit-requests";
     await fetch(endpoint, {
       method: "PATCH",
-      headers: { "content-type": "application/json" },
+      headers: authHeaders(true),
       body: JSON.stringify({ id: Number(id), status }),
     }).catch(() => null);
     load();
@@ -233,7 +242,7 @@
   function refreshHomeCount() {
     const card = document.querySelector("[data-bot-incidents-kpi]");
     if (!card) return;
-    fetch("/api/whatsapp/visit-requests", { cache: "no-store" })
+    fetch("/api/whatsapp/visit-requests", { cache: "no-store", headers: authHeaders(false) })
       .then((response) => response.json())
       .then((data) => {
         const pending = (data.requests || []).filter((item) => item.status === "pending").length;
