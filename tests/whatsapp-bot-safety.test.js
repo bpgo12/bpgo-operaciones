@@ -34,6 +34,7 @@ vm.runInContext(`
   ${functionSource("hasStrongReceiptEvidence")}
   ${functionSource("isPlausibleAccountName")}
   ${functionSource("isPaymentLinkRequest")}
+  ${functionSource("isAlternativePaymentRequest")}
   ${functionSource("briefCourtesyReply")}
   ${functionSource("externalConnectivityPaymentReply")}
   ${functionSource("cancellationMeansPayment")}
