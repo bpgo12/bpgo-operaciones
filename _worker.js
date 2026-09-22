@@ -939,7 +939,15 @@ function authoritativeBalanceAction(customer) {
   return { action: "reply", text: `Tu saldo pendiente registrado es de ${formatCurrency(amount)}.` };
 }
 
-const PAYMENT_PORTAL_REPLY = "Puedes pagar tu mensualidad acá:\nhttps://bpgo.cl/pagar";
+const PAYMENT_PORTAL_REPLY = "Puedes pagar tu mensualidad acá:\nhttps://bpgo.cl/pagar";\nconst PAYMENT_TRANSFER_REPLY = "Si el link de pago no te funciona, puedes pagar por transferencia o CajaVecina con estos datos:\nBanco Estado\nCuenta corriente\nBP GO\nRUT 77.463.597-1\nN° de cuenta 39100126196\nCorreo: consultorabpconnection@gmail.com\n\nCuando realices el pago, envíanos el comprobante por este medio.";
+
+function isAlternativePaymentRequest(value) {
+  const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
+  const linkProblem = /\b(link|enlace|pagina|portal)\b/.test(text) && /\b(no funciona|no me funciona|no puedo|no carga|error|problema|complica|complicado)\b/.test(text);
+  const asksAlternative = /\b(otra forma|otra opcion|alternativa)\b.{0,30}\b(pago|pagar)\b/.test(text)
+    || /\b(transferencia|transferir|caja ?vecina|datos bancarios|datos para pagar|numero de cuenta|cuenta bancaria)\b/.test(text);
+  return linkProblem || asksAlternative;
+}
 
 function isPaymentLinkRequest(value) {
   const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
@@ -989,7 +997,7 @@ function isExecutiveQuickReply(value) {
 }
 
 async function callBotResponder(env, context, inboundMessage, media) {
-  if (isPaymentLinkRequest(inboundMessage?.text)) return { action: "reply", text: PAYMENT_PORTAL_REPLY };
+  if (isAlternativePaymentRequest(inboundMessage?.text)) return { action: "reply", text: PAYMENT_TRANSFER_REPLY };\n  if (isPaymentLinkRequest(inboundMessage?.text)) return { action: "reply", text: PAYMENT_PORTAL_REPLY };
   if (isPaidQuickReply(inboundMessage?.text)) return { action: "reply", text: context.hasPendingReceipt
     ? "Tu comprobante ya está en revisión."
     : "Perfecto. Envíame el comprobante para dejarlo en revisión." };
