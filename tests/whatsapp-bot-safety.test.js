@@ -36,8 +36,9 @@ vm.runInContext(`
   ${functionSource("isPaymentLinkRequest")}
   ${functionSource("briefCourtesyReply")}
   ${functionSource("externalConnectivityPaymentReply")}
+  ${functionSource("cancellationMeansPayment")}
   ${functionSource("extractWhatsAppMessageEchoes")}
-  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, briefCourtesyReply, externalConnectivityPaymentReply, extractWhatsAppMessageEchoes };
+  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes };
 `, context);
 
 const api = context.api;
@@ -74,6 +75,10 @@ assert.equal(api.briefCourtesyReply("Gracias"), "De nada 👍");
 assert.equal(api.externalConnectivityPaymentReply("a la tarde cancelo esta mala la señal donde trabajo"), "Entendido, puedes realizar el pago más tarde cuando tengas mejor conexión.");
 assert.equal(api.externalConnectivityPaymentReply("en la tarde pago, tengo poca cobertura en la minera"), "Entendido, puedes realizar el pago más tarde cuando tengas mejor conexión.");
 assert.equal(api.externalConnectivityPaymentReply("tengo mala señal de internet BP GO en la casa"), null);
+assert.equal(api.cancellationMeansPayment("Cancelar", [{ direction: "outbound", message_text: "Tu mensualidad continúa pendiente de pago. Puedes regularizarla en https://bpgo.cl/pagar" }]), true);
+assert.equal(api.cancellationMeansPayment("Otro ratito voy a cancelar", [{ direction: "outbound", message_text: "Recordatorio de pago" }]), true);
+assert.equal(api.cancellationMeansPayment("Quiero cancelar el servicio", [{ direction: "outbound", message_text: "Tu mensualidad está pendiente" }]), false);
+assert.equal(api.cancellationMeansPayment("Quiero dar de baja el plan", [{ direction: "outbound", message_text: "Tu mensualidad está pendiente" }]), false);
 
 const echoes = api.extractWhatsAppMessageEchoes([{ field: "smb_message_echoes", value: { messages: [{ id: "manual-1", to: "56911111111" }] } }]);
 assert.equal(echoes.length, 1);
@@ -86,6 +91,7 @@ assert.match(worker, /matchedCustomer\.matchedByPhone \? matchedCustomer\.name/)
 assert.match(worker, /Interpreta respuestas cortas \(sí, no, ya, listo, correcto, ese, números, fechas o colores\) según la última pregunta/);
 assert.match(worker, /pregunta UNA sola cosa por respuesta/);
 assert.match(worker, /Antes de asumir que palabras como "señal"/);
+assert.match(worker, /En conversaciones de cobranza, interpreta "cancelar"/);
 assert.match(worker, /Necesito el nombre del titular del servicio, por ejemplo: Juan Pérez\./);
 const replyRoute = worker.slice(worker.indexOf('url.pathname === "/api/whatsapp/reply"'), worker.indexOf('url.pathname === "/api/whatsapp/message-status"'));
 assert.ok(replyRoute.indexOf('setBotSessionMode(env, phone, "human", "manual_reply", session)') < replyRoute.indexOf("await fetch(endpoint"));
