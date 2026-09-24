@@ -71,5 +71,6 @@ assert.match(worker, /billing_suspension_queue/);
 assert.match(worker, /claims\.repository === "bpgo12\/bpgo-operaciones"/);
 assert.match(worker, /claims\.ref === "refs\/heads\/main"/);
 assert.match(worker, /claims\.event_name/);
+assert.match(worker, /status='approved' AND strftime\('%Y-%m', created_at\) = \?/);
 
 console.log("billing automation: ok");
