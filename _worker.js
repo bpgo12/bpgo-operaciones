@@ -395,6 +395,24 @@ async function ensureWhatsAppBotTables(env) {
   await env.DB.prepare("ALTER TABLE whatsapp_billing_requests ADD COLUMN transcript TEXT").run().catch(() => null);
 }
 
+async function ensureWhatsAppBotProcessedTable(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_bot_processed_inbound (
+    message_id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
+}
+
+// Meta reentrega el mismo webhook si no respondemos a tiempo o hay un reintento de su lado ("at
+// least once"). Sin esta marca, cada reentrega volvía a pasar por la IA (respuesta distinta cada
+// vez, no determinística) y a re-ejecutar acciones sensibles como confirmar un pago por botón,
+// generando respuestas duplicadas al cliente o pagos aplicados dos veces. true = primera vez que
+// se ve este message_id (seguir procesando); false = ya se procesó, se debe saltar.
+async function claimInboundMessageForBot(env, messageId) {
+  await ensureWhatsAppBotProcessedTable(env);
+  const result = await env.DB.prepare("INSERT OR IGNORE INTO whatsapp_bot_processed_inbound (message_id) VALUES (?)").bind(messageId).run();
+  return Boolean(result.meta?.changes);
+}
+
 // Arma un texto legible con los últimos mensajes reales del cliente (y las preguntas del bot) para
 // que Operaciones vea el detalle exacto de lo que se conversó -- un resumen de una línea escrito
 // por el modelo puede perder matices ("qué luz tiene el router", "desde cuándo", etc.) que sí
@@ -948,7 +966,9 @@ function isAlternativePaymentRequest(value) {
   const asksAlternative = /\b(otra forma|otra opcion|alternativa)\b.{0,30}\b(pago|pagar)\b/.test(text)
     || /\b(transferencia|transferir|caja ?vecina|datos bancarios|datos para pagar|numero de cuenta|cuenta bancaria|cuenta para depositar|depositar|deposito)\b/.test(text)
     || /\b(cuenta|datos)\b.{0,35}\b(depositar|transferir|pagar)\b/.test(text)
-    || /\b(cuenta|datos)\b.{0,45}\b(sigue|siguen|misma|mismos)\b/.test(text);
+    // cubre ambos órdenes naturales en español: "cuenta sigue siendo la misma" y "tiene la misma cuenta".
+    || /\b(cuenta|datos)\b.{0,45}\b(sigue|siguen|misma|mismos)\b/.test(text)
+    || /\b(sigue|siguen|misma|mismos)\b.{0,45}\b(cuenta|datos)\b/.test(text);
   return linkProblem || asksAlternative;
 }
 
@@ -1022,7 +1042,10 @@ async function callBotResponder(env, context, inboundMessage, media) {
       context.customer.address ? `dirección ${context.customer.address}` : null,
       context.customer.billingAuthoritative && balanceText ? `saldo registrado ${balanceText}` : "saldo no disponible para confirmación automática",
       context.customer.paymentStatus ? `estado ${context.customer.paymentStatus}` : null,
-      context.customer.dueDate ? `vencimiento ${context.customer.dueDate}` : null,
+      // dueDate en los registros de facturación suele quedar fijo desde la contratación y no se
+      // actualiza mes a mes (mismo valor en julio/agosto/septiembre) -- mostrarlo cuando ya pasó
+      // hace que el bot le diga al cliente una fecha de vencimiento vieja como si fuera vigente.
+      context.customer.dueDate && Date.parse(context.customer.dueDate) >= Date.now() ? `vencimiento ${context.customer.dueDate}` : null,
     ].filter(Boolean).join(", ");
     customerLine = `Cliente identificado: ${context.customer.name} (${details}).`;
   }
@@ -1277,6 +1300,7 @@ async function runBotForInboundMessages(env, changes) {
     for (const message of (Array.isArray(value.messages) ? value.messages : [])) {
       const phone = message.from;
       try {
+        if (message.id && !(await claimInboundMessageForBot(env, message.id))) continue;
         await ensureWhatsAppBotTables(env);
         const staffButtonPayload = message.button?.payload || null;
         const isStaffPhone = phone === normalizeWhatsAppPhone(env.STAFF_PHONE_CARLOS) || phone === normalizeWhatsAppPhone(env.STAFF_PHONE_EDUARDO);
