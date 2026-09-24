@@ -270,7 +270,10 @@ async function findCustomerForWhatsApp(env, phone, fallbackName) {
   const row = await env.DB.prepare("SELECT data FROM app_state WHERE id = 'main'").first().catch(() => null);
   const state = row?.data ? JSON.parse(row.data) : null;
   const wanted = normalizeComparablePhone(phone);
-  const monthName = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"][new Date().getMonth()];
+  // new Date().getMonth() es hora UTC del runtime, no de Chile -- en la noche (hora Chile) cerca de
+  // fin de mes ya sería el mes siguiente en UTC, y el bot buscaría el registro de facturación del
+  // mes equivocado al responder "cuánto debo". Se usa chileDateParts() en su lugar.
+  const monthName = SPANISH_MONTH_NAMES[chileDateParts().month - 1];
   const billingRecords = (Array.isArray(state?.billingRecords) ? state.billingRecords : []).filter((record) => {
     const candidate = normalizeComparablePhone(record.phone || record.whatsapp || record.telefono || "");
     const recordMonth = String(record.billingMonth || record.month || "").toLocaleLowerCase("es-CL");
@@ -1132,7 +1135,12 @@ async function callBotResponder(env, context, inboundMessage, media) {
 const SPANISH_MONTH_NAMES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
 
 function currentBillingMonthEs() {
-  return SPANISH_MONTH_NAMES[new Date().getMonth()];
+  // new Date().getMonth() usa el reloj del runtime de Cloudflare Workers, que es UTC. Chile va
+  // atrasado respecto a UTC, así que en las últimas horas de cada día (y sobre todo a fin de mes)
+  // UTC ya muestra el mes siguiente mientras en Chile sigue el mes vigente -- eso hacía que un pago
+  // confirmado a esa hora se buscara/aplicara contra el mes equivocado. Se usa chileDateParts() en
+  // vez del reloj local del runtime.
+  return SPANISH_MONTH_NAMES[chileDateParts().month - 1];
 }
 
 // Aplica un pago confirmado por un humano (Carlos/Eduardo tocando el botón de WhatsApp) directamente
