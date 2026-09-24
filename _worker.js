@@ -1752,10 +1752,16 @@ async function fetchFreshBillingSource(env) {
   return payload;
 }
 
-async function pendingPaymentReceiptPhones(env) {
+async function pendingPaymentReceiptPhones(env, month) {
   await ensureWhatsAppAutomationTable(env);
+  // 'suggested'/'reviewing' pausan el envío mientras Carlos revisa el comprobante. Una vez que lo
+  // aprueba ('approved'), el cliente debe seguir excluido de la cobranza del MISMO mes aunque a
+  // alguien se le olvide marcar "PAGADO" en la planilla de Google Sheets -- si no, el sistema le
+  // vuelve a mandar recordatorios a alguien que ya pagó y Carlos ya confirmó. Se limita al mes de
+  // cobranza vigente para no bloquear para siempre a un cliente que vuelva a deber el mes siguiente.
   const rows = await env.DB.prepare(`SELECT DISTINCT phone FROM whatsapp_automation_cases
-    WHERE case_type='payment' AND status IN ('suggested','reviewing')`).all();
+    WHERE case_type='payment' AND (status IN ('suggested','reviewing')
+      OR (status='approved' AND strftime('%Y-%m', created_at) = ?))`).bind(month || "").all();
   return new Set((rows.results || []).map((item) => normalizeWhatsAppPhone(item.phone)).filter(Boolean));
 }
 
@@ -1835,7 +1841,7 @@ async function updateBillingAutomationStatus(env, item) {
 
 async function revalidateBillingRecipient(env, phone, date = new Date()) {
   const source = await fetchFreshBillingSource(env);
-  const parsed = billingEligibilityFromRows(source.rows, date, await pendingPaymentReceiptPhones(env));
+  const parsed = billingEligibilityFromRows(source.rows, date, await pendingPaymentReceiptPhones(env, billingMonthKey(date)));
   if (!parsed.ok) throw new Error(parsed.error);
   return parsed.eligible.find((item) => item.phone === phone) || null;
 }
@@ -1863,7 +1869,7 @@ async function runBillingAutomation(env, options = {}) {
     await env.DB.prepare("INSERT INTO billing_automation_runs (billing_month,stage,status,details) VALUES (?,?,'aborted',?)").bind(month, stage, String(error.message || error)).run();
     return { ok: false, aborted: true, error: String(error.message || error) };
   }
-  const parsed = billingEligibilityFromRows(source.rows, date, await pendingPaymentReceiptPhones(env));
+  const parsed = billingEligibilityFromRows(source.rows, date, await pendingPaymentReceiptPhones(env, month));
   if (!parsed.ok) return { ok: false, aborted: true, error: parsed.error };
   await reconcileBillingSuspensionQueue(env, month, parsed);
   if (stage === "day23") {
@@ -1923,7 +1929,7 @@ async function billingAutomationDashboard(env) {
   await ensureBillingAutomationTables(env);
   const month = billingMonthKey();
   const source = await fetchFreshBillingSource(env).catch(() => null);
-  const parsed = source ? billingEligibilityFromRows(source.rows, new Date(), await pendingPaymentReceiptPhones(env)) : null;
+  const parsed = source ? billingEligibilityFromRows(source.rows, new Date(), await pendingPaymentReceiptPhones(env, month)) : null;
   if (parsed?.ok) await reconcileBillingSuspensionQueue(env, month, parsed);
   const sends = await env.DB.prepare(`SELECT stage,status,COUNT(*) AS count FROM billing_automation_sends
     WHERE billing_month=? AND is_test=0 GROUP BY stage,status`).bind(month).all();
