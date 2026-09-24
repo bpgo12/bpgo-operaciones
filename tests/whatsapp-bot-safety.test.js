@@ -72,7 +72,7 @@ for (const value of ["gracias", "ya pagué", "ahí está pagado gracias", "listo
 for (const value of ["Me manda el link para pagar", "Dónde pago", "Pásame el enlace de pago", "Quiero pagar el plan"]) {
   assert.equal(api.isPaymentLinkRequest(value), true, `${value} must use the official payment portal`);
 }
-for (const value of ["La cuenta para depositar sigue siendo la misma cierto", "¿Cuál es la cuenta para depositar?", "Mándame la cuenta para transferir", "¿Puedo pagar por caja vecina?"]) {
+for (const value of ["La cuenta para depositar sigue siendo la misma cierto", "¿Cuál es la cuenta para depositar?", "Mándame la cuenta para transferir", "¿Puedo pagar por caja vecina?", "Hola tiene la misma cuenta", "Son los mismos datos"]) {
   assert.equal(api.isAlternativePaymentRequest(value), true, `${value} must use transfer fallback`);
 }
 assert.equal(api.briefCourtesyReply("Gracias"), "De nada 👍");
@@ -97,6 +97,8 @@ assert.match(worker, /pregunta UNA sola cosa por respuesta/);
 assert.match(worker, /Antes de asumir que palabras como "señal"/);
 assert.match(worker, /En conversaciones de cobranza, interpreta "cancelar"/);
 assert.match(worker, /Necesito el nombre del titular del servicio, por ejemplo: Juan Pérez\./);
+assert.match(worker, /if \(message\.id && !\(await claimInboundMessageForBot\(env, message\.id\)\)\) continue/);
+assert.match(worker, /context\.customer\.dueDate && Date\.parse\(context\.customer\.dueDate\) >= Date\.now\(\)/);
 const replyRoute = worker.slice(worker.indexOf('url.pathname === "/api/whatsapp/reply"'), worker.indexOf('url.pathname === "/api/whatsapp/message-status"'));
 assert.ok(replyRoute.indexOf('setBotSessionMode(env, phone, "human", "manual_reply", session)') < replyRoute.indexOf("await fetch(endpoint"));
 
