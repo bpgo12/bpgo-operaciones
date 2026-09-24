@@ -968,9 +968,9 @@ function externalConnectivityPaymentReply(value) {
   const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
   const mentionsLaterPayment = /\b(a la tarde|mas tarde|en la tarde|despues)\b/.test(text)
     && /\b(cancelo|cancelar|pago|pagar|transfiero|transferir)\b/.test(text);
-  const mentionsExternalSignal = /\b(mala señal|sin señal|poca señal|señal mala|mala conexion|poca cobertura)\b/.test(text)
+  const mentionsExternalSignal = /\b(mala senal|sin senal|poca senal|senal mala|mala conexion|poca cobertura)\b/.test(text)
     && /\b(trabajo|faena|minera|campamento|oficina|donde trabajo|aca donde trabajo)\b/.test(text);
-  if (mentionsLaterPayment && (mentionsExternalSignal || /\b(señal|conexion|cobertura)\b/.test(text))) {
+  if (mentionsLaterPayment && (mentionsExternalSignal || /\b(senal|conexion|cobertura)\b/.test(text))) {
     return "Entendido, puedes realizar el pago más tarde cuando tengas mejor conexión.";
   }
   return null;
