@@ -104,6 +104,9 @@ assert.match(worker, /if \(message\.id && !\(await claimInboundMessageForBot\(en
 assert.match(worker, /context\.customer\.dueDate && Date\.parse\(context\.customer\.dueDate\) >= Date\.now\(\)/);
 assert.match(worker, /const monthName = SPANISH_MONTH_NAMES\[chileDateParts\(\)\.month - 1\]/);
 assert.match(worker, /return SPANISH_MONTH_NAMES\[chileDateParts\(\)\.month - 1\]/);
+assert.match(worker, /"¿Podrías aclarar un poco más a qué te refieres\?"/);
+assert.match(worker, /"Parece que hay un malentendido"/);
+assert.match(worker, /no a una persona real de BPGO escribiendo por WhatsApp/);
 
 for (const value of ["PAGO INGRESADO", "pago ingresado", "ya pagué", "hice el pago", "ingresé el pago", "pago realizado"]) {
   assert.equal(api.isPaidQuickReply(value), true, `${value} must be recognized as an explicit paid statement`);
