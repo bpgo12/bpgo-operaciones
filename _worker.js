@@ -221,9 +221,22 @@ function classifyInboundMessage(message) {
   return { type: "general", confidence: 35, summary: "Consulta general pendiente de atención.", serviceMonth: null, amount: null };
 }
 
+// Los comprobantes de WebPay/Transbank suelen llegar como PDF sin caption, con nombres de archivo
+// del tipo "webpaycl-comprobantePago-XXXX.pdf": "comprobante" y "Pago" quedan pegados en camelCase,
+// sin espacio, así que ninguna regex con límites de palabra (\b) los reconoce como texto de pago.
+// Se separa el camelCase y los guiones antes de usar el nombre como texto del mensaje.
+function humanizeFilename(filename) {
+  return String(filename || "")
+    .replace(/\.[a-zA-Z0-9]{2,5}$/, "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .trim();
+}
+
 function inboundMessageText(message) {
   return message.text?.body || message.image?.caption || message.document?.caption || message.button?.text
-    || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || message.document?.filename || null;
+    || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title
+    || (message.document?.filename ? humanizeFilename(message.document.filename) : null) || null;
 }
 
 function hasExplicitPaymentIntent(value) {
@@ -1010,8 +1023,14 @@ function cancellationMeansPayment(value, history) {
 }
 
 function isPaidQuickReply(value) {
-  const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[.!]/g, "").trim();
-  return text === "ya pague";
+  const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[.,!\u00a1\u00bf?]/g, "").trim();
+  if (text === "ya pague") return true;
+  // Declaraciones expl\u00edcitas de pago ya hecho ("pagu\u00e9", "pago ingresado/realizado", "hice el
+  // pago"). No incluye "pago" suelto para no confundirlo con preguntas ("cu\u00e1nto pago", "c\u00f3mo pago").
+  return /\bpague\b/.test(text)
+    || /\bpago\s+(ingresado|realizado|hecho|efectuado|enviado|listo)\b/.test(text)
+    || /\b(hice|realice|efectue|ingrese)\s+(el\s+)?pago\b/.test(text)
+    || /\bya\s+(transferi|deposite)\b/.test(text);
 }
 
 function isExecutiveQuickReply(value) {

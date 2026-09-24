@@ -39,7 +39,10 @@ vm.runInContext(`
   ${functionSource("externalConnectivityPaymentReply")}
   ${functionSource("cancellationMeansPayment")}
   ${functionSource("extractWhatsAppMessageEchoes")}
-  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes };
+  ${functionSource("isPaidQuickReply")}
+  ${functionSource("humanizeFilename")}
+  ${functionSource("inboundMessageText")}
+  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText };
 `, context);
 
 const api = context.api;
@@ -99,6 +102,19 @@ assert.match(worker, /En conversaciones de cobranza, interpreta "cancelar"/);
 assert.match(worker, /Necesito el nombre del titular del servicio, por ejemplo: Juan Pérez\./);
 assert.match(worker, /if \(message\.id && !\(await claimInboundMessageForBot\(env, message\.id\)\)\) continue/);
 assert.match(worker, /context\.customer\.dueDate && Date\.parse\(context\.customer\.dueDate\) >= Date\.now\(\)/);
+
+for (const value of ["PAGO INGRESADO", "pago ingresado", "ya pagué", "hice el pago", "ingresé el pago", "pago realizado"]) {
+  assert.equal(api.isPaidQuickReply(value), true, `${value} must be recognized as an explicit paid statement`);
+}
+for (const value of ["cuánto pago", "cómo pago", "necesito pagar", "voy a pagar mañana"]) {
+  assert.equal(api.isPaidQuickReply(value), false, `${value} must NOT be treated as an already-paid statement`);
+}
+
+assert.equal(api.humanizeFilename("webpaycl-comprobantePago-GACIDNn660Noz2PEy7EWJ.pdf").toLowerCase().includes("comprobante pago"), true);
+assert.equal(
+  api.inboundMessageText({ document: { filename: "webpaycl-comprobantePago-GACIDNn660Noz2PEy7EWJ.pdf" } }).toLowerCase().includes("comprobante pago"),
+  true,
+);
 const replyRoute = worker.slice(worker.indexOf('url.pathname === "/api/whatsapp/reply"'), worker.indexOf('url.pathname === "/api/whatsapp/message-status"'));
 assert.ok(replyRoute.indexOf('setBotSessionMode(env, phone, "human", "manual_reply", session)') < replyRoute.indexOf("await fetch(endpoint"));
 
