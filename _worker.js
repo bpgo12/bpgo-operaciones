@@ -144,6 +144,16 @@ async function ensureWhatsAppCampaignTable(env) {
   )`).run();
 }
 
+async function ensureManualBillingSendsTable(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_manual_billing_sends (
+    phone TEXT NOT NULL,
+    send_date TEXT NOT NULL,
+    message_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (phone, send_date)
+  )`).run();
+}
+
 async function ensureWhatsAppInboxTable(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_inbox_messages (
     message_id TEXT PRIMARY KEY,
@@ -1031,7 +1041,7 @@ function isPaidQuickReply(value) {
   // Declaraciones expl\u00edcitas de pago ya hecho ("pagu\u00e9", "pago ingresado/realizado", "hice el
   // pago"). No incluye "pago" suelto para no confundirlo con preguntas ("cu\u00e1nto pago", "c\u00f3mo pago").
   return /\bpague\b/.test(text)
-    || /\bpago\s+(ingresado|realizado|hecho|efectuado|enviado|listo)\b/.test(text)
+    || /\bpago\s+(ya\s+)?(esta\s+)?(ingresado|realizado|hecho|efectuado|enviado|listo)\b/.test(text)
     || /\b(hice|realice|efectue|ingrese)\s+(el\s+)?pago\b/.test(text)
     || /\bya\s+(transferi|deposite)\b/.test(text);
 }
@@ -1209,7 +1219,13 @@ async function executeBotAction(env, credentials, phone, action, message) {
           summary='Imagen o documento recibido sin evidencia suficiente de pago.', amount=NULL, service_month=NULL,
           updated_at=datetime('now') WHERE id=?`).bind(caseRow.id).run();
       }
-      await sendBotReply(env, credentials, phone, "Recibí la imagen. ¿En qué podemos ayudarte con ella?", preferAudio);
+      // El modelo puede llamar "payment_ack" para un mensaje sin ningún adjunto (ej. "el pago está
+      // hecho" sin comprobante). El texto fijo decía "Recibí la imagen" sin importar si en verdad
+      // llegó una -- eso hacía que el bot afirmara haber recibido algo que el cliente nunca mandó.
+      const fallbackReply = message.mediaId
+        ? "Recibí tu imagen, pero no logro confirmar que sea un comprobante de pago. Si lo es, cuéntame y lo dejo en revisión."
+        : "¿Ya realizaste el pago? Envíame el comprobante para dejarlo en revisión.";
+      await sendBotReply(env, credentials, phone, fallbackReply, preferAudio);
       return;
     }
     if (caseRow) {
@@ -1224,8 +1240,14 @@ async function executeBotAction(env, credentials, phone, action, message) {
           action.extracted_date || null, caseRow.id).run();
     }
     const matchedCustomer = await findCustomerForWhatsApp(env, phone, message.customerName);
-    const known = caseRow?.reported_name || await getKnownAccountName(env, phone)
+    // A diferencia del flujo donde el cliente escribe el nombre (que sí pasa por
+    // isPlausibleAccountName), este "known" puede venir del nombre registrado en la planilla o de
+    // un reported_name ya guardado en un caso anterior. Si esa fuente tiene un dato sucio (fila mal
+    // cargada, o un valor inválido que se coló antes por este mismo camino), no se debe reutilizar
+    // ni propagar -- se revalida igual antes de confiar en él.
+    const rawKnown = caseRow?.reported_name || await getKnownAccountName(env, phone)
       || (matchedCustomer.matchedByPhone ? matchedCustomer.name : null);
+    const known = isPlausibleAccountName(rawKnown) ? rawKnown : null;
     if (known) {
       if (caseRow && !caseRow.reported_name) {
         await env.DB.prepare("UPDATE whatsapp_automation_cases SET reported_name = ? WHERE id = ?").bind(known, caseRow.id).run();
@@ -2020,6 +2042,13 @@ async function sendBillingMessages(request, env) {
   const endpoint = `https://graph.facebook.com/v25.0/${encodeURIComponent(phoneNumberId)}/messages`;
   const results = [];
   if (campaign === "number-change") await ensureWhatsAppCampaignTable(env);
+  // La campaña "billing" (usada desde la cola de "Gestión diaria") no tenía ningún control de
+  // duplicados -- reprocesar la cola o hacer doble clic reenviaba el mismo recordatorio al mismo
+  // cliente el mismo día. Se limita a un envío por teléfono por día (hora Chile); días distintos sí
+  // pueden reenviar (recordatorios sucesivos mientras la deuda siga pendiente).
+  if (campaign === "billing") await ensureManualBillingSendsTable(env);
+  const chileToday = chileDateParts();
+  const todayKey = `${chileToday.year}-${String(chileToday.month).padStart(2, "0")}-${String(chileToday.day).padStart(2, "0")}`;
   for (const record of records) {
     const phone = normalizeWhatsAppPhone(record.phone);
     if (!phone) {
@@ -2029,6 +2058,14 @@ async function sendBillingMessages(request, env) {
     if (campaign === "number-change") {
       const previous = await env.DB.prepare("SELECT message_id FROM whatsapp_campaign_sends WHERE campaign = ? AND recipient = ?")
         .bind(campaign, phone).first();
+      if (previous) {
+        results.push({ id: record.id, phone, ok: true, skipped: true, messageId: previous.message_id });
+        continue;
+      }
+    }
+    if (campaign === "billing") {
+      const previous = await env.DB.prepare("SELECT message_id FROM whatsapp_manual_billing_sends WHERE phone = ? AND send_date = ?")
+        .bind(phone, todayKey).first();
       if (previous) {
         results.push({ id: record.id, phone, ok: true, skipped: true, messageId: previous.message_id });
         continue;
@@ -2055,6 +2092,10 @@ async function sendBillingMessages(request, env) {
       if (campaign === "number-change") {
         await env.DB.prepare("INSERT OR IGNORE INTO whatsapp_campaign_sends (campaign, recipient, message_id) VALUES (?, ?, ?)")
           .bind(campaign, phone, messageId).run();
+      }
+      if (campaign === "billing") {
+        await env.DB.prepare("INSERT OR IGNORE INTO whatsapp_manual_billing_sends (phone, send_date, message_id) VALUES (?, ?, ?)")
+          .bind(phone, todayKey, messageId).run();
       }
     }
     results.push({

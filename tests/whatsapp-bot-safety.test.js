@@ -107,8 +107,12 @@ assert.match(worker, /return SPANISH_MONTH_NAMES\[chileDateParts\(\)\.month - 1\
 assert.match(worker, /"¿Podrías aclarar un poco más a qué te refieres\?"/);
 assert.match(worker, /"Parece que hay un malentendido"/);
 assert.match(worker, /no a una persona real de BPGO escribiendo por WhatsApp/);
+assert.match(worker, /const fallbackReply = message\.mediaId\s*\n\s*\? "Recibí tu imagen, pero no logro confirmar/);
+assert.match(worker, /const known = isPlausibleAccountName\(rawKnown\) \? rawKnown : null/);
+assert.match(worker, /CREATE TABLE IF NOT EXISTS whatsapp_manual_billing_sends/);
+assert.match(worker, /SELECT message_id FROM whatsapp_manual_billing_sends WHERE phone = \? AND send_date = \?/);
 
-for (const value of ["PAGO INGRESADO", "pago ingresado", "ya pagué", "hice el pago", "ingresé el pago", "pago realizado"]) {
+for (const value of ["PAGO INGRESADO", "pago ingresado", "ya pagué", "hice el pago", "ingresé el pago", "pago realizado", "El pagó está hecho", "el pago ya esta realizado"]) {
   assert.equal(api.isPaidQuickReply(value), true, `${value} must be recognized as an explicit paid statement`);
 }
 for (const value of ["cuánto pago", "cómo pago", "necesito pagar", "voy a pagar mañana"]) {
