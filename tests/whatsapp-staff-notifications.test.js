@@ -42,4 +42,18 @@ assert.match(operations, /Probar aviso a Carlos/);
 assert.match(operations, /Respuesta completa PRIMARY/);
 assert.match(operations, /Respuesta completa FALLBACK/);
 
+// Espaciado de avisos: Meta empezó a rechazar plantillas a Carlos por volumen/frecuencia ("healthy
+// ecosystem engagement"). notifyStaff ya no dispara siempre al tiro; encola si el último intento a
+// ese rol fue hace menos de STAFF_NOTIFICATION_PACING_MS, y flushQueuedStaffNotifications() -- que
+// corre sin bloquear en cada webhook de Meta -- va despachando lo pendiente de a uno por rol.
+assert.match(worker, /const STAFF_NOTIFICATION_PACING_MS = 90 \* 1000/);
+assert.match(worker, /async function flushQueuedStaffNotifications\(env\)/);
+assert.match(worker, /if \(Date\.now\(\) - lastAttemptMs < STAFF_NOTIFICATION_PACING_MS\) \{\s*\n\s*return \{ ok: true, status: "queued", queued: true \};/);
+assert.match(worker, /const flushTask = flushQueuedStaffNotifications\(env\)\.catch\(\(\) => null\)/);
+assert.match(worker, /ctx\.waitUntil\(flushTask\)/);
+// El reintento manual desde el panel debe seguir llamando deliverStaffNotification directo (nunca
+// pasar por notifyStaff), para que Carlos pueda forzar un envío inmediato sin esperar el espaciado.
+const retryRoute = worker.slice(worker.indexOf('staff-notifications/retry'), worker.indexOf('staff-notifications/retry') + 2000);
+assert.match(retryRoute, /await deliverStaffNotification\(env, credentials, row\)/);
+
 console.log("whatsapp staff notifications: ok");
