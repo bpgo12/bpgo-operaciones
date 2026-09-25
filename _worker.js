@@ -763,6 +763,26 @@ async function deliverStaffNotification(env, credentials, row) {
   return { ok: accepted, status: accepted ? "accepted" : "failed", messageId, fallbackUsed: Boolean(fallback), error: accepted ? null : finalError };
 }
 
+// Meta empezó a rechazar avisos a Carlos con "This message was not delivered to maintain healthy
+// ecosystem engagement" -- su número recibía una plantilla por cada comprobante nuevo, a veces
+// varias en minutos, y Meta lo trata como spam del mismo remitente. En vez de mandar cada aviso al
+// tiro, se espacian: si ya se intentó un envío a ese rol hace menos de STAFF_NOTIFICATION_PACING_MS,
+// el aviso queda 'pending' en la cola y lo despacha flushQueuedStaffNotifications() en el próximo
+// tick disponible (se llama sola al final de cada webhook de Meta, que llega seguido).
+const STAFF_NOTIFICATION_PACING_MS = 90 * 1000;
+
+function parseSqliteDatetime(value) {
+  if (!value) return NaN;
+  return Date.parse(String(value).includes("T") ? value : `${value.replace(" ", "T")}Z`);
+}
+
+async function lastStaffNotificationAttemptMs(env, role) {
+  const row = await env.DB.prepare(
+    "SELECT last_attempt_at FROM staff_notifications_log WHERE role=? AND last_attempt_at IS NOT NULL ORDER BY last_attempt_at DESC LIMIT 1"
+  ).bind(role).first();
+  return row?.last_attempt_at ? parseSqliteDatetime(row.last_attempt_at) : 0;
+}
+
 async function notifyStaff(env, credentials, role, caseType, customerName, customerPhone, summary, options = {}) {
   try {
     await ensureStaffNotificationsLogTable(env);
@@ -779,11 +799,36 @@ async function notifyStaff(env, credentials, role, caseType, customerName, custo
         sanitizeStaffTemplateParam(summary, 300), templateName).run();
     const row = await env.DB.prepare("SELECT * FROM staff_notifications_log WHERE idempotency_key=?").bind(identity.key).first();
     if (!insert.meta?.changes) return { ok: row?.status !== "failed", duplicate: true, status: row?.status };
+    const lastAttemptMs = await lastStaffNotificationAttemptMs(env, role);
+    if (Date.now() - lastAttemptMs < STAFF_NOTIFICATION_PACING_MS) {
+      return { ok: true, status: "queued", queued: true };
+    }
     return await deliverStaffNotification(env, credentials, row);
   } catch (error) {
     console.error("staff_notification_failed", role, caseType, String(error?.message || error));
     return { ok: false, status: "failed", error: String(error?.message || error) };
   }
+}
+
+// Se llama sin bloquear (ctx.waitUntil) al final de cada webhook de Meta -- despacha como mucho un
+// aviso pendiente por rol y solo si ya pasó el espaciado mínimo, para ir vaciando la cola de a poco
+// en vez de todos juntos.
+async function flushQueuedStaffNotifications(env) {
+  await ensureStaffNotificationsLogTable(env);
+  const credentials = await getWhatsAppCredentials(env);
+  if (!credentials.accessToken || !credentials.phoneNumberId) return { ok: false, error: "Credenciales de WhatsApp incompletas." };
+  const results = [];
+  for (const role of ["carlos", "eduardo"]) {
+    const lastAttemptMs = await lastStaffNotificationAttemptMs(env, role);
+    if (Date.now() - lastAttemptMs < STAFF_NOTIFICATION_PACING_MS) continue;
+    const pending = await env.DB.prepare(
+      "SELECT * FROM staff_notifications_log WHERE role=? AND status='pending' ORDER BY created_at ASC LIMIT 1"
+    ).bind(role).first();
+    if (!pending) continue;
+    const result = await deliverStaffNotification(env, credentials, pending).catch((error) => ({ ok: false, error: String(error?.message || error) }));
+    results.push({ role, id: pending.id, ...result });
+  }
+  return { ok: true, results };
 }
 
 async function updateStaffNotificationStatus(env, item) {
@@ -2340,7 +2385,8 @@ export default {
       const inboundChanges = inboundOnlyChanges(changes);
       const messagesSaved = await saveInboundWhatsAppMessages(env, inboundChanges).catch(() => 0);
       const botTask = runBotForInboundMessages(env, inboundChanges).catch(() => null);
-      if (ctx?.waitUntil) ctx.waitUntil(botTask); else await botTask;
+      const flushTask = flushQueuedStaffNotifications(env).catch(() => null);
+      if (ctx?.waitUntil) { ctx.waitUntil(botTask); ctx.waitUntil(flushTask); } else { await botTask; await flushTask; }
       return Response.json({ ok: true, received: statuses.length, messagesSaved, manualEchoesSaved });
     }
 
