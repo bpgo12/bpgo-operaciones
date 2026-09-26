@@ -112,6 +112,13 @@ assert.match(worker, /const known = isPlausibleAccountName\(rawKnown\) \? rawKno
 assert.match(worker, /CREATE TABLE IF NOT EXISTS whatsapp_manual_billing_sends/);
 assert.match(worker, /SELECT message_id FROM whatsapp_manual_billing_sends WHERE phone = \? AND send_date = \?/);
 
+// Debounce de ráfagas de mensajes: el bot no debe contestar cada fragmento por separado.
+assert.match(worker, /const BOT_REPLY_DEBOUNCE_MS = 6000/);
+assert.match(worker, /async function claimLatestMessageForReply\(env, phone, messageId, waitMs = BOT_REPLY_DEBOUNCE_MS\)/);
+assert.match(worker, /if \(!\(await claimLatestMessageForReply\(env, phone, message\.id\)\)\) continue/);
+assert.match(worker, /async function recentInboundMedia\(env, phone\)/);
+assert.match(worker, /const carriedOver = await recentInboundMedia\(env, phone\)/);
+
 for (const value of ["PAGO INGRESADO", "pago ingresado", "ya pagué", "hice el pago", "ingresé el pago", "pago realizado", "El pagó está hecho", "el pago ya esta realizado"]) {
   assert.equal(api.isPaidQuickReply(value), true, `${value} must be recognized as an explicit paid statement`);
 }

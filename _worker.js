@@ -983,6 +983,7 @@ const BOT_SYSTEM_PROMPT = `Eres el asistente de WhatsApp de BPGO, un proveedor d
 Reglas duras, nunca las rompas:
 - Usa el historial reciente como una conversación continua. Interpreta respuestas cortas (sí, no, ya, listo, correcto, ese, números, fechas o colores) según la última pregunta de BPGO. No vuelvas a pedir nombre, sector, dirección, plan, problema, días sin servicio, reinicio del router ni titular si ya aparecen en el historial o en Cliente identificado.
 - Responde directamente. No repitas saludos, despedidas ni lo que el cliente acaba de decir. Nunca uses frases de servicio al cliente genérico/robótico, ni en español ni traducidas del inglés -- prohibido literalmente: "Estoy aquí para ayudarte", "Si tienes más preguntas", "No dudes en contactarnos", "Quedo atento", "¿Podrías aclarar un poco más a qué te refieres?", "¿En qué puedo ayudarte hoy?", "¿Tienes alguna consulta específica o algo en lo que necesites ayuda?", "Parece que hay un malentendido", "Entiendo que estés [molesta/confundida/etc.]. Si quieres discutir alguna inquietud...". Esas frases suenan a bot corporativo, no a una persona real de BPGO escribiendo por WhatsApp. Ejemplo: si el cliente manda una foto o PDF sin decir nada, NO preguntes "¿en qué puedo ayudarte con esto?" (es obvio que es un posible comprobante) -- agradece y sigue el flujo de comprobantes de abajo. Si el cliente está molesto o confundido, no lo valides con una frase de manual ("entiendo tu frustración"); resuelve directo su punto en 1 frase, como lo haría un colega, no un psicólogo. Si de verdad no entendiste el mensaje, pide que lo repita de forma simple y natural ("no te entendí bien, ¿me lo explicas de nuevo?"), sin sonar a plantilla.
+- Escribe como una persona real de BPGO conversando por WhatsApp, no como un formulario de atención al cliente: frases cortas y naturales, sin repetir el mismo dato dos veces en un mismo mensaje, y sin cerrar cada respuesta con una pregunta de relleno tipo "¿necesitas algo más?" cuando no aporta nada. Ajusta tu formalidad a la del cliente -- si escribe informal, con errores de tipeo o abreviado, respóndele natural y cercano, no en un registro más formal que el de él. No repitas la misma idea con otras palabras en el mismo mensaje (ej. no digas el saldo o la fecha dos veces seguidas de formas distintas).
 - NUNCA confirmes ni marques un pago como "recibido" o "verificado" en el sistema. Una imagen cualquiera NO es un comprobante. Usa "payment_ack" solo si el texto/caption dice explícitamente que pagó/envía comprobante, o si el adjunto muestra claramente un comprobante bancario y puedes enumerar al menos 3 señales reales en receipt_evidence (por ejemplo: título de comprobante, banco, monto, fecha/hora, cuentas, destinatario o número de operación). Una foto de router, perfil, catálogo u otra imagen es general/técnica, nunca pago. Si sí es comprobante, solo agradece y explica que el equipo lo revisará. Nunca inventes monto, fecha ni evidencia.
 - Si el cliente pide el link/enlace para pagar, pregunta dónde pagar, cómo pagar online o quiere pagar su plan, responde directamente con el único portal oficial: https://bpgo.cl/pagar. No escales este caso ni inventes otro enlace.
 - Si el cliente pregunta cuánto debe, cuándo vence su pago, o el estado de su cuenta: usa EXCLUSIVAMENTE el dato de "Cliente identificado" (saldo/vencimiento) que te doy abajo, con la acción "reply". Nunca inventes un monto o fecha. Si ese dato no está disponible o el cliente no fue identificado, dilo claramente y usa "escalate".
@@ -1384,6 +1385,43 @@ async function executeBotAction(env, credentials, phone, action, message) {
   await sendBotReply(env, credentials, phone, "Ya te comunico con un agente de BPGO, en breve te responde por acá. 🙌", preferAudio);
 }
 
+async function ensureBotDebounceTable(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_bot_debounce (
+    phone TEXT PRIMARY KEY,
+    message_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
+}
+
+const BOT_REPLY_DEBOUNCE_MS = 6000;
+
+// Los clientes suelen mandar la misma idea en 2-3 mensajes seguidos ("Hola tiene la misma cuenta" /
+// "?" / "Me la podría mandar"). Sin esto, cada mensaje disparaba su propia llamada a la IA y su
+// propia respuesta -- se sentía fragmentado y a veces contestaba al mensaje equivocado, como una
+// persona real jamás lo haría (una persona espera a que el otro termine de escribir). Se registra
+// este mensaje como "el más nuevo" de ese teléfono y se espera un poco; si mientras tanto llega uno
+// más nuevo, esta invocación se retira sin responder y deja que la del mensaje más nuevo conteste
+// por todos (el historial reciente que se le pasa a la IA ya incluye los mensajes anteriores).
+async function claimLatestMessageForReply(env, phone, messageId, waitMs = BOT_REPLY_DEBOUNCE_MS) {
+  await ensureBotDebounceTable(env);
+  await env.DB.prepare(`INSERT INTO whatsapp_bot_debounce (phone, message_id, updated_at) VALUES (?, ?, datetime('now'))
+    ON CONFLICT(phone) DO UPDATE SET message_id = excluded.message_id, updated_at = datetime('now')`)
+    .bind(phone, messageId).run();
+  await new Promise((resolve) => setTimeout(resolve, waitMs));
+  const current = await env.DB.prepare("SELECT message_id FROM whatsapp_bot_debounce WHERE phone = ?").bind(phone).first();
+  return current?.message_id === messageId;
+}
+
+// Si el mensaje que finalmente responde no trae adjunto propio (ej. el cliente mandó la foto del
+// comprobante y enseguida "gracias" o el nombre del titular como mensaje aparte), se recupera el
+// último adjunto reciente (<60s) de ese teléfono para no perder la evidencia visual del comprobante.
+async function recentInboundMedia(env, phone) {
+  const row = await env.DB.prepare(`SELECT media_id, message_type, created_at FROM whatsapp_inbox_messages
+    WHERE phone = ? AND direction = 'inbound' AND media_id IS NOT NULL ORDER BY created_at DESC LIMIT 1`).bind(phone).first();
+  if (!row || Date.now() - Date.parse(row.created_at) >= 60000) return null;
+  return { mediaId: row.media_id, mediaType: row.message_type };
+}
+
 async function runBotForInboundMessages(env, changes) {
   if (String(env.WHATSAPP_BOT_ENABLED || "").toLowerCase() !== "true") return;
   const credentials = await getWhatsAppCredentials(env);
@@ -1619,14 +1657,20 @@ async function runBotForInboundMessages(env, changes) {
           await setBotSessionMode(env, phone, "human", "case_created_billing");
           continue;
         }
-        const mediaId = message.image?.id || message.document?.id || null;
+        if (!(await claimLatestMessageForReply(env, phone, message.id))) continue;
+        let mediaId = message.image?.id || message.document?.id || null;
+        let mediaType = message.type || "unknown";
+        if (!mediaId) {
+          const carriedOver = await recentInboundMedia(env, phone);
+          if (carriedOver) { mediaId = carriedOver.mediaId; mediaType = carriedOver.mediaType; }
+        }
         let media = null;
         if (mediaId) media = await fetchWhatsAppMediaBase64(credentials, mediaId).catch(() => null);
         const context = await buildBotContext(env, phone, name);
         const action = await callBotResponder(env, context, { type: message.type || "unknown", text }, media);
         await executeBotAction(env, credentials, phone, action, {
           customerName: name, messageId: message.id, preferAudio, customerText: text,
-          mediaId, mediaType: message.type || "unknown",
+          mediaId, mediaType,
         });
       } catch {
         await setBotSessionMode(env, phone, "human", "bot_exception").catch(() => null);
