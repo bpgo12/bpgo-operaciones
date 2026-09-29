@@ -943,28 +943,61 @@ const INSTALLATION_DATA_REQUEST_MESSAGE = "Necesito los siguientes datos para re
 
 const INSTALLATION_FIELD_LABELS = { name: "nombre del titular", rut: "RUT", phone: "número de teléfono", email: "correo", address: "dirección" };
 
+// Texto suelto que claramente NO es un dato de instalación (una pregunta del cliente, o una
+// confirmación tipo "ahí están los datos"/"gracias") -- se descarta en vez de pegarlo al nombre o
+// a la dirección, que es lo que pasaba antes (una pregunta del cliente terminó "anotada" como si
+// fuera parte de su nombre).
+function isLikelyNotAName(raw) {
+  const text = String(raw || "");
+  if (/\?/.test(text)) return true;
+  const normalized = text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+  if (/\b(verdad|cierto|no es asi)\b/.test(normalized)) return true;
+  return /^(gracias|listo|ok|okay|dale|ya|ahi estan|ahi esta|eso es todo|eso seria todo|son esos|esos son|los datos)\b/.test(normalized);
+}
+
 // Algunos clientes no mandan el formulario completo en un solo mensaje, van completando los datos
-// de a poco -- este clasificador corre en CADA mensaje mientras falten datos y va llenando lo que
-// falta, sin depender de que llegue todo junto ni en un orden fijo. RUT/correo/teléfono son
-// fáciles de reconocer por formato; nombre y dirección (ambos texto libre) usan una heurística
-// simple (dígitos o palabras típicas de dirección) y, si es ambigua, se completa primero el nombre.
+// de a poco; otros mandan todo junto (a veces copiando línea por línea el mensaje con las
+// etiquetas "Nombre:", "Rut:", etc. que les mandamos, o pegando varios datos en un solo bloque).
+// Este clasificador corre en CADA mensaje mientras falten datos, procesa línea por línea y
+// devuelve TODOS los campos que reconoce en el mensaje (antes solo devolvía uno solo y el resto se
+// perdía). RUT/correo/teléfono son fáciles de reconocer por formato; nombre y dirección (ambos
+// texto libre) usan una heurística simple (dígitos o palabras típicas de dirección), y el texto que
+// no es ninguna de esas cosas ni un dato plausible se descarta en vez de forzarlo a un campo.
 function classifyInstallationFragment(text, current) {
   const raw = String(text || "").trim();
   if (!raw) return null;
-  const rutMatch = raw.match(/\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b/);
-  if (rutMatch) return { field: "rut", value: rutMatch[0] };
-  const emailMatch = raw.match(/[^\s@]+@[^\s@]+\.[^\s@]+/);
-  if (emailMatch) return { field: "email", value: emailMatch[0].toLowerCase() };
-  const digitsOnly = raw.replace(/\D/g, "");
-  if (digitsOnly.length >= 8 && digitsOnly.length <= 12 && !/[a-zA-Z]/.test(raw)) return { field: "phone", value: raw };
-  const looksLikeAddress = /\d/.test(raw) || /\b(calle|avenida|av\.?|pasaje|camino|sector|km|villa|poblaci[oó]n|parcela|block|depto|casa)\b/i.test(raw);
-  if (looksLikeAddress) return { field: "address", value: current.address ? `${current.address} ${raw}`.trim() : raw };
-  // Texto libre sin dígitos ni palabras de dirección: mientras no haya aparecido ninguna señal de
-  // dirección todavía, se asume que sigue siendo parte del nombre (para no cortar nombres
-  // compuestos que el cliente manda palabra por palabra); una vez que la dirección ya empezó, el
-  // texto libre que sigue se suma ahí.
-  if (!current.address) return { field: "name", value: current.name ? `${current.name} ${raw}`.trim() : raw };
-  return { field: "address", value: `${current.address} ${raw}`.trim() };
+  const updates = {};
+  let addressSoFar = current.address || null;
+  let nameSoFar = current.name || null;
+  for (const rawLine of raw.split(/\r?\n/)) {
+    const line = rawLine.replace(/^\s*(nombre( del titular)?|rut|tel[eé]fono|correo|direcci[oó]n)\s*:\s*/i, "").trim();
+    if (!line) continue;
+    const rutMatch = line.match(/\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b/);
+    if (rutMatch) { updates.rut = rutMatch[0]; continue; }
+    const emailMatch = line.match(/[^\s@]+@[^\s@]+\.[^\s@]+/);
+    if (emailMatch) { updates.email = emailMatch[0].toLowerCase(); continue; }
+    const phoneMatch = line.match(/(?:\+?56)?\s*9\d{8}\b/);
+    if (phoneMatch) { updates.phone = phoneMatch[0].trim(); continue; }
+    const looksLikeAddress = /\d/.test(line) || /\b(calle|avenida|av\.?|pasaje|camino|sector|km|villa|poblaci[oó]n|parcela|hijuela|block|depto|casa)\b/i.test(line);
+    if (looksLikeAddress) {
+      addressSoFar = addressSoFar ? `${addressSoFar} ${line}`.trim() : line;
+      updates.address = addressSoFar;
+      continue;
+    }
+    if (isLikelyNotAName(line)) continue;
+    // Texto libre sin dígitos ni palabras de dirección: mientras no haya aparecido ninguna señal de
+    // dirección todavía, se asume que sigue siendo parte del nombre (para no cortar nombres
+    // compuestos que el cliente manda palabra por palabra); una vez que la dirección ya empezó, el
+    // texto libre que sigue se suma ahí.
+    if (!addressSoFar) {
+      nameSoFar = nameSoFar ? `${nameSoFar} ${line}`.trim() : line;
+      updates.name = nameSoFar;
+    } else {
+      addressSoFar = `${addressSoFar} ${line}`.trim();
+      updates.address = addressSoFar;
+    }
+  }
+  return Object.keys(updates).length ? updates : null;
 }
 
 function missingInstallationFields(lead) {
@@ -1472,6 +1505,13 @@ async function runBotForInboundMessages(env, changes) {
             await sendWhatsAppText(env, credentials, phone, "No encontré esa solicitud (puede que ya haya sido procesada).");
             continue;
           }
+          // Un doble toque del botón (o una reentrega del webhook con un message.id distinto, que
+          // claimInboundMessageForBot no detecta como duplicado) volvía a mandar los planes al
+          // cliente por segunda vez. Solo se procesa mientras siga esperando la confirmación.
+          if (lead.status !== "awaiting_factibilidad") {
+            await sendWhatsAppText(env, credentials, phone, "Esa solicitud ya fue procesada antes.");
+            continue;
+          }
           if (!isYes) {
             await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'no_factibilidad', updated_at = datetime('now') WHERE id = ?").bind(leadId).run();
             await sendWhatsAppText(env, credentials, lead.phone, NO_FACTIBILIDAD_MESSAGE);
@@ -1580,8 +1620,9 @@ async function runBotForInboundMessages(env, changes) {
               name: salesLead.installation_name, address: salesLead.installation_address,
             });
             if (fragment) {
-              await env.DB.prepare(`UPDATE whatsapp_sales_leads SET installation_${fragment.field} = ?, updated_at = datetime('now') WHERE id = ?`)
-                .bind(fragment.value, salesLead.id).run();
+              const setClauses = Object.keys(fragment).map((field) => `installation_${field} = ?`).join(", ");
+              await env.DB.prepare(`UPDATE whatsapp_sales_leads SET ${setClauses}, updated_at = datetime('now') WHERE id = ?`)
+                .bind(...Object.values(fragment), salesLead.id).run();
             }
             const updatedLead = await env.DB.prepare("SELECT * FROM whatsapp_sales_leads WHERE id = ?").bind(salesLead.id).first();
             const missing = missingInstallationFields(updatedLead);
