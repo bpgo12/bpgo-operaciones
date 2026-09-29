@@ -42,7 +42,9 @@ vm.runInContext(`
   ${functionSource("isPaidQuickReply")}
   ${functionSource("humanizeFilename")}
   ${functionSource("inboundMessageText")}
-  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText };
+  ${functionSource("isLikelyNotAName")}
+  ${functionSource("classifyInstallationFragment")}
+  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment };
 `, context);
 
 const api = context.api;
@@ -118,6 +120,38 @@ assert.match(worker, /async function claimLatestMessageForReply\(env, phone, mes
 assert.match(worker, /if \(!\(await claimLatestMessageForReply\(env, phone, message\.id\)\)\) continue/);
 assert.match(worker, /async function recentInboundMedia\(env, phone\)/);
 assert.match(worker, /const carriedOver = await recentInboundMedia\(env, phone\)/);
+
+// classifyInstallationFragment: caso real -- el cliente mandó una pregunta en vez de un dato, y
+// debía descartarse en vez de quedar "anotada" como si fuera parte del nombre.
+assert.equal(
+  api.classifyInstallationFragment("UD. Es la misma persona que está escribiendo en el grupo de lanalhue, verdad", { name: null, address: null }),
+  null,
+);
+assert.equal(api.classifyInstallationFragment("Ahí están los datos", { name: "Juan Chaparro", address: null }), null);
+
+// Caso real -- el cliente mandó nombre, RUT, teléfono, correo y dirección todos juntos en un solo
+// mensaje (una por línea); antes solo se rescataba el primer campo reconocido (el RUT) y el resto
+// se perdía en silencio.
+const allAtOnce = api.classifyInstallationFragment(
+  "Juan Chaparro\n11987688-5\n+56984074598\nchaparrojuan832@gmail.com\nParcela 11 Hijuela 1 lanalhue",
+  { name: null, address: null },
+);
+assert.equal(allAtOnce.name, "Juan Chaparro");
+assert.equal(allAtOnce.rut, "11987688-5");
+assert.equal(allAtOnce.phone, "+56984074598");
+assert.equal(allAtOnce.email, "chaparrojuan832@gmail.com");
+assert.equal(allAtOnce.address, "Parcela 11 Hijuela 1 lanalhue");
+
+// Casos de un solo campo por mensaje (el flujo original de "ir completando de a poco") siguen
+// funcionando igual.
+const nameOnly = api.classifyInstallationFragment("Juan Perez", { name: null, address: null });
+assert.equal(nameOnly.name, "Juan Perez");
+assert.equal(Object.keys(nameOnly).length, 1);
+const addressOnly = api.classifyInstallationFragment("Calle Los Aromos 123", { name: "Juan Perez", address: null });
+assert.equal(addressOnly.address, "Calle Los Aromos 123");
+assert.equal(Object.keys(addressOnly).length, 1);
+
+assert.match(worker, /if \(lead\.status !== "awaiting_factibilidad"\) \{/);
 
 for (const value of ["PAGO INGRESADO", "pago ingresado", "ya pagué", "hice el pago", "ingresé el pago", "pago realizado", "El pagó está hecho", "el pago ya esta realizado"]) {
   assert.equal(api.isPaidQuickReply(value), true, `${value} must be recognized as an explicit paid statement`);
