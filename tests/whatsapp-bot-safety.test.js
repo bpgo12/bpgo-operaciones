@@ -153,6 +153,11 @@ assert.equal(Object.keys(addressOnly).length, 1);
 
 assert.match(worker, /if \(lead\.status !== "awaiting_factibilidad"\) \{/);
 
+// Un audio reciente no debe arrastrarse como si fuera un posible comprobante (el bot terminaba
+// describiéndolo como "un documento" al cliente). Solo imagen/documento son evidencia de pago.
+assert.match(worker, /AND media_id IS NOT NULL AND message_type IN \('image', 'document'\)/);
+assert.match(worker, /Cuando el cliente deja claro que quiere instalarse, conectarse, o retomar\/resolver una visita/);
+
 for (const value of ["PAGO INGRESADO", "pago ingresado", "ya pagué", "hice el pago", "ingresé el pago", "pago realizado", "El pagó está hecho", "el pago ya esta realizado"]) {
   assert.equal(api.isPaidQuickReply(value), true, `${value} must be recognized as an explicit paid statement`);
 }
