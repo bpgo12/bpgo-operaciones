@@ -253,6 +253,17 @@ function hasExplicitPaymentIntent(value) {
   return /\b(pagu[eé]|pago|pagado|transferencia|transfer[ií]|dep[oó]sito|comprobante)\b/i.test(String(value || ""));
 }
 
+// El cliente suele anteponer una frase antes del nombre real ("Nombre:", "Mi nombre es", "Al
+// nombre de", copiando la etiqueta que le mandamos) -- sin quitarla antes de validar, isPlausible
+// AccountName la rechazaba completa (por palabras de mas, o puntuacion suelta como el ":" que queda
+// tras "Nombre :"), y el bot volvia a pedir un nombre que el cliente ya habia dado.
+function extractAccountName(value) {
+  let name = String(value || "").trim().slice(0, 200).replace(/\s+/g, " ");
+  name = name.replace(/^(mi nombre es|el nombre es|es a nombre de|a nombre de|al nombre de|nombre( del titular)?)\s*:?\s*/i, "").trim();
+  name = name.replace(/^[.:,-]+\s*/, "").trim();
+  return name;
+}
+
 function isPlausibleAccountName(value) {
   const name = String(value || "").trim().replace(/\s+/g, " ");
   if (name.length < 5 || name.length > 120 || /\d|https?:|@/.test(name)) return false;
@@ -1714,7 +1725,7 @@ async function runBotForInboundMessages(env, changes) {
             await sendBotReply(env, credentials, phone, "Entendido, no registramos la visita. Escríbenos si cambias de opinión. 🙌", preferAudio);
             continue;
           }
-          const reportedName = String(text).trim().slice(0, 200);
+          const reportedName = extractAccountName(text);
           if (!isPlausibleAccountName(reportedName)) {
             await sendBotReply(env, credentials, phone, "Necesito el nombre del titular del servicio, por ejemplo: Juan Pérez.", preferAudio);
             continue;
@@ -1739,7 +1750,7 @@ async function runBotForInboundMessages(env, changes) {
             await sendBotReply(env, credentials, phone, "Entendido, de todas formas dejamos tu comprobante en revisión. Cualquier cosa, escríbenos. 🙏", preferAudio);
             continue;
           }
-          const reportedName = String(text).trim().slice(0, 200);
+          const reportedName = extractAccountName(text);
           if (!isPlausibleAccountName(reportedName)) {
             await sendBotReply(env, credentials, phone, "Necesito el nombre del titular del servicio, por ejemplo: Juan Pérez.", preferAudio);
             continue;
@@ -1764,7 +1775,7 @@ async function runBotForInboundMessages(env, changes) {
             await sendBotReply(env, credentials, phone, "Entendido, no seguimos con la revisión. Cualquier cosa, escríbenos. 🙌", preferAudio);
             continue;
           }
-          const reportedName = String(text).trim().slice(0, 200);
+          const reportedName = extractAccountName(text);
           if (!isPlausibleAccountName(reportedName)) {
             await sendBotReply(env, credentials, phone, "Necesito el nombre del titular del servicio, por ejemplo: Juan Pérez.", preferAudio);
             continue;
