@@ -900,8 +900,10 @@ const PLAN_GROUPS = {
 const INSTALLATION_COST = 25000;
 
 function matchPlanGroup(sectorText) {
-  const norm = String(sectorText || "").toLowerCase();
-  if (norm.includes("cayucupil")) return "cayucupil";
+  // Normaliza acentos (Rucañire -> rucanire) para no repetir el bug ya visto con "señal": una ñ
+  // sin tilde escrita por el cliente no debe impedir el match.
+  const norm = String(sectorText || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  if (["cayucupil", "los aromos", "la curva", "tres sauces", "fundo anique", "rucanire"].some((s) => norm.includes(s))) return "cayucupil";
   if (["peleco", "lanalhue", "trangilboro", "llenquehue"].some((s) => norm.includes(s))) return "otros";
   return null;
 }
