@@ -46,7 +46,8 @@ vm.runInContext(`
   ${functionSource("classifyInstallationFragment")}
   ${functionSource("mentionsServiceOutage")}
   ${functionSource("mentionsTechnicalIssueOrVisit")}
-  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment, mentionsServiceOutage, mentionsTechnicalIssueOrVisit };
+  ${functionSource("isOptOutMessage")}
+  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment, mentionsServiceOutage, mentionsTechnicalIssueOrVisit, isOptOutMessage };
 `, context);
 
 const api = context.api;
@@ -118,8 +119,11 @@ assert.match(worker, /SELECT message_id FROM whatsapp_manual_billing_sends WHERE
 
 // Debounce de ráfagas de mensajes: el bot no debe contestar cada fragmento por separado.
 assert.match(worker, /const BOT_REPLY_DEBOUNCE_MS = 6000/);
-assert.match(worker, /async function claimLatestMessageForReply\(env, phone, messageId, waitMs = BOT_REPLY_DEBOUNCE_MS\)/);
-assert.match(worker, /if \(!\(await claimLatestMessageForReply\(env, phone, message\.id\)\)\) continue/);
+assert.match(worker, /async function markLatestMessage\(env, phone, messageId\)/);
+assert.match(worker, /async function isStillLatestMessage\(env, phone, messageId, waitMs = BOT_REPLY_DEBOUNCE_MS\)/);
+assert.match(worker, /if \(!\(await isStillLatestMessage\(env, phone, message\.id\)\)\) continue/);
+assert.match(worker, /if \(message\.id && message\.from\) await markLatestMessage\(env, message\.from, message\.id\)\.catch\(\(\) => null\);/);
+assert.match(worker, /if \(message\.type === "reaction"\) continue;/);
 assert.match(worker, /async function recentInboundMedia\(env, phone\)/);
 assert.match(worker, /const carriedOver = await recentInboundMedia\(env, phone\)/);
 
@@ -175,6 +179,20 @@ assert.match(worker, /if \(!mentionsTechnicalIssueOrVisit\(message\.customerText
 
 // Baja de servicio: debe escalar siempre, nunca resolverse sola ni prometer nada.
 assert.match(worker, /Cuando SÍ sea una baja real, usa "escalate" siempre/);
+
+// Los flujos estructurados (venta nueva, captura de nombre para visita/pago/descuento) deben
+// permitir que el cliente se baje a mitad de camino en vez de tratar cualquier texto como el dato
+// que se está pidiendo.
+for (const value of ["ya no quiero", "mejor no, gracias", "olvídalo", "no me interesa"]) {
+  assert.equal(api.isOptOutMessage(value), true, `${value} must be recognized as opting out`);
+}
+for (const value of ["Lanalhue", "Juan Pérez", "Calle Los Aromos 123", "no tengo internet"]) {
+  assert.equal(api.isOptOutMessage(value), false, `${value} must NOT be treated as opting out`);
+}
+assert.match(worker, /if \(isOptOutMessage\(text\)\) \{\s*\n\s*await env\.DB\.prepare\("UPDATE whatsapp_sales_leads SET status = 'cancelled'/);
+assert.match(worker, /DELETE FROM whatsapp_pending_visits WHERE phone = \?"\)\.bind\(phone\)\.run\(\);\s*\n\s*await sendBotReply\(env, credentials, phone, "Entendido, no registramos la visita/);
+assert.match(worker, /DELETE FROM whatsapp_pending_payments WHERE phone = \?"\)\.bind\(phone\)\.run\(\);\s*\n\s*await sendBotReply\(env, credentials, phone, "Entendido, de todas formas dejamos tu comprobante/);
+assert.match(worker, /DELETE FROM whatsapp_pending_billing WHERE phone = \?"\)\.bind\(phone\)\.run\(\);\s*\n\s*await sendBotReply\(env, credentials, phone, "Entendido, no seguimos con la revisión/);
 
 for (const value of ["PAGO INGRESADO", "pago ingresado", "ya pagué", "hice el pago", "ingresé el pago", "pago realizado", "El pagó está hecho", "el pago ya esta realizado"]) {
   assert.equal(api.isPaidQuickReply(value), true, `${value} must be recognized as an explicit paid statement`);

@@ -955,6 +955,17 @@ function isLikelyNotAName(raw) {
   return /^(gracias|listo|ok|okay|dale|ya|ahi estan|ahi esta|eso es todo|eso seria todo|son esos|esos son|los datos)\b/.test(normalized);
 }
 
+// Ninguno de los flujos deterministicos (venta nueva, captura de nombre para visita/pago/
+// descuento) tenía forma de que el cliente se bajara a mitad de camino -- cualquier texto se
+// trataba como si fuera el dato que se estaba pidiendo. Esto detecta que el cliente cambió de
+// opinión, para cerrar el trámite con una respuesta coherente en vez de seguir insistiendo.
+function isOptOutMessage(text) {
+  const normalized = String(text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+  if (!normalized) return false;
+  return /^(ya no( quiero)?|mejor no|no quiero|no gracias|olvidalo|dejalo asi|da lo mismo|no me interesa|ya no importa|cancela eso|no seguir|ya no sigamos|dejemoslo (asi|ahi))\b/.test(normalized)
+    || /\b(ya no quiero (seguir|continuar)|no me interesa (ya|mas)|olvida (eso|lo)|mejor lo dejamos|no seguire|prefiero no seguir)\b/.test(normalized);
+}
+
 // Algunos clientes no mandan el formulario completo en un solo mensaje, van completando los datos
 // de a poco; otros mandan todo junto (a veces copiando línea por línea el mensaje con las
 // etiquetas "Nombre:", "Rut:", etc. que les mandamos, o pegando varios datos en un solo bloque).
@@ -1456,15 +1467,23 @@ const BOT_REPLY_DEBOUNCE_MS = 6000;
 // Los clientes suelen mandar la misma idea en 2-3 mensajes seguidos ("Hola tiene la misma cuenta" /
 // "?" / "Me la podría mandar"). Sin esto, cada mensaje disparaba su propia llamada a la IA y su
 // propia respuesta -- se sentía fragmentado y a veces contestaba al mensaje equivocado, como una
-// persona real jamás lo haría (una persona espera a que el otro termine de escribir). Se registra
-// este mensaje como "el más nuevo" de ese teléfono y se espera un poco; si mientras tanto llega uno
-// más nuevo, esta invocación se retira sin responder y deja que la del mensaje más nuevo conteste
-// por todos (el historial reciente que se le pasa a la IA ya incluye los mensajes anteriores).
-async function claimLatestMessageForReply(env, phone, messageId, waitMs = BOT_REPLY_DEBOUNCE_MS) {
+// persona real jamás lo haría (una persona espera a que el otro termine de escribir).
+//
+// markLatestMessage() e isStillLatestMessage() están separadas (en vez de una sola función que
+// marca-y-espera) porque si Meta llega a entregar varios mensajes juntos en el MISMO webhook, el
+// bucle de runBotForInboundMessages los procesa uno por uno con await -- si marcar y esperar fuera
+// una sola operación, el primer mensaje ya estaría a mitad de su espera de 6s antes de que el
+// segundo alcanzara siquiera a registrarse como "más nuevo", rompiendo el "gana el último". Por
+// eso se marcan TODOS los mensajes del lote primero (rápido, sin esperar) y recién después se hace
+// la espera de cada uno.
+async function markLatestMessage(env, phone, messageId) {
   await ensureBotDebounceTable(env);
   await env.DB.prepare(`INSERT INTO whatsapp_bot_debounce (phone, message_id, updated_at) VALUES (?, ?, datetime('now'))
     ON CONFLICT(phone) DO UPDATE SET message_id = excluded.message_id, updated_at = datetime('now')`)
     .bind(phone, messageId).run();
+}
+
+async function isStillLatestMessage(env, phone, messageId, waitMs = BOT_REPLY_DEBOUNCE_MS) {
   await new Promise((resolve) => setTimeout(resolve, waitMs));
   const current = await env.DB.prepare("SELECT message_id FROM whatsapp_bot_debounce WHERE phone = ?").bind(phone).first();
   return current?.message_id === messageId;
@@ -1489,6 +1508,13 @@ async function runBotForInboundMessages(env, changes) {
   if (String(env.WHATSAPP_BOT_ENABLED || "").toLowerCase() !== "true") return;
   const credentials = await getWhatsAppCredentials(env);
   if (!credentials.accessToken || !credentials.phoneNumberId) return;
+  // Se marcan todos los mensajes de este webhook como "el más nuevo" de su teléfono ANTES de
+  // procesar ninguno (ver el comentario en markLatestMessage/isStillLatestMessage).
+  for (const change of changes) {
+    for (const message of (Array.isArray(change.value?.messages) ? change.value.messages : [])) {
+      if (message.id && message.from) await markLatestMessage(env, message.from, message.id).catch(() => null);
+    }
+  }
   for (const change of changes) {
     const value = change.value || {};
     const name = value.contacts?.[0]?.profile?.name || null;
@@ -1496,6 +1522,10 @@ async function runBotForInboundMessages(env, changes) {
       const phone = message.from;
       try {
         if (message.id && !(await claimInboundMessageForBot(env, message.id))) continue;
+        // Una reacción (👍 a un mensaje nuestro) no tiene texto ni adjunto real que analizar --
+        // sin este corte, terminaba llamando a la IA con "(sin texto, ver adjunto)" y a veces
+        // respondía algo como "no entendí, ¿me explicas de nuevo?" a un simple emoji.
+        if (message.type === "reaction") continue;
         await ensureWhatsAppBotTables(env);
         const staffButtonPayload = message.button?.payload || null;
         const isStaffPhone = phone === normalizeWhatsAppPhone(env.STAFF_PHONE_CARLOS) || phone === normalizeWhatsAppPhone(env.STAFF_PHONE_EDUARDO);
@@ -1606,6 +1636,11 @@ async function runBotForInboundMessages(env, changes) {
           "SELECT * FROM whatsapp_sales_leads WHERE phone = ? AND status NOT IN ('completed','cancelled','no_factibilidad') ORDER BY created_at DESC LIMIT 1"
         ).bind(phone).first();
         if (salesLead) {
+          if (isOptOutMessage(text)) {
+            await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?").bind(salesLead.id).run();
+            await sendBotReply(env, credentials, phone, "Entendido, no seguimos con la solicitud. Cualquier cosa, escríbenos. 🙌", preferAudio);
+            continue;
+          }
           if (salesLead.status === "awaiting_sector" && String(text || "").trim()) {
             const sector = String(text).trim().slice(0, 200);
             await env.DB.prepare("UPDATE whatsapp_sales_leads SET sector = ?, status = 'awaiting_location', updated_at = datetime('now') WHERE id = ?").bind(sector, salesLead.id).run();
@@ -1672,6 +1707,11 @@ async function runBotForInboundMessages(env, changes) {
         if (pendingVisit && String(text || "").trim()) {
           // Estábamos esperando el nombre del titular para completar una visita/incidencia
           // pendiente: se captura en código, sin pasar por la IA (más confiable y más barato).
+          if (isOptOutMessage(text)) {
+            await env.DB.prepare("DELETE FROM whatsapp_pending_visits WHERE phone = ?").bind(phone).run();
+            await sendBotReply(env, credentials, phone, "Entendido, no registramos la visita. Escríbenos si cambias de opinión. 🙌", preferAudio);
+            continue;
+          }
           const reportedName = String(text).trim().slice(0, 200);
           if (!isPlausibleAccountName(reportedName)) {
             await sendBotReply(env, credentials, phone, "Necesito el nombre del titular del servicio, por ejemplo: Juan Pérez.", preferAudio);
@@ -1692,6 +1732,11 @@ async function runBotForInboundMessages(env, changes) {
         if (pendingPayment && String(text || "").trim()) {
           // Mismo mecanismo determinístico que las visitas: el próximo mensaje del cliente se
           // toma como el nombre del titular para el comprobante que ya quedó registrado.
+          if (isOptOutMessage(text)) {
+            await env.DB.prepare("DELETE FROM whatsapp_pending_payments WHERE phone = ?").bind(phone).run();
+            await sendBotReply(env, credentials, phone, "Entendido, de todas formas dejamos tu comprobante en revisión. Cualquier cosa, escríbenos. 🙏", preferAudio);
+            continue;
+          }
           const reportedName = String(text).trim().slice(0, 200);
           if (!isPlausibleAccountName(reportedName)) {
             await sendBotReply(env, credentials, phone, "Necesito el nombre del titular del servicio, por ejemplo: Juan Pérez.", preferAudio);
@@ -1712,6 +1757,11 @@ async function runBotForInboundMessages(env, changes) {
         if (pendingBilling && String(text || "").trim()) {
           // Mismo mecanismo: el nombre del titular se captura del próximo mensaje, nunca se le
           // pide al modelo que calcule ni mencione un monto de descuento.
+          if (isOptOutMessage(text)) {
+            await env.DB.prepare("DELETE FROM whatsapp_pending_billing WHERE phone = ?").bind(phone).run();
+            await sendBotReply(env, credentials, phone, "Entendido, no seguimos con la revisión. Cualquier cosa, escríbenos. 🙌", preferAudio);
+            continue;
+          }
           const reportedName = String(text).trim().slice(0, 200);
           if (!isPlausibleAccountName(reportedName)) {
             await sendBotReply(env, credentials, phone, "Necesito el nombre del titular del servicio, por ejemplo: Juan Pérez.", preferAudio);
@@ -1728,7 +1778,7 @@ async function runBotForInboundMessages(env, changes) {
           await setBotSessionMode(env, phone, "human", "case_created_billing");
           continue;
         }
-        if (!(await claimLatestMessageForReply(env, phone, message.id))) continue;
+        if (!(await isStillLatestMessage(env, phone, message.id))) continue;
         let mediaId = message.image?.id || message.document?.id || null;
         let mediaType = message.type || "unknown";
         if (!mediaId) {
