@@ -47,7 +47,8 @@ vm.runInContext(`
   ${functionSource("mentionsServiceOutage")}
   ${functionSource("mentionsTechnicalIssueOrVisit")}
   ${functionSource("isOptOutMessage")}
-  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment, mentionsServiceOutage, mentionsTechnicalIssueOrVisit, isOptOutMessage };
+  ${functionSource("matchPlanGroup")}
+  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment, mentionsServiceOutage, mentionsTechnicalIssueOrVisit, isOptOutMessage, matchPlanGroup };
 `, context);
 
 const api = context.api;
@@ -122,6 +123,16 @@ assert.match(worker, /const BOT_REPLY_DEBOUNCE_MS = 6000/);
 assert.match(worker, /async function markLatestMessage\(env, phone, messageId\)/);
 assert.match(worker, /async function isStillLatestMessage\(env, phone, messageId, waitMs = BOT_REPLY_DEBOUNCE_MS\)/);
 assert.match(worker, /if \(!\(await isStillLatestMessage\(env, phone, message\.id\)\)\) continue/);
+
+// Sectores ya conectados (misma tarifa que Cayucupil) que no estaban en matchPlanGroup, por lo que
+// un prospecto nuevo de esas zonas siempre requería aclaración manual.
+for (const sector of ["Los Aromos", "La Curva", "Tres Sauces", "Fundo Anique", "Rucañire", "Cayucupil"]) {
+  assert.equal(api.matchPlanGroup(sector), "cayucupil", `${sector} must map to the cayucupil plan group`);
+}
+for (const sector of ["Lanalhue", "Peleco", "Trangilboro", "Llenquehue"]) {
+  assert.equal(api.matchPlanGroup(sector), "otros", `${sector} must map to the otros plan group`);
+}
+assert.equal(api.matchPlanGroup("Sector desconocido"), null);
 assert.match(worker, /if \(message\.id && message\.from\) await markLatestMessage\(env, message\.from, message\.id\)\.catch\(\(\) => null\);/);
 assert.match(worker, /if \(message\.type === "reaction"\) continue;/);
 assert.match(worker, /async function recentInboundMedia\(env, phone\)/);
