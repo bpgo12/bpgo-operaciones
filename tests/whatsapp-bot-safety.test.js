@@ -45,7 +45,8 @@ vm.runInContext(`
   ${functionSource("isLikelyNotAName")}
   ${functionSource("classifyInstallationFragment")}
   ${functionSource("mentionsServiceOutage")}
-  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment, mentionsServiceOutage };
+  ${functionSource("mentionsTechnicalIssueOrVisit")}
+  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment, mentionsServiceOutage, mentionsTechnicalIssueOrVisit };
 `, context);
 
 const api = context.api;
@@ -165,6 +166,15 @@ assert.equal(api.mentionsServiceOutage("Tiene 2 cuentas diferentes"), false);
 assert.equal(api.mentionsServiceOutage("Llevo 3 días sin internet"), true);
 assert.equal(api.mentionsServiceOutage("hubo un corte de servicio ayer"), true);
 assert.match(worker, /if \(!mentionsServiceOutage\(message\.customerText\) && !mentionsServiceOutage\(action\.reason\)\) \{/);
+
+// Mismo guard aplicado a visit_request: no crear la solicitud si nada menciona falla/visita/técnico.
+assert.equal(api.mentionsTechnicalIssueOrVisit("Tiene 2 cuentas diferentes"), false);
+assert.equal(api.mentionsTechnicalIssueOrVisit("el router tiene la luz roja"), true);
+assert.equal(api.mentionsTechnicalIssueOrVisit("necesito que venga un técnico"), true);
+assert.match(worker, /if \(!mentionsTechnicalIssueOrVisit\(message\.customerText\) && !mentionsTechnicalIssueOrVisit\(action\.reason\)\) \{/);
+
+// Baja de servicio: debe escalar siempre, nunca resolverse sola ni prometer nada.
+assert.match(worker, /Cuando SÍ sea una baja real, usa "escalate" siempre/);
 
 for (const value of ["PAGO INGRESADO", "pago ingresado", "ya pagué", "hice el pago", "ingresé el pago", "pago realizado", "El pagó está hecho", "el pago ya esta realizado"]) {
   assert.equal(api.isPaidQuickReply(value), true, `${value} must be recognized as an explicit paid statement`);
