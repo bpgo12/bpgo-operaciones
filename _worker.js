@@ -1273,13 +1273,17 @@ async function getKnownAccountName(env, phone) {
   // por eso es seguro reutilizarlo para no volver a preguntar a un contacto ya identificado.
 }
 
+function mentionsServiceOutage(text) {
+  return /sin internet|sin servicio|sin conexi[oó]n|d[ií]as? sin|corte de (servicio|internet)/i.test(text || "");
+}
+
 async function executeBotAction(env, credentials, phone, action, message) {
   const preferAudio = Boolean(message.preferAudio);
   if (action.action === "reply" && action.text) {
     // Nunca dejar que el bot mencione un monto/descuento cuando el cliente habla de días sin
     // servicio, aunque el modelo lo intente: se reemplaza por la pregunta segura de días sin
     // servicio en vez de confiar en que el prompt alcance para evitarlo siempre.
-    const mentionsOutage = /sin internet|sin servicio|sin conexi[oó]n|d[ií]as? sin|corte de (servicio|internet)/i.test(message.customerText || "");
+    const mentionsOutage = mentionsServiceOutage(message.customerText);
     const mentionsMoney = /\$\s?\d|\b\d{3,}\s*(pesos|clp)\b/i.test(action.text);
     if (mentionsOutage && mentionsMoney) {
       await sendBotReply(env, credentials, phone, "Para revisar el descuento por los días sin servicio, ¿cuántos días exactos estuviste sin internet?", preferAudio);
@@ -1372,6 +1376,15 @@ async function executeBotAction(env, credentials, phone, action, message) {
     return;
   }
   if (action.action === "billing_review_request") {
+    // El modelo puede clasificar mal un mensaje sin ninguna relación con un corte de servicio (se
+    // vio en vivo: "Tiene 2 cuentas diferentes" -- sobre el comprobante de pago -- disparó esta
+    // acción) como si fuera un pedido de descuento por días sin servicio. No se crea el caso de
+    // descuento salvo que el propio mensaje del cliente O el resumen que dio el modelo mencionen
+    // explícitamente una falla/corte -- así no se depende solo de que el modelo acierte siempre.
+    if (!mentionsServiceOutage(message.customerText) && !mentionsServiceOutage(action.reason)) {
+      await sendBotReply(env, credentials, phone, "No logré entender bien tu consulta, ¿me la puedes contar de nuevo con más detalle?", preferAudio);
+      return;
+    }
     // Igual que en pagos: el bot NUNCA calcula ni menciona un monto de descuento, solo junta
     // los días sin servicio y el nombre del titular para que un humano calcule el ajuste.
     await ensureWhatsAppBotTables(env);
