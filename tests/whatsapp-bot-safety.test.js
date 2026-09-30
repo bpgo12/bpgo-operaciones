@@ -44,7 +44,8 @@ vm.runInContext(`
   ${functionSource("inboundMessageText")}
   ${functionSource("isLikelyNotAName")}
   ${functionSource("classifyInstallationFragment")}
-  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment };
+  ${functionSource("mentionsServiceOutage")}
+  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment, mentionsServiceOutage };
 `, context);
 
 const api = context.api;
@@ -157,6 +158,13 @@ assert.match(worker, /if \(lead\.status !== "awaiting_factibilidad"\) \{/);
 // describiéndolo como "un documento" al cliente). Solo imagen/documento son evidencia de pago.
 assert.match(worker, /AND media_id IS NOT NULL AND message_type IN \('image', 'document'\)/);
 assert.match(worker, /Cuando el cliente deja claro que quiere instalarse, conectarse, o retomar\/resolver una visita/);
+
+// Caso real: "Tiene 2 cuentas diferentes" (sobre un comprobante de pago) disparó por error la
+// acción de descuento por corte de servicio. mentionsServiceOutage() debe distinguir ambos casos.
+assert.equal(api.mentionsServiceOutage("Tiene 2 cuentas diferentes"), false);
+assert.equal(api.mentionsServiceOutage("Llevo 3 días sin internet"), true);
+assert.equal(api.mentionsServiceOutage("hubo un corte de servicio ayer"), true);
+assert.match(worker, /if \(!mentionsServiceOutage\(message\.customerText\) && !mentionsServiceOutage\(action\.reason\)\) \{/);
 
 for (const value of ["PAGO INGRESADO", "pago ingresado", "ya pagué", "hice el pago", "ingresé el pago", "pago realizado", "El pagó está hecho", "el pago ya esta realizado"]) {
   assert.equal(api.isPaidQuickReply(value), true, `${value} must be recognized as an explicit paid statement`);
