@@ -2525,6 +2525,26 @@ async function handleCyberReply(env, credentials, message) {
   return true;
 }
 
+// El 2026-10-01 Meta aceptó el envío (message_id) pero el delivery real falló para TODOS los
+// mensajes de este lote con "Business eligibility payment issue" (cuenta con pago pendiente) --
+// cyberSnapshot excluye como "ya intentado" cualquier teléfono con una fila en
+// whatsapp_campaign_sends sin importar si falló, así que sin esto esos clientes quedaban
+// marcados como intentados para siempre aunque nunca recibieron el mensaje. Esto borra la marca
+// SOLO de los que Meta confirmó como 'failed' (nunca de los 'accepted'/sin estado aún, que si
+// llegaron o están en camino), para que vuelvan a aparecer como elegibles.
+async function retryCyberFailed(env) {
+  await ensureCyberTables(env);
+  const rows = await env.DB.prepare(`SELECT c.recipient FROM whatsapp_campaign_sends c
+    JOIN whatsapp_message_status s ON s.message_id = c.message_id
+    WHERE c.campaign=? AND s.status='failed'`).bind(CYBER_UPGRADE.id).all();
+  const recipients = (rows.results || []).map((x) => x.recipient);
+  for (const recipient of recipients) {
+    await env.DB.prepare("DELETE FROM whatsapp_campaign_sends WHERE campaign=? AND recipient=?")
+      .bind(CYBER_UPGRADE.id, recipient).run();
+  }
+  return { ok: true, freed: recipients.length };
+}
+
 async function handleCyberApi(request, env, session) {
   if (session?.role !== "super_admin") return Response.json({ ok: false, error: "Sin autorización." }, { status: 403 });
   try {
@@ -2540,6 +2560,7 @@ async function handleCyberApi(request, env, session) {
     const body = await request.json();
     if (request.method === "POST" && body.action === "template") return Response.json(await cyberTemplate(env, true));
     if (request.method === "POST" && body.action === "send") return Response.json(await sendCyberCampaign(env, body));
+    if (request.method === "POST" && body.action === "retryFailed") return Response.json(await retryCyberFailed(env));
     if (request.method === "PATCH" && body.action === "converted") {
       const result = await env.DB.prepare(`UPDATE whatsapp_upgrade_requests SET response='converted', updated_at=datetime('now')
         WHERE campaign=? AND phone=? AND response='interested'`).bind(CYBER_UPGRADE.id, String(body.phone || "")).run();

@@ -30,7 +30,9 @@
       data.eligible.map((c) => '<tr><td><input type="checkbox" aria-label="Seleccionar ' + esc(c.name) + '" value="' + esc(c.phone) + '"></td><td>' + esc(c.name) + '</td><td>' + esc(c.phone) + '</td><td>' + esc(c.plan) + '</td></tr>').join('') +
       '</tbody></table></div><button class="btn" data-cyber="send" ' + (!data.open || !data.template.ready || !data.eligible.length || data.cortadosCheckFailed ? 'disabled' : '') + '>Enviar a seleccionados</button> ' +
       '<button class="btn secondary" data-cyber="sendAll" ' + (!data.open || !data.template.ready || !data.eligible.length || data.cortadosCheckFailed ? 'disabled' : '') + '>Enviar a todos los elegibles (' + data.eligible.length + ', en lotes automáticos de 20)</button>' +
-      '<h3>Seguimiento</h3><div class="cyber-table"><table><thead><tr><th>Cliente / teléfono</th><th>Envío</th><th>Respuesta</th><th>Gestión</th></tr></thead><tbody>' +
+      '<h3>Seguimiento</h3>' +
+      (data.sends.some((s) => s.delivery_status === 'failed') ? '<button class="btn secondary" data-cyber="retryFailed">Reintentar fallidos (' + data.sends.filter((s) => s.delivery_status === 'failed').length + ')</button>' : '') +
+      '<div class="cyber-table"><table><thead><tr><th>Cliente / teléfono</th><th>Envío</th><th>Respuesta</th><th>Gestión</th></tr></thead><tbody>' +
       data.sends.map((s) => '<tr><td>' + esc(s.customer_name || s.phone) + '</td><td>' + esc(s.message_id ? s.delivery_status || 'Aceptado por Meta' : 'Requiere revisión · no reenviar') + '</td><td>' + esc(labels[s.response] || 'Sin respuesta') + '</td><td>' + (s.response === 'interested' ? '<button class="btn secondary" data-cyber="converted" data-phone="' + esc(s.phone) + '">Marcar cambio realizado</button>' : '—') + '</td></tr>').join('') +
       '</tbody></table></div><p class="cyber-feedback" role="status"></p>';
   }
@@ -102,6 +104,12 @@
           }
           render(panel, data);
           panel.querySelector(".cyber-feedback").textContent = accepted + " aceptados por Meta en total; " + review + " requieren revisión; " + skipped + " omitidos.";
+          return;
+        }
+        if (action === "retryFailed") {
+          const result = await api("POST", { action: "retryFailed" });
+          await load(panel);
+          panel.querySelector(".cyber-feedback").textContent = result.freed + " clientes liberados para reintento (ya no cuentan como 'ya intentado').";
           return;
         }
         if (action === "converted") {
