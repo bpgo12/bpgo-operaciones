@@ -51,8 +51,10 @@ vm.runInContext(`
   ${functionSource("extractAccountName")}
   ${functionSource("normalizeWhatsAppPhone")}
   ${functionSource("cyberNormalize")}
+  const CYBER_INSTALL_CUTOFF = "2026-08-31";
+  ${functionSource("cyberInstalledByCutoff")}
   ${functionSource("cyberCandidates")}
-  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment, mentionsServiceOutage, mentionsTechnicalIssueOrVisit, isOptOutMessage, matchPlanGroup, extractAccountName, normalizeWhatsAppPhone, cyberNormalize, cyberCandidates };
+  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment, mentionsServiceOutage, mentionsTechnicalIssueOrVisit, isOptOutMessage, matchPlanGroup, extractAccountName, normalizeWhatsAppPhone, cyberNormalize, cyberInstalledByCutoff, cyberCandidates };
 `, context);
 
 const api = context.api;
@@ -163,6 +165,34 @@ assert.match(worker, /if \(!\(await isStillLatestMessage\(env, phone, message\.i
   // marca cortadosCheckFailed y sendCyberCampaign rechaza el envío en ese caso.
   const noSync = api.cyberCandidates({ customers }, undefined);
   assert.equal(noSync.selected.some((x) => x.id === "b"), true);
+}
+
+// Campaña Cyber (2026-10-01): "hay que enviárselo a todos los clientes hasta los que se instalaron
+// hasta agosto" -- la ficha de cliente no tiene fecha de instalación, pero workOrders (type
+// "Instalacion") sí la tiene (plannedDate + status). Sin ninguna orden se asume anterior al uso de
+// la tabla (las primeras trazadas son de junio 2026); con orden(es), hace falta al menos una
+// Finalizada en o antes del corte -- agendada/reagendada/requiere nueva visita no cuenta como
+// instalada, sin importar la fecha planificada.
+{
+  const customers = [
+    { id: "h", name: "Instalado en julio", phone: "911111111", plan: "100 Mb/s" },
+    { id: "i", name: "Instalado en septiembre", phone: "922222222", plan: "100 Mb/s" },
+    { id: "j", name: "Reagendado en agosto", phone: "933333333", plan: "100 Mb/s" },
+    { id: "k", name: "Sin orden registrada", phone: "944444444", plan: "100 Mb/s" },
+  ];
+  const workOrders = [
+    { type: "Instalacion", customerId: "h", status: "Finalizado", plannedDate: "2026-07-15" },
+    { type: "Instalacion", customerId: "i", status: "Finalizado", plannedDate: "2026-09-01" },
+    { type: "Instalacion", customerId: "j", status: "Reagendada", plannedDate: "2026-08-02" },
+  ];
+  const result = api.cyberCandidates({ customers, workOrders }, new Set());
+  assert.equal(result.selected.some((x) => x.id === "h"), true, "Finalizado antes del corte debe incluirse");
+  assert.equal(result.selected.some((x) => x.id === "k"), true, "sin orden registrada se asume anterior al corte");
+  const excludedI = result.excluded.find((x) => x.id === "i");
+  assert.equal(excludedI?.reason, "installed_after_cutoff", "Finalizado DESPUÉS del corte debe excluirse");
+  const excludedJ = result.excluded.find((x) => x.id === "j");
+  assert.equal(excludedJ?.reason, "installed_after_cutoff", "reagendado (no Finalizado) no cuenta como instalado");
+  assert.equal(api.cyberInstalledByCutoff([], "cualquiera"), true);
 }
 assert.match(worker, /async function cortadosPhoneSet\(\)/);
 assert.match(worker, /cortadosCheckFailed: cortados === null/);

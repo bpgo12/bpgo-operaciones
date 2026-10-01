@@ -2311,6 +2311,22 @@ function cyberNormalize(value) {
   return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
 }
 
+// El negocio pidió limitar la campaña a clientes instalados hasta agosto de 2026 (no ofrecer el
+// upgrade a quien recién está empezando el servicio, o cuya instalación ni siquiera terminó). La
+// ficha de cliente no tiene fecha de instalación, pero sí existe en workOrders (type "Instalacion",
+// plannedDate, status). Sin ninguna orden registrada se asume que el cliente es anterior al uso de
+// esta tabla (las primeras órdenes trazadas son de junio de 2026) y por lo tanto instalado antes del
+// corte. Con orden(es) registradas, tiene que existir al menos una Finalizada en o antes del corte
+// -- una instalación agendada, reagendada o que requiere nueva visita no cuenta como instalada
+// todavía, sin importar qué tan antigua sea la fecha planificada.
+const CYBER_INSTALL_CUTOFF = "2026-08-31";
+
+function cyberInstalledByCutoff(workOrders, customerId, cutoff = CYBER_INSTALL_CUTOFF) {
+  const orders = workOrders.filter((w) => w?.type === "Instalacion" && w?.customerId === customerId);
+  if (!orders.length) return true;
+  return orders.some((w) => w.status === "Finalizado" && w.plannedDate && w.plannedDate <= cutoff);
+}
+
 // La cartera (app_state.customers) nunca tuvo un plan llamado "Oro" ni campos active/status/estado
 // -- son objetos planos {id,name,rut,phone,email,address,plan,mapUrl,accessNotes}, y "plan" guarda
 // la velocidad contratada ("100 Mb/s", "300 Mb/s", "500 Mb/s"). "Plan Oro" (100 Mb/s a $18.000, ver
@@ -2321,12 +2337,14 @@ function cyberNormalize(value) {
 // tenido, no habría excluido a los clientes realmente cortados.
 function cyberCandidates(state, cortadosPhones) {
   const selected = [], excluded = [], seen = new Set();
+  const workOrders = Array.isArray(state.workOrders) ? state.workOrders : [];
   for (const c of Array.isArray(state.customers) ? state.customers : []) {
     const plan = cyberNormalize(c.plan);
     if (!/^100\s*mb\/s$/.test(plan)) continue;
     const phone = normalizeWhatsAppPhone(c.phone);
     const reason = !/^569\d{8}$/.test(phone) ? "invalid_phone"
       : cortadosPhones?.has(phone) ? "inactive"
+      : !cyberInstalledByCutoff(workOrders, c.id) ? "installed_after_cutoff"
       : seen.has(phone) ? "duplicate" : null;
     if (reason) { excluded.push({ id: c.id, reason }); continue; }
     seen.add(phone);
