@@ -9,4 +9,6 @@
 #cyber-upgrade-panel button:disabled { opacity:.5; cursor:not-allowed; }
 #cyber-upgrade-panel .cyber-feedback { color:#9c3214; min-height:24px; }
 #cyber-upgrade-panel .cyber-warning { margin:12px 0; padding:12px 16px; background:#fff4e5; border-left:4px solid #b4690e; border-radius:8px; color:#7a3e05; }
+#cyber-upgrade-panel .cyber-batch-actions { display:flex; align-items:center; gap:12px; margin:8px 0; flex-wrap:wrap; }
+#cyber-upgrade-panel .cyber-selected-count { color:#55697e; font-size:14px; }
 @media(max-width:600px) { #cyber-upgrade-panel { padding:16px; } #cyber-upgrade-panel td,#cyber-upgrade-panel th { padding:8px; } }
