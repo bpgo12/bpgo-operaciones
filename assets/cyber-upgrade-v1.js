@@ -10,7 +10,7 @@
     return data;
   }
   const labels = { interested: "Interesado · gestionar cambio", human: "Solicita ejecutivo", declined: "Ahora no", converted: "Cambio realizado", expired: "Respuesta fuera de plazo" };
-  const exclusionLabels = { invalid_phone: "teléfono inválido", inactive: "cortado", duplicate: "duplicado", installed_after_cutoff: "instalado después del corte o sin instalación finalizada" };
+  const exclusionLabels = { invalid_phone: "teléfono inválido", inactive: "cortado", duplicate: "duplicado", installed_after_cutoff: "instalado después del 31 de agosto", installation_date_unknown: "fecha de instalación no reconocida (revisar planilla)" };
   function exclusionSummary(excluded) {
     const counts = {};
     for (const item of excluded) counts[item.reason] = (counts[item.reason] || 0) + 1;

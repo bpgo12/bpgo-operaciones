@@ -52,9 +52,10 @@ vm.runInContext(`
   ${functionSource("normalizeWhatsAppPhone")}
   ${functionSource("cyberNormalize")}
   const CYBER_INSTALL_CUTOFF = "2026-08-31";
-  ${functionSource("cyberInstalledByCutoff")}
+  const CYBER_SPANISH_MONTHS = { enero: "01", febrero: "02", marzo: "03", abril: "04", mayo: "05", junio: "06", julio: "07", agosto: "08", septiembre: "09", setiembre: "09", octubre: "10", noviembre: "11", diciembre: "12" };
+  ${functionSource("cyberParseInstallDate")}
   ${functionSource("cyberCandidates")}
-  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment, mentionsServiceOutage, mentionsTechnicalIssueOrVisit, isOptOutMessage, matchPlanGroup, extractAccountName, normalizeWhatsAppPhone, cyberNormalize, cyberInstalledByCutoff, cyberCandidates };
+  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment, mentionsServiceOutage, mentionsTechnicalIssueOrVisit, isOptOutMessage, matchPlanGroup, extractAccountName, normalizeWhatsAppPhone, cyberNormalize, cyberParseInstallDate, cyberCandidates };
 `, context);
 
 const api = context.api;
@@ -130,70 +131,54 @@ assert.match(worker, /async function markLatestMessage\(env, phone, messageId\)/
 assert.match(worker, /async function isStillLatestMessage\(env, phone, messageId, waitMs = BOT_REPLY_DEBOUNCE_MS\)/);
 assert.match(worker, /if \(!\(await isStillLatestMessage\(env, phone, message\.id\)\)\) continue/);
 
-// Campaña Cyber (2026-10-01): la cartera real (app_state.customers) nunca tuvo un plan llamado
-// "Oro" ni campos active/status/estado -- son objetos {id,name,rut,phone,email,address,plan,...}
-// y "plan" guarda la velocidad ("100 Mb/s"/"300 Mb/s"/"500 Mb/s"). El filtro original (buscar la
-// palabra "oro") no tenía NINGÚN cliente elegible en la cartera real; esta prueba usa la forma
-// exacta de los datos reales para que no se repita.
+// Campaña Cyber (2026-10-01): la cartera operativa (app_state.customers) nunca tuvo un plan
+// llamado "Oro" ni fecha de instalación ni un active/status confiable (siempre null). La fuente
+// real es app_state.billingCustomers ("planilla madre" sincronizada), con monthlyAmount, plan y
+// installationDate reales. Ahí "Plan Oro" ($18.000) conviven bajo DOS nombres -- "BASICO 30MB"
+// (la mayoría, etiqueta heredada) y "BASICO 100MB" -- filtrar por nombre de plan en vez de precio
+// dejaba fuera a la mayoría de ese nivel. El usuario además pidió limitar a instalados hasta el
+// 31 de agosto de 2026 ("hay que enviárselo a todos los clientes hasta los que se instalaron hasta
+// agosto"), usando esa misma fecha de instalación.
 {
-  const customers = [
-    { id: "a", name: "Cliente Oro Uno", phone: "987811014", plan: "100 Mb/s" },
-    { id: "b", name: "Cliente Oro Cortado", phone: "966341140", plan: "100 Mb/s" },
-    { id: "c", name: "Cliente Platino", phone: "937638489", plan: "300 Mb/s" },
-    { id: "d", name: "Cliente Giga", phone: "944852483", plan: "500 Mb/s" },
-    { id: "e", name: "Cliente Sin Plan", phone: "921660635", plan: "No aplica" },
-    { id: "f", name: "Teléfono inválido", phone: "123", plan: "100 Mb/s" },
-    { id: "g", name: "Duplicado", phone: "987811014", plan: "100 Mb/s" },
+  const billingCustomers = [
+    { id: "a", name: "Cliente Oro legado", phone: "987811014", plan: "BASICO 30MB", monthlyAmount: 18000, installationDate: "2026-07-01" },
+    { id: "a2", name: "Cliente Oro nuevo nombre", phone: "911111111", plan: "BASICO 100MB", monthlyAmount: 18000, installationDate: "2026-07-01" },
+    { id: "b", name: "Cliente Oro Cortado", phone: "966341140", plan: "BASICO 100MB", monthlyAmount: 18000, installationDate: "2026-07-01" },
+    { id: "c", name: "Cliente Platino", phone: "937638489", plan: "FULL 300MB", monthlyAmount: 25000, installationDate: "2026-07-01" },
+    { id: "d", name: "Cliente con TV mas caro", phone: "944852483", plan: "FULL 50MB +TV", monthlyAmount: 35000, installationDate: "2026-07-01" },
+    { id: "f", name: "Teléfono inválido", phone: "123", plan: "BASICO 30MB", monthlyAmount: 18000, installationDate: "2026-07-01" },
+    { id: "g", name: "Duplicado", phone: "987811014", plan: "BASICO 30MB", monthlyAmount: 18000, installationDate: "2026-07-01" },
+    { id: "i", name: "Instalado en septiembre", phone: "922222222", plan: "BASICO 100MB", monthlyAmount: 18000, installationDate: "2026-09-01" },
+    { id: "k", name: "Fecha en español", phone: "933333333", plan: "BASICO 30MB", monthlyAmount: 18000, installationDate: "24 julio 2026" },
+    { id: "l", name: "Fecha irreconocible", phone: "955555555", plan: "BASICO 30MB", monthlyAmount: 18000, installationDate: "no disponible" },
   ];
   const cortados = new Set(["56966341140"]);
-  const result = api.cyberCandidates({ customers }, cortados);
+  const result = api.cyberCandidates({ billingCustomers }, cortados);
   // assert.deepEqual compara objetos vm vs. Node-realm por prototipo (siempre falla aunque la
   // estructura sea idéntica) -- se comparan propiedades sueltas en vez de arrays/objetos completos.
-  assert.equal(result.selected.length, 1);
-  assert.equal(result.selected[0].id, "a");
-  assert.equal(result.selected[0].phone, "56987811014");
+  assert.equal(result.selected.some((x) => x.id === "a"), true, "BASICO 30MB a $18.000 es Plan Oro aunque el nombre sea el heredado");
+  assert.equal(result.selected.some((x) => x.id === "a2"), true, "BASICO 100MB a $18.000 también es Plan Oro");
+  assert.equal(result.selected.some((x) => x.id === "k"), true, "fecha en español (24 julio 2026) debe parsear e incluirse");
   const excludedB = result.excluded.find((x) => x.id === "b");
   assert.equal(excludedB?.reason, "inactive");
   const excludedF = result.excluded.find((x) => x.id === "f");
   assert.equal(excludedF?.reason, "invalid_phone");
   const excludedG = result.excluded.find((x) => x.id === "g");
   assert.equal(excludedG?.reason, "duplicate");
-  assert.equal(result.selected.some((x) => x.id === "c"), false, "300 Mb/s (Platino) must not be targeted");
-  assert.equal(result.selected.some((x) => x.id === "d"), false, "500 Mb/s must not be targeted");
-  assert.equal(result.selected.some((x) => x.id === "e"), false, "\"No aplica\" must not be targeted");
+  const excludedI = result.excluded.find((x) => x.id === "i");
+  assert.equal(excludedI?.reason, "installed_after_cutoff", "instalado en septiembre (después del corte) debe excluirse");
+  const excludedL = result.excluded.find((x) => x.id === "l");
+  assert.equal(excludedL?.reason, "installation_date_unknown", "fecha irreconocible no debe compararse como texto, se marca para revisión");
+  assert.equal(result.selected.some((x) => x.id === "c"), false, "FULL 300MB ($25.000) no es Plan Oro");
+  assert.equal(result.selected.some((x) => x.id === "d"), false, "FULL 50MB +TV ($35.000) no es Plan Oro");
   // Sin la lista de cortados (sync caído) no se debe asumir que nadie está cortado -- cyberSnapshot
   // marca cortadosCheckFailed y sendCyberCampaign rechaza el envío en ese caso.
-  const noSync = api.cyberCandidates({ customers }, undefined);
+  const noSync = api.cyberCandidates({ billingCustomers }, undefined);
   assert.equal(noSync.selected.some((x) => x.id === "b"), true);
 }
-
-// Campaña Cyber (2026-10-01): "hay que enviárselo a todos los clientes hasta los que se instalaron
-// hasta agosto" -- la ficha de cliente no tiene fecha de instalación, pero workOrders (type
-// "Instalacion") sí la tiene (plannedDate + status). Sin ninguna orden se asume anterior al uso de
-// la tabla (las primeras trazadas son de junio 2026); con orden(es), hace falta al menos una
-// Finalizada en o antes del corte -- agendada/reagendada/requiere nueva visita no cuenta como
-// instalada, sin importar la fecha planificada.
-{
-  const customers = [
-    { id: "h", name: "Instalado en julio", phone: "911111111", plan: "100 Mb/s" },
-    { id: "i", name: "Instalado en septiembre", phone: "922222222", plan: "100 Mb/s" },
-    { id: "j", name: "Reagendado en agosto", phone: "933333333", plan: "100 Mb/s" },
-    { id: "k", name: "Sin orden registrada", phone: "944444444", plan: "100 Mb/s" },
-  ];
-  const workOrders = [
-    { type: "Instalacion", customerId: "h", status: "Finalizado", plannedDate: "2026-07-15" },
-    { type: "Instalacion", customerId: "i", status: "Finalizado", plannedDate: "2026-09-01" },
-    { type: "Instalacion", customerId: "j", status: "Reagendada", plannedDate: "2026-08-02" },
-  ];
-  const result = api.cyberCandidates({ customers, workOrders }, new Set());
-  assert.equal(result.selected.some((x) => x.id === "h"), true, "Finalizado antes del corte debe incluirse");
-  assert.equal(result.selected.some((x) => x.id === "k"), true, "sin orden registrada se asume anterior al corte");
-  const excludedI = result.excluded.find((x) => x.id === "i");
-  assert.equal(excludedI?.reason, "installed_after_cutoff", "Finalizado DESPUÉS del corte debe excluirse");
-  const excludedJ = result.excluded.find((x) => x.id === "j");
-  assert.equal(excludedJ?.reason, "installed_after_cutoff", "reagendado (no Finalizado) no cuenta como instalado");
-  assert.equal(api.cyberInstalledByCutoff([], "cualquiera"), true);
-}
+assert.equal(api.cyberParseInstallDate("2026-08-31"), "2026-08-31");
+assert.equal(api.cyberParseInstallDate("24 julio 2026"), "2026-07-24");
+assert.equal(api.cyberParseInstallDate("no disponible"), null);
 assert.match(worker, /async function cortadosPhoneSet\(\)/);
 assert.match(worker, /cortadosCheckFailed: cortados === null/);
 assert.match(worker, /if \(snapshot\.cortadosCheckFailed\) throw new Error\("No se pudo verificar la lista de clientes cortados/);
