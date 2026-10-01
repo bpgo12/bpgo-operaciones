@@ -1662,6 +1662,7 @@ async function runBotForInboundMessages(env, changes) {
             continue;
           }
         }
+        if (await handleCyberReply(env, credentials, message)) continue;
         const preferAudio = message.type === "audio";
         let text = inboundMessageText(message);
         if (preferAudio && message.audio?.id) {
@@ -1882,6 +1883,7 @@ async function saveInboundWhatsAppMessages(env, changes) {
       // En handoff humano el webhook conserva el mensaje en la bandeja, pero no lo clasifica ni
       // crea automatizaciones. El operador debe reactivar el bot explícitamente desde Operaciones.
       if (await getBotSessionMode(env, message.from) !== "human") {
+        if (cyberButtonAction(message)) { saved += 1; continue; }
         await createAutomationCase(env, {
           messageId: message.id,
           phone: message.from,
@@ -1922,7 +1924,9 @@ async function isKnownApiOutboundMessage(env, messageId) {
   if (status) return true;
   const staff = await env.DB.prepare("SELECT 1 AS found FROM staff_notifications_log WHERE message_id=? OR fallback_message_id=?").bind(messageId, messageId).first();
   if (staff) return true;
-  return false;
+  await ensureWhatsAppCampaignTable(env);
+  const campaign = await env.DB.prepare("SELECT 1 AS found FROM whatsapp_campaign_sends WHERE message_id=?").bind(messageId).first();
+  return Boolean(campaign);
 }
 
 async function saveManualWhatsAppEchoes(env, changes) {
@@ -2280,6 +2284,209 @@ async function billingAutomationDashboard(env) {
   };
 }
 
+// Cyber upgrade uses the existing campaign ledger and bot handoff, never changes plans.
+const CYBER_UPGRADE = Object.freeze({
+  id: "cyber_oro_platino_20260930", template: "cyber_oro_platino_20260930", language: "es_CL",
+  start: "2026-09-30", end: "2026-10-05", timezone: "America/Santiago",
+  text: "¡Cyber BP GO! Mejora tu Plan Oro y disfruta del Plan Platino de 300 Mb/s por $21.990 mensuales durante 6 meses. Luego, $25.000 mensuales.\n\nPromoción disponible hasta el lunes 5 de octubre. ¿Te interesa solicitar el cambio?",
+  buttons: ["Me interesa", "Hablar con ejecutivo", "Ahora no"],
+});
+
+function cyberIsOpen(date = new Date()) {
+  const p = chileDateParts(date);
+  const day = `${p.year}-${String(p.month).padStart(2, "0")}-${String(p.day).padStart(2, "0")}`;
+  return day >= CYBER_UPGRADE.start && day <= CYBER_UPGRADE.end;
+}
+
+function cyberNormalize(value) {
+  return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+}
+
+function cyberCandidates(state) {
+  const selected = [], excluded = [], seen = new Set();
+  for (const c of Array.isArray(state.customers) ? state.customers : []) {
+    const plan = cyberNormalize(c.plan);
+    if (!/\boro\b/.test(plan) || /\b(platino|300)\b/.test(plan)) continue;
+    const phone = normalizeWhatsAppPhone(c.phone);
+    const reason = !/^569\d{8}$/.test(phone) ? "invalid_phone"
+      : c.active === false || /cortad|suspend|inactiv|baja/.test(cyberNormalize(c.status || c.estado)) ? "inactive"
+      : seen.has(phone) ? "duplicate" : null;
+    if (reason) { excluded.push({ id: c.id, reason }); continue; }
+    seen.add(phone);
+    selected.push({ id: String(c.id || ""), name: String(c.name || ""), phone, plan: String(c.plan || "") });
+  }
+  return { selected, excluded };
+}
+
+function cyberButtonAction(message) {
+  const payload = message.button?.payload || message.interactive?.button_reply?.id || "";
+  const prefix = `${CYBER_UPGRADE.id}:`;
+  if (payload.startsWith(prefix)) {
+    const action = payload.slice(prefix.length);
+    return ["interest", "human", "decline"].includes(action) ? action : "";
+  }
+  return "";
+}
+
+async function ensureCyberTables(env) {
+  await ensureWhatsAppCampaignTable(env);
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_upgrade_requests (
+    campaign TEXT NOT NULL, phone TEXT NOT NULL, customer_name TEXT, response TEXT,
+    source_message_id TEXT UNIQUE, updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (campaign, phone)
+  )`).run();
+}
+
+async function cyberSnapshot(env) {
+  await ensureCyberTables(env);
+  const row = await env.DB.prepare("SELECT data FROM app_state WHERE id='main'").first();
+  if (!row?.data) throw new Error("No se pudo leer la cartera actual.");
+  const candidates = cyberCandidates(JSON.parse(row.data));
+  const sends = await env.DB.prepare(`SELECT c.recipient AS phone, c.message_id, c.created_at,
+    r.customer_name, r.response, s.status AS delivery_status
+    FROM whatsapp_campaign_sends c
+    LEFT JOIN whatsapp_upgrade_requests r ON r.campaign=c.campaign AND r.phone=c.recipient
+    LEFT JOIN whatsapp_message_status s ON s.message_id=c.message_id
+    WHERE c.campaign=? ORDER BY c.created_at DESC`).bind(CYBER_UPGRADE.id).all();
+  const attempted = new Set((sends.results || []).map((x) => x.phone));
+  const human = await env.DB.prepare("SELECT phone FROM whatsapp_bot_sessions WHERE mode='human'").all();
+  const held = new Set((human.results || []).map((x) => x.phone));
+  const eligible = candidates.selected.filter((x) => !attempted.has(x.phone) && !held.has(x.phone));
+  const fingerprint = JSON.stringify(eligible.map((x) => [x.id, x.phone, x.plan]).sort());
+  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(fingerprint));
+  const previewId = Array.from(new Uint8Array(digest), (x) => x.toString(16).padStart(2, "0")).join("");
+  return { campaign: CYBER_UPGRADE, open: cyberIsOpen(), eligible, excluded: candidates.excluded,
+    humanExcluded: candidates.selected.filter((x) => held.has(x.phone)).length, sends: sends.results || [], previewId };
+}
+
+function cyberTemplateDefinition() {
+  return { name: CYBER_UPGRADE.template, language: CYBER_UPGRADE.language, category: "MARKETING",
+    components: [{ type: "BODY", text: CYBER_UPGRADE.text },
+      { type: "BUTTONS", buttons: CYBER_UPGRADE.buttons.map((text) => ({ type: "QUICK_REPLY", text })) }] };
+}
+
+async function cyberTemplate(env, create = false) {
+  const c = await getWhatsAppCredentials(env);
+  if (!c.accessToken || !c.wabaId) throw new Error("Falta la conexión con Meta.");
+  const endpoint = `https://graph.facebook.com/v25.0/${encodeURIComponent(c.wabaId)}/message_templates`;
+  const headers = { authorization: `Bearer ${c.accessToken}`, "content-type": "application/json" };
+  const res = await fetch(`${endpoint}?name=${CYBER_UPGRADE.template}&fields=name,status,language,category,components`, { headers });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error("No se pudo consultar la plantilla en Meta.");
+  const found = (data.data || []).find((x) => x.name === CYBER_UPGRADE.template && x.language === CYBER_UPGRADE.language);
+  if (found) {
+    const body = found.components?.find((x) => x.type === "BODY")?.text;
+    const buttons = found.components?.find((x) => x.type === "BUTTONS")?.buttons || [];
+    const matches = body === CYBER_UPGRADE.text && found.category === "MARKETING"
+      && buttons.length === 3 && buttons.every((x, i) => x.type === "QUICK_REPLY" && x.text === CYBER_UPGRADE.buttons[i]);
+    return { status: found.status, matches, ready: found.status === "APPROVED" && matches };
+  }
+  if (!create) return { status: "NOT_FOUND", matches: false, ready: false };
+  const result = await fetch(endpoint, { method: "POST", headers, body: JSON.stringify(cyberTemplateDefinition()) });
+  if (!result.ok) throw new Error("Meta no aceptó la creación de la plantilla.");
+  return { status: "PENDING", matches: true, ready: false };
+}
+
+async function sendCyberCampaign(env, body) {
+  if (!cyberIsOpen()) throw new Error("La promoción no está vigente.");
+  if (body.confirm !== CYBER_UPGRADE.id) throw new Error("Confirma la campaña antes de enviar.");
+  const snapshot = await cyberSnapshot(env);
+  if (body.previewId !== snapshot.previewId) throw new Error("La cartera cambió. Actualiza y revisa la selección.");
+  const phones = Array.isArray(body.phones) ? [...new Set(body.phones)] : [];
+  if (!phones.length || phones.length > 20) throw new Error("Selecciona entre 1 y 20 destinatarios por lote.");
+  const eligible = new Map(snapshot.eligible.map((x) => [x.phone, x]));
+  if (phones.some((phone) => !eligible.has(phone))) throw new Error("Hay destinatarios que ya no son elegibles.");
+  if (!(await cyberTemplate(env)).ready) throw new Error("La plantilla debe estar aprobada y coincidir con la oferta.");
+  const credentials = await getWhatsAppCredentials(env);
+  if (!credentials.phoneNumberId || !credentials.accessToken) throw new Error("WhatsApp no está configurado.");
+  const results = [];
+  for (const phone of phones) {
+    if (!cyberIsOpen() || await getBotSessionMode(env, phone) === "human") {
+      results.push({ phone, status: "skipped" }); continue;
+    }
+    // Claim before network I/O: concurrent batches and ambiguous timeouts must never resend.
+    const claim = await env.DB.prepare("INSERT OR IGNORE INTO whatsapp_campaign_sends (campaign,recipient) VALUES (?,?)")
+      .bind(CYBER_UPGRADE.id, phone).run();
+    if (!claim.meta?.changes) { results.push({ phone, status: "skipped" }); continue; }
+    try {
+      const response = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/messages`, {
+        method: "POST", headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ messaging_product: "whatsapp", to: phone, type: "template",
+          template: { name: CYBER_UPGRADE.template, language: { code: CYBER_UPGRADE.language },
+            components: ["interest", "human", "decline"].map((action, i) => ({ type: "button", sub_type: "quick_reply", index: String(i),
+              parameters: [{ type: "payload", payload: `${CYBER_UPGRADE.id}:${action}` }] })) } }),
+      });
+      const data = await response.json().catch(() => ({}));
+      const messageId = response.ok && data.messages?.[0]?.id;
+      if (!messageId) { results.push({ phone, status: "review_required" }); continue; }
+      await env.DB.prepare("UPDATE whatsapp_campaign_sends SET message_id=? WHERE campaign=? AND recipient=?")
+        .bind(messageId, CYBER_UPGRADE.id, phone).run();
+      await saveWhatsAppStatus(env, { messageId, recipient: phone, status: "accepted" });
+      await env.DB.prepare(`INSERT OR IGNORE INTO whatsapp_inbox_messages
+        (message_id,phone,direction,message_type,message_text,created_at) VALUES (?,?,'outbound','template',?,?)`)
+        .bind(messageId, phone, CYBER_UPGRADE.text, new Date().toISOString()).run();
+      await env.DB.prepare("INSERT OR IGNORE INTO whatsapp_upgrade_requests (campaign,phone,customer_name) VALUES (?,?,?)")
+        .bind(CYBER_UPGRADE.id, phone, eligible.get(phone).name).run();
+      results.push({ phone, status: "accepted" });
+    } catch { results.push({ phone, status: "review_required" }); }
+  }
+  return { ok: results.every((x) => x.status !== "review_required"), results };
+}
+
+async function handleCyberReply(env, credentials, message) {
+  const action = cyberButtonAction(message);
+  if (!action) return false;
+  if (await getBotSessionMode(env, message.from) === "human") return true;
+  await ensureCyberTables(env);
+  const sent = await env.DB.prepare("SELECT message_id FROM whatsapp_campaign_sends WHERE campaign=? AND recipient=?")
+    .bind(CYBER_UPGRADE.id, message.from).first();
+  if (!sent?.message_id || (message.context?.id && message.context.id !== sent.message_id)) return true;
+  // A request arriving after the offer closes is referred without promising the price.
+  const response = action === "decline" ? "declined" : !cyberIsOpen() ? "expired" : action === "human" ? "human" : "interested";
+  const previous = await env.DB.prepare("SELECT response FROM whatsapp_upgrade_requests WHERE campaign=? AND phone=?")
+    .bind(CYBER_UPGRADE.id, message.from).first();
+  if (previous?.response === "converted" || previous?.response === response) return true;
+  await env.DB.prepare(`INSERT INTO whatsapp_upgrade_requests (campaign,phone,response,source_message_id)
+    VALUES (?,?,?,?) ON CONFLICT(campaign,phone) DO UPDATE SET response=excluded.response,
+    source_message_id=excluded.source_message_id, updated_at=datetime('now')`)
+    .bind(CYBER_UPGRADE.id, message.from, response, message.id).run();
+  if (response === "declined") {
+    if (await getBotSessionMode(env, message.from) !== "human")
+      await sendWhatsAppText(env, credentials, message.from, "Entendido, no seguimos con esta promoción.");
+  } else {
+    // Handoff first; no acknowledgement after entering human mode.
+    await setBotSessionMode(env, message.from, "human", `cyber_upgrade_${response}`);
+  }
+  return true;
+}
+
+async function handleCyberApi(request, env, session) {
+  if (session?.role !== "super_admin") return Response.json({ ok: false, error: "Sin autorización." }, { status: 403 });
+  try {
+    await ensureWhatsAppStatusTable(env);
+    await ensureWhatsAppInboxTable(env);
+    await ensureWhatsAppBotTables(env);
+    await ensureCyberTables(env);
+    if (request.method === "GET") {
+      const snapshot = await cyberSnapshot(env);
+      const template = await cyberTemplate(env).catch(() => ({ status: "UNAVAILABLE", ready: false }));
+      return Response.json({ ...snapshot, template }, { headers: { "cache-control": "no-store" } });
+    }
+    const body = await request.json();
+    if (request.method === "POST" && body.action === "template") return Response.json(await cyberTemplate(env, true));
+    if (request.method === "POST" && body.action === "send") return Response.json(await sendCyberCampaign(env, body));
+    if (request.method === "PATCH" && body.action === "converted") {
+      const result = await env.DB.prepare(`UPDATE whatsapp_upgrade_requests SET response='converted', updated_at=datetime('now')
+        WHERE campaign=? AND phone=? AND response='interested'`).bind(CYBER_UPGRADE.id, String(body.phone || "")).run();
+      return Response.json({ ok: Boolean(result.meta?.changes) });
+    }
+    return Response.json({ ok: false, error: "Operación no disponible." }, { status: 400 });
+  } catch {
+    return Response.json({ ok: false, error: "No se pudo completar la operación. Actualiza la campaña y verifica vigencia, selección y aprobación de Meta." }, { status: 409 });
+  }
+}
+
+
 async function sendBillingMessages(request, env) {
   const body = await request.json().catch(() => ({}));
   const records = Array.isArray(body.records) ? body.records.slice(0, 50) : [];
@@ -2427,6 +2634,11 @@ async function verifyBillingAutomationOidc(request) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    if (url.pathname === "/api/whatsapp/cyber-upgrade") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET).catch(() => null);
+      return handleCyberApi(request, env, session);
+    }
 
     if (url.pathname === "/api/auth" && request.method === "POST") {
       const body = await request.json().catch(() => ({}));
@@ -3213,7 +3425,7 @@ export default {
     }
 
     const assetResponse = await env.ASSETS.fetch(request);
-    if (url.pathname === "/" || url.pathname === "/index.html" || url.pathname === "/assets/index-bulk-v28.js" || url.pathname === "/assets/password-save-v6.js" || url.pathname === "/assets/sheets-resilience-v9.js" || url.pathname === "/assets/billing-automation-v1.js" || url.pathname === "/assets/billing-automation-v1.css" || url.pathname === "/assets/mobile-ux-v11.js" || url.pathname === "/assets/billing-mobile-search-v12.js" || url.pathname === "/assets/mobile-tables-v13.js" || url.pathname === "/assets/technician-shifts-v15.js" || url.pathname === "/assets/agenda-shift-guard-v24.js" || url.pathname === "/assets/enterprise-v22.js" || url.pathname === "/assets/planta-externa-entry.js" || url.pathname === "/assets/operations-points-v29.js" || url.pathname === "/assets/whatsapp-onboarding-v43.js" || url.pathname === "/assets/whatsapp-test-v41.js" || url.pathname === "/assets/mobile-v5.css" || url.pathname === "/assets/enterprise-v22.css" || url.pathname === "/assets/operations-points-v29.css" || url.pathname === "/assets/whatsapp-onboarding-v42.css") {
+    if (url.pathname === "/" || url.pathname === "/index.html" || url.pathname === "/assets/index-bulk-v28.js" || url.pathname === "/assets/password-save-v6.js" || url.pathname === "/assets/sheets-resilience-v9.js" || url.pathname === "/assets/billing-automation-v1.js" || url.pathname === "/assets/billing-automation-v1.css" || url.pathname === "/assets/cyber-upgrade-v1.js" || url.pathname === "/assets/cyber-upgrade-v1.css" || url.pathname === "/assets/mobile-ux-v11.js" || url.pathname === "/assets/billing-mobile-search-v12.js" || url.pathname === "/assets/mobile-tables-v13.js" || url.pathname === "/assets/technician-shifts-v15.js" || url.pathname === "/assets/agenda-shift-guard-v24.js" || url.pathname === "/assets/enterprise-v22.js" || url.pathname === "/assets/planta-externa-entry.js" || url.pathname === "/assets/operations-points-v29.js" || url.pathname === "/assets/whatsapp-onboarding-v43.js" || url.pathname === "/assets/whatsapp-test-v41.js" || url.pathname === "/assets/mobile-v5.css" || url.pathname === "/assets/enterprise-v22.css" || url.pathname === "/assets/operations-points-v29.css" || url.pathname === "/assets/whatsapp-onboarding-v42.css") {
       const headers = new Headers(assetResponse.headers);
       headers.set("cache-control", "no-store, no-cache, must-revalidate, max-age=0");
       headers.set("pragma", "no-cache");
