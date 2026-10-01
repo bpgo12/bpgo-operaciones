@@ -25,6 +25,7 @@
       (data.cortadosCheckFailed ? '<p class="cyber-warning">⚠️ No se pudo verificar la planilla de clientes cortados. No se puede enviar hasta actualizar y confirmar que esto se resuelva.</p>' : '') +
       '<div class="cyber-actions"><button class="btn secondary" data-cyber="template">Solicitar aprobación de plantilla</button><span>' + data.eligible.length + ' clientes disponibles · ' + data.humanExcluded + ' en atención humana excluidos' + (data.excluded.length ? ' · ' + exclusionSummary(data.excluded) + ' excluidos' : '') + '</span></div>' +
       '<p>Revisa y selecciona hasta 20 clientes por lote. Los intentos ya registrados no se repetirán.</p>' +
+      '<div class="cyber-batch-actions"><button class="btn secondary" data-cyber="select20">Seleccionar próximos 20</button><button class="btn secondary" data-cyber="clearselection">Limpiar selección</button><span class="cyber-selected-count">0 seleccionados</span></div>' +
       '<div class="cyber-table"><table><thead><tr><th>Enviar</th><th>Cliente</th><th>Teléfono</th><th>Plan actual</th></tr></thead><tbody>' +
       data.eligible.map((c) => '<tr><td><input type="checkbox" aria-label="Seleccionar ' + esc(c.name) + '" value="' + esc(c.phone) + '"></td><td>' + esc(c.name) + '</td><td>' + esc(c.phone) + '</td><td>' + esc(c.plan) + '</td></tr>').join('') +
       '</tbody></table></div><button class="btn" data-cyber="send" ' + (!data.open || !data.template.ready || !data.eligible.length || data.cortadosCheckFailed ? 'disabled' : '') + '>Enviar a seleccionados</button>' +
@@ -36,6 +37,10 @@
     const data = await api("GET");
     render(panel, data);
   }
+  function updateSelectedCount(panel) {
+    const el = panel.querySelector('.cyber-selected-count');
+    if (el) el.textContent = panel.querySelectorAll('.cyber-table input[type=checkbox]:checked').length + ' seleccionados';
+  }
   function install() {
     if (document.getElementById("cyber-upgrade-panel")) return;
     const heading = Array.from(document.querySelectorAll("h1,h2")).find((x) => x.textContent.trim() === "Pagos pendientes");
@@ -45,13 +50,25 @@
     panel.className = "panel";
     panel.innerHTML = '<h2>Cyber BP GO</h2><button class="btn" data-cyber="refresh">Abrir campaña</button><p class="cyber-feedback" role="status"></p>';
     (document.querySelector("main") || heading.parentElement).appendChild(panel);
+    panel.addEventListener("change", (event) => {
+      if (event.target.matches('.cyber-table input[type=checkbox]')) updateSelectedCount(panel);
+    });
     panel.addEventListener("click", async (event) => {
       const button = event.target.closest("[data-cyber]");
       if (!button || panel._busy) return;
+      const action = button.dataset.cyber;
+      // Estas dos son puramente de la selección en pantalla (no llaman a la API) -- deben resolverse
+      // sin pasar por "await load(panel)" al final del bloque try, que re-renderiza la tabla entera
+      // y borraría justo la selección que se acaba de hacer.
+      if (action === "select20" || action === "clearselection") {
+        const boxes = Array.from(panel.querySelectorAll('.cyber-table input[type=checkbox]'));
+        boxes.forEach((box, index) => { box.checked = action === "select20" && index < 20; });
+        updateSelectedCount(panel);
+        return;
+      }
       panel._busy = true;
       button.disabled = true;
       try {
-        const action = button.dataset.cyber;
         if (action === "template") await api("POST", { action: "template" });
         if (action === "send") {
           const phones = Array.from(panel.querySelectorAll('input:checked')).map((x) => x.value);
