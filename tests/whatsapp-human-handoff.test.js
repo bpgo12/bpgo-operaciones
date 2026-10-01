@@ -79,7 +79,7 @@ async function main() {
   // Motivo manual pero actividad reciente -> NO reactiva (el humano sigue escribiendo).
   assert.equal(await context.shouldAutoReactivate(fakeEnv(recentIso), "56900000000", { mode: "human", escalation_reason: "manual_reply" }, "msg1"), false);
   // Caso de negocio pendiente de revisión -> NUNCA reactiva, sin importar cuánto tiempo pase.
-  for (const reason of ["case_created_payment", "case_created_visit", "case_created_billing", "case_created_new_customer", "bot_escalated"]) {
+  for (const reason of ["case_created_payment", "case_created_visit", "case_created_billing", "case_created_new_customer", "bot_escalated", "cyber_upgrade_interested", "cyber_upgrade_human", "cyber_upgrade_expired"]) {
     assert.equal(await context.shouldAutoReactivate(fakeEnv(oldIso), "56900000000", { mode: "human", escalation_reason: reason }, "msg1"), false, `${reason} must never auto-reactivate`);
   }
   // Ya en modo bot -> no aplica.
