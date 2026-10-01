@@ -16,11 +16,12 @@
       '<blockquote>' + esc(data.campaign.text).replace(/\n/g, '<br>') + '</blockquote>' +
       '<p><strong>' + (data.open ? 'Vigente' : 'Fuera de vigencia') + '</strong> · 30 de septiembre al 5 de octubre de 2026 · Hora de Chile</p>' +
       '<p>Plantilla Meta: <strong>' + esc(data.template.status) + '</strong>' + (data.template.matches === false ? ' · El texto aprobado debe coincidir con esta oferta.' : '') + '</p>' +
+      (data.cortadosCheckFailed ? '<p class="cyber-warning">⚠️ No se pudo verificar la planilla de clientes cortados. No se puede enviar hasta actualizar y confirmar que esto se resuelva.</p>' : '') +
       '<div class="cyber-actions"><button class="btn secondary" data-cyber="template">Solicitar aprobación de plantilla</button><span>' + data.eligible.length + ' clientes disponibles · ' + data.humanExcluded + ' en atención humana excluidos</span></div>' +
       '<p>Revisa y selecciona hasta 20 clientes por lote. Los intentos ya registrados no se repetirán.</p>' +
       '<div class="cyber-table"><table><thead><tr><th>Enviar</th><th>Cliente</th><th>Teléfono</th><th>Plan actual</th></tr></thead><tbody>' +
       data.eligible.map((c) => '<tr><td><input type="checkbox" aria-label="Seleccionar ' + esc(c.name) + '" value="' + esc(c.phone) + '"></td><td>' + esc(c.name) + '</td><td>' + esc(c.phone) + '</td><td>' + esc(c.plan) + '</td></tr>').join('') +
-      '</tbody></table></div><button class="btn" data-cyber="send" ' + (!data.open || !data.template.ready || !data.eligible.length ? 'disabled' : '') + '>Enviar a seleccionados</button>' +
+      '</tbody></table></div><button class="btn" data-cyber="send" ' + (!data.open || !data.template.ready || !data.eligible.length || data.cortadosCheckFailed ? 'disabled' : '') + '>Enviar a seleccionados</button>' +
       '<h3>Seguimiento</h3><div class="cyber-table"><table><thead><tr><th>Cliente / teléfono</th><th>Envío</th><th>Respuesta</th><th>Gestión</th></tr></thead><tbody>' +
       data.sends.map((s) => '<tr><td>' + esc(s.customer_name || s.phone) + '</td><td>' + esc(s.message_id ? s.delivery_status || 'Aceptado por Meta' : 'Requiere revisión · no reenviar') + '</td><td>' + esc(labels[s.response] || 'Sin respuesta') + '</td><td>' + (s.response === 'interested' ? '<button class="btn secondary" data-cyber="converted" data-phone="' + esc(s.phone) + '">Marcar cambio realizado</button>' : '—') + '</td></tr>').join('') +
       '</tbody></table></div><p class="cyber-feedback" role="status"></p>';
