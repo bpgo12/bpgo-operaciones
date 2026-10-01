@@ -2294,11 +2294,18 @@ async function billingAutomationDashboard(env) {
 }
 
 // Cyber upgrade uses the existing campaign ledger and bot handoff, never changes plans.
+// v2 (2026-10-01): el texto original se sentía "plano" (pedido explícito del usuario de hacerlo
+// más emocionante/promocional, con el % de descuento destacado) y se le agregó un banner con el
+// logo real de BP GO. Un id/template NUEVO en vez de editar el anterior porque (a) Meta no deja
+// editar en el sitio una plantilla ya aprobada sin reiniciar la revisión, y (b) el id viejo ya
+// tiene 29 intentos fallidos por un problema de pago de Meta (ver retryCyberFailed) que no tiene
+// sentido mezclar con esta campaña nueva, que parte limpia.
 const CYBER_UPGRADE = Object.freeze({
-  id: "cyber_oro_platino_20260930", template: "cyber_oro_platino_20260930", language: "es_CL",
+  id: "cyber_oro_platino_v2", template: "cyber_oro_platino_v2", language: "es_CL",
   start: "2026-09-30", end: "2026-10-05", timezone: "America/Santiago",
-  text: "¡Cyber BP GO! Mejora tu Plan Oro y disfruta del Plan Platino de 300 Mb/s por $21.990 mensuales durante 6 meses. Luego, $25.000 mensuales.\n\nPromoción disponible hasta el lunes 5 de octubre. ¿Te interesa solicitar el cambio?",
+  text: "🎉 ¡CYBER BP GO está aquí! 🎉\n\n🚀 Mejora tu Plan Oro a *Plan Platino 300 Mb/s* — 3 veces más veloz.\n\n🔥 *12% de descuento*: paga solo *$21.990/mes* durante 6 meses (precio normal $25.000).\n\n✅ Más velocidad para ver, trabajar y jugar sin cortes.\n\n⏰ Promoción disponible hasta el lunes 5 de octubre.\n\n¿Te interesa solicitar el cambio? 👇",
   buttons: ["Me interesa", "Hablar con ejecutivo", "Ahora no"],
+  bannerPath: "/assets/cyber-banner-v2.png",
 });
 
 function cyberIsOpen(date = new Date()) {
@@ -2414,13 +2421,38 @@ async function cyberSnapshot(env) {
     cortadosCheckFailed: cortados === null };
 }
 
-function cyberTemplateDefinition() {
+function cyberTemplateDefinition(headerHandle) {
   return { name: CYBER_UPGRADE.template, language: CYBER_UPGRADE.language, category: "MARKETING",
-    components: [{ type: "BODY", text: CYBER_UPGRADE.text },
+    components: [{ type: "HEADER", format: "IMAGE", example: { header_handle: [headerHandle] } },
+      { type: "BODY", text: CYBER_UPGRADE.text },
       { type: "BUTTONS", buttons: CYBER_UPGRADE.buttons.map((text) => ({ type: "QUICK_REPLY", text })) }] };
 }
 
-async function cyberTemplate(env, create = false) {
+// Meta exige un media handle (no un link directo) como ejemplo al CREAR una plantilla con header
+// de imagen, obtenido con su API de carga reanudable (2 pasos: abrir sesión, subir bytes). El
+// link público (CYBER_UPGRADE.bannerPath) sigue sirviendo para el ENVÍO real de cada mensaje --
+// esto solo es para que el equipo de revisión de Meta vea la imagen de ejemplo.
+async function uploadCyberBannerToMeta(env, origin, credentials) {
+  const appId = String(env.META_APP_ID || "").trim();
+  if (!appId) throw new Error("Falta META_APP_ID para subir el banner a Meta.");
+  const imageResponse = await fetch(`${origin}${CYBER_UPGRADE.bannerPath}`);
+  if (!imageResponse.ok) throw new Error("No se pudo leer el banner publicado en el sitio.");
+  const bytes = await imageResponse.arrayBuffer();
+  const startRes = await fetch(`https://graph.facebook.com/v21.0/${appId}/uploads?file_length=${bytes.byteLength}&file_type=image/png&access_token=${encodeURIComponent(credentials.accessToken)}`,
+    { method: "POST" });
+  const startData = await startRes.json().catch(() => ({}));
+  if (!startRes.ok || !startData.id) throw new Error("Meta rechazó iniciar la carga del banner.");
+  const uploadRes = await fetch(`https://graph.facebook.com/v21.0/${startData.id}`, {
+    method: "POST",
+    headers: { authorization: `OAuth ${credentials.accessToken}`, "file_offset": "0" },
+    body: bytes,
+  });
+  const uploadData = await uploadRes.json().catch(() => ({}));
+  if (!uploadRes.ok || !uploadData.h) throw new Error("Meta rechazó la carga del banner.");
+  return uploadData.h;
+}
+
+async function cyberTemplate(env, create = false, origin = "") {
   const c = await getWhatsAppCredentials(env);
   if (!c.accessToken || !c.wabaId) throw new Error("Falta la conexión con Meta.");
   const endpoint = `https://graph.facebook.com/v25.0/${encodeURIComponent(c.wabaId)}/message_templates`;
@@ -2432,17 +2464,20 @@ async function cyberTemplate(env, create = false) {
   if (found) {
     const body = found.components?.find((x) => x.type === "BODY")?.text;
     const buttons = found.components?.find((x) => x.type === "BUTTONS")?.buttons || [];
+    const header = found.components?.find((x) => x.type === "HEADER");
     const matches = body === CYBER_UPGRADE.text && found.category === "MARKETING"
-      && buttons.length === 3 && buttons.every((x, i) => x.type === "QUICK_REPLY" && x.text === CYBER_UPGRADE.buttons[i]);
+      && buttons.length === 3 && buttons.every((x, i) => x.type === "QUICK_REPLY" && x.text === CYBER_UPGRADE.buttons[i])
+      && header?.format === "IMAGE";
     return { status: found.status, matches, ready: found.status === "APPROVED" && matches };
   }
   if (!create) return { status: "NOT_FOUND", matches: false, ready: false };
-  const result = await fetch(endpoint, { method: "POST", headers, body: JSON.stringify(cyberTemplateDefinition()) });
+  const headerHandle = await uploadCyberBannerToMeta(env, origin, c);
+  const result = await fetch(endpoint, { method: "POST", headers, body: JSON.stringify(cyberTemplateDefinition(headerHandle)) });
   if (!result.ok) throw new Error("Meta no aceptó la creación de la plantilla.");
   return { status: "PENDING", matches: true, ready: false };
 }
 
-async function sendCyberCampaign(env, body) {
+async function sendCyberCampaign(env, body, origin = "") {
   if (!cyberIsOpen()) throw new Error("La promoción no está vigente.");
   if (body.confirm !== CYBER_UPGRADE.id) throw new Error("Confirma la campaña antes de enviar.");
   const snapshot = await cyberSnapshot(env);
@@ -2452,7 +2487,7 @@ async function sendCyberCampaign(env, body) {
   if (!phones.length || phones.length > 20) throw new Error("Selecciona entre 1 y 20 destinatarios por lote.");
   const eligible = new Map(snapshot.eligible.map((x) => [x.phone, x]));
   if (phones.some((phone) => !eligible.has(phone))) throw new Error("Hay destinatarios que ya no son elegibles.");
-  if (!(await cyberTemplate(env)).ready) throw new Error("La plantilla debe estar aprobada y coincidir con la oferta.");
+  if (!(await cyberTemplate(env, false, origin)).ready) throw new Error("La plantilla debe estar aprobada y coincidir con la oferta.");
   const credentials = await getWhatsAppCredentials(env);
   if (!credentials.phoneNumberId || !credentials.accessToken) throw new Error("WhatsApp no está configurado.");
   const results = [];
@@ -2469,8 +2504,11 @@ async function sendCyberCampaign(env, body) {
         method: "POST", headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
         body: JSON.stringify({ messaging_product: "whatsapp", to: phone, type: "template",
           template: { name: CYBER_UPGRADE.template, language: { code: CYBER_UPGRADE.language },
-            components: ["interest", "human", "decline"].map((action, i) => ({ type: "button", sub_type: "quick_reply", index: String(i),
-              parameters: [{ type: "payload", payload: `${CYBER_UPGRADE.id}:${action}` }] })) } }),
+            components: [
+              { type: "header", parameters: [{ type: "image", image: { link: `${origin}${CYBER_UPGRADE.bannerPath}` } }] },
+              ...["interest", "human", "decline"].map((action, i) => ({ type: "button", sub_type: "quick_reply", index: String(i),
+                parameters: [{ type: "payload", payload: `${CYBER_UPGRADE.id}:${action}` }] })),
+            ] } }),
       });
       const data = await response.json().catch(() => ({}));
       const messageId = response.ok && data.messages?.[0]?.id;
@@ -2552,14 +2590,15 @@ async function handleCyberApi(request, env, session) {
     await ensureWhatsAppInboxTable(env);
     await ensureWhatsAppBotTables(env);
     await ensureCyberTables(env);
+    const origin = new URL(request.url).origin;
     if (request.method === "GET") {
       const snapshot = await cyberSnapshot(env);
-      const template = await cyberTemplate(env).catch(() => ({ status: "UNAVAILABLE", ready: false }));
+      const template = await cyberTemplate(env, false, origin).catch(() => ({ status: "UNAVAILABLE", ready: false }));
       return Response.json({ ...snapshot, template }, { headers: { "cache-control": "no-store" } });
     }
     const body = await request.json();
-    if (request.method === "POST" && body.action === "template") return Response.json(await cyberTemplate(env, true));
-    if (request.method === "POST" && body.action === "send") return Response.json(await sendCyberCampaign(env, body));
+    if (request.method === "POST" && body.action === "template") return Response.json(await cyberTemplate(env, true, origin));
+    if (request.method === "POST" && body.action === "send") return Response.json(await sendCyberCampaign(env, body, origin));
     if (request.method === "POST" && body.action === "retryFailed") return Response.json(await retryCyberFailed(env));
     if (request.method === "PATCH" && body.action === "converted") {
       const result = await env.DB.prepare(`UPDATE whatsapp_upgrade_requests SET response='converted', updated_at=datetime('now')
@@ -2567,8 +2606,11 @@ async function handleCyberApi(request, env, session) {
       return Response.json({ ok: Boolean(result.meta?.changes) });
     }
     return Response.json({ ok: false, error: "Operación no disponible." }, { status: 400 });
-  } catch {
-    return Response.json({ ok: false, error: "No se pudo completar la operación. Actualiza la campaña y verifica vigencia, selección y aprobación de Meta." }, { status: 409 });
+  } catch (error) {
+    // Antes era un mensaje genérico fijo -- con la carga del banner a Meta de por medio (nueva
+    // fuente de fallos: META_APP_ID faltante, banner no accesible, Meta rechazando la subida) hace
+    // falta ver el error real para poder diagnosticar, no solo "algo salió mal".
+    return Response.json({ ok: false, error: error?.message || "No se pudo completar la operación. Actualiza la campaña y verifica vigencia, selección y aprobación de Meta." }, { status: 409 });
   }
 }
 

@@ -19,6 +19,7 @@
   function render(panel, data) {
     panel._data = data;
     panel.innerHTML = '<header><div><p class="eyebrow">CAMPAÑAS · WHATSAPP</p><h2>Cyber BP GO</h2><p>Plan Oro 100 Mb/s → Plan Platino 300 Mb/s</p></div><button class="btn" data-cyber="refresh">Actualizar</button></header>' +
+      (data.campaign.bannerPath ? '<img class="cyber-banner" src="' + esc(data.campaign.bannerPath) + '" alt="Banner Cyber BP GO">' : '') +
       '<blockquote>' + esc(data.campaign.text).replace(/\n/g, '<br>') + '</blockquote>' +
       '<p><strong>' + (data.open ? 'Vigente' : 'Fuera de vigencia') + '</strong> · 30 de septiembre al 5 de octubre de 2026 · Hora de Chile</p>' +
       '<p>Plantilla Meta: <strong>' + esc(data.template.status) + '</strong>' + (data.template.matches === false ? ' · El texto aprobado debe coincidir con esta oferta.' : '') + '</p>' +
