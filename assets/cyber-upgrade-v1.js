@@ -28,7 +28,8 @@
       '<div class="cyber-batch-actions"><button class="btn secondary" data-cyber="select20">Seleccionar próximos 20</button><button class="btn secondary" data-cyber="clearselection">Limpiar selección</button><span class="cyber-selected-count">0 seleccionados</span></div>' +
       '<div class="cyber-table"><table><thead><tr><th>Enviar</th><th>Cliente</th><th>Teléfono</th><th>Plan actual</th></tr></thead><tbody>' +
       data.eligible.map((c) => '<tr><td><input type="checkbox" aria-label="Seleccionar ' + esc(c.name) + '" value="' + esc(c.phone) + '"></td><td>' + esc(c.name) + '</td><td>' + esc(c.phone) + '</td><td>' + esc(c.plan) + '</td></tr>').join('') +
-      '</tbody></table></div><button class="btn" data-cyber="send" ' + (!data.open || !data.template.ready || !data.eligible.length || data.cortadosCheckFailed ? 'disabled' : '') + '>Enviar a seleccionados</button>' +
+      '</tbody></table></div><button class="btn" data-cyber="send" ' + (!data.open || !data.template.ready || !data.eligible.length || data.cortadosCheckFailed ? 'disabled' : '') + '>Enviar a seleccionados</button> ' +
+      '<button class="btn secondary" data-cyber="sendAll" ' + (!data.open || !data.template.ready || !data.eligible.length || data.cortadosCheckFailed ? 'disabled' : '') + '>Enviar a todos los elegibles (' + data.eligible.length + ', en lotes automáticos de 20)</button>' +
       '<h3>Seguimiento</h3><div class="cyber-table"><table><thead><tr><th>Cliente / teléfono</th><th>Envío</th><th>Respuesta</th><th>Gestión</th></tr></thead><tbody>' +
       data.sends.map((s) => '<tr><td>' + esc(s.customer_name || s.phone) + '</td><td>' + esc(s.message_id ? s.delivery_status || 'Aceptado por Meta' : 'Requiere revisión · no reenviar') + '</td><td>' + esc(labels[s.response] || 'Sin respuesta') + '</td><td>' + (s.response === 'interested' ? '<button class="btn secondary" data-cyber="converted" data-phone="' + esc(s.phone) + '">Marcar cambio realizado</button>' : '—') + '</td></tr>').join('') +
       '</tbody></table></div><p class="cyber-feedback" role="status"></p>';
@@ -77,6 +78,30 @@
           const result = await api("POST", { action: "send", confirm: panel._data.campaign.id, previewId: panel._data.previewId, phones });
           await load(panel);
           panel.querySelector('.cyber-feedback').textContent = result.results.filter((x) => x.status === 'accepted').length + ' aceptados por Meta; ' + result.results.filter((x) => x.status === 'review_required').length + ' requieren revisión; ' + result.results.filter((x) => x.status === 'skipped').length + ' omitidos.';
+          return;
+        }
+        if (action === "sendAll") {
+          const total = panel._data.eligible.length;
+          if (!total) throw new Error("No hay clientes elegibles para enviar.");
+          const batches = Math.ceil(total / 20);
+          if (!window.confirm("Esto enviará la promoción a los " + total + " clientes elegibles, en " + batches + " lotes automáticos de hasta 20. ¿Continuar?")) return;
+          // El backend solo acepta hasta 20 destinatarios por llamada (ver sendCyberCampaign) -- acá
+          // se encadenan los lotes solos, pero cada envío sigue siendo una llamada real a Meta, así
+          // que se espera un poco entre lotes para no disparar el límite de "healthy ecosystem
+          // engagement" que ya afectó los avisos a Carlos (ver STAFF_NOTIFICATION_PACING_MS).
+          let accepted = 0, review = 0, skipped = 0, data = panel._data;
+          while (data.eligible.length) {
+            const phones = data.eligible.slice(0, 20).map((c) => c.phone);
+            const result = await api("POST", { action: "send", confirm: data.campaign.id, previewId: data.previewId, phones });
+            accepted += result.results.filter((x) => x.status === "accepted").length;
+            review += result.results.filter((x) => x.status === "review_required").length;
+            skipped += result.results.filter((x) => x.status === "skipped").length;
+            panel.querySelector(".cyber-feedback").textContent = "Enviando... " + (accepted + review + skipped) + "/" + total + " procesados.";
+            data = await api("GET");
+            if (data.eligible.length) await new Promise((resolve) => setTimeout(resolve, 2000));
+          }
+          render(panel, data);
+          panel.querySelector(".cyber-feedback").textContent = accepted + " aceptados por Meta en total; " + review + " requieren revisión; " + skipped + " omitidos.";
           return;
         }
         if (action === "converted") {
