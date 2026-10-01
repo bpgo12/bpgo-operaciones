@@ -2443,7 +2443,7 @@ async function handleCyberReply(env, credentials, message) {
   if (!sent?.message_id || (message.context?.id && message.context.id !== sent.message_id)) return true;
   // A request arriving after the offer closes is referred without promising the price.
   const response = action === "decline" ? "declined" : !cyberIsOpen() ? "expired" : action === "human" ? "human" : "interested";
-  const previous = await env.DB.prepare("SELECT response FROM whatsapp_upgrade_requests WHERE campaign=? AND phone=?")
+  const previous = await env.DB.prepare("SELECT response, customer_name FROM whatsapp_upgrade_requests WHERE campaign=? AND phone=?")
     .bind(CYBER_UPGRADE.id, message.from).first();
   if (previous?.response === "converted" || previous?.response === response) return true;
   await env.DB.prepare(`INSERT INTO whatsapp_upgrade_requests (campaign,phone,response,source_message_id)
@@ -2454,6 +2454,15 @@ async function handleCyberReply(env, credentials, message) {
     if (await getBotSessionMode(env, message.from) !== "human")
       await sendWhatsAppText(env, credentials, message.from, "Entendido, no seguimos con esta promoción.");
   } else {
+    // Igual que con los comprobantes de pago: un aviso de WhatsApp a Carlos (misma plantilla
+    // "aviso_nuevo_caso"), no solo el cambio de modo, porque de lo contrario nadie se entera
+    // de que el cliente pidió el upgrade o quiere hablar con un ejecutivo.
+    const summary = response === "interested"
+      ? "Cliente presionó 'Me interesa' en la campaña Cyber Oro→Platino. Solicita el cambio de plan."
+      : response === "human"
+      ? "Cliente presionó 'Hablar con ejecutivo' en la campaña Cyber Oro→Platino."
+      : "Cliente respondió a la campaña Cyber Oro→Platino fuera de plazo (después del 5 de octubre). No se le prometió el precio promocional.";
+    await notifyStaff(env, credentials, "carlos", "Campaña Cyber BP GO", previous?.customer_name, message.from, summary, { sourceMessageId: message.id });
     // Handoff first; no acknowledgement after entering human mode.
     await setBotSessionMode(env, message.from, "human", `cyber_upgrade_${response}`);
   }
