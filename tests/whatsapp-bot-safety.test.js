@@ -198,6 +198,12 @@ assert.equal(api.mentionsTechnicalIssueOrVisit("el router tiene la luz roja"), t
 assert.equal(api.mentionsTechnicalIssueOrVisit("necesito que venga un técnico"), true);
 assert.match(worker, /if \(!mentionsTechnicalIssueOrVisit\(message\.customerText\) && !mentionsTechnicalIssueOrVisit\(action\.reason\)\) \{/);
 
+// Caso real: un prospecto nunca antes visto (no matchedByPhone, sin reported_name previo) pidiendo
+// una "visita técnica" terminaba con "¿a nombre de quién está contratado el servicio?" -- sin
+// sentido para alguien que nunca ha tenido el servicio. Debe redirigir a contratación nueva.
+assert.match(worker, /if \(!known && !matchedCustomer\.matchedByPhone\) \{[\s\S]*?awaiting_sector[\s\S]*?¡Para agendar tu instalación nueva/);
+assert.match(worker, /Esto incluye cuando el cliente responde a un aviso\/campaña de zona nueva habilitada/);
+
 // Baja de servicio: debe escalar siempre, nunca resolverse sola ni prometer nada.
 assert.match(worker, /Cuando SÍ sea una baja real, usa "escalate" siempre/);
 
