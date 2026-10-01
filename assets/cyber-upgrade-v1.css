@@ -1,0 +1,11 @@
+#cyber-upgrade-panel { margin-top:24px; padding:24px; border:1px solid #d8e1ec; border-radius:16px; background:#fff; color:#163047; }
+#cyber-upgrade-panel header,.cyber-actions { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+#cyber-upgrade-panel h2 { margin:4px 0 8px; }
+#cyber-upgrade-panel blockquote { margin:20px 0; padding:20px; background:#eef6fb; border-left:4px solid #007b91; border-radius:8px; line-height:1.7; }
+#cyber-upgrade-panel .cyber-table { overflow:auto; max-height:420px; margin:16px 0; }
+#cyber-upgrade-panel table { width:100%; border-collapse:collapse; text-align:left; }
+#cyber-upgrade-panel td,#cyber-upgrade-panel th { padding:12px; border-bottom:1px solid #e3e9ef; }
+#cyber-upgrade-panel input[type=checkbox] { width:20px; height:20px; }
+#cyber-upgrade-panel button:disabled { opacity:.5; cursor:not-allowed; }
+#cyber-upgrade-panel .cyber-feedback { color:#9c3214; min-height:24px; }
+@media(max-width:600px) { #cyber-upgrade-panel { padding:16px; } #cyber-upgrade-panel td,#cyber-upgrade-panel th { padding:8px; } }
