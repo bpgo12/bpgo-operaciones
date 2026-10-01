@@ -10,6 +10,12 @@
     return data;
   }
   const labels = { interested: "Interesado · gestionar cambio", human: "Solicita ejecutivo", declined: "Ahora no", converted: "Cambio realizado", expired: "Respuesta fuera de plazo" };
+  const exclusionLabels = { invalid_phone: "teléfono inválido", inactive: "cortado", duplicate: "duplicado", installed_after_cutoff: "instalado después del corte o sin instalación finalizada" };
+  function exclusionSummary(excluded) {
+    const counts = {};
+    for (const item of excluded) counts[item.reason] = (counts[item.reason] || 0) + 1;
+    return Object.keys(counts).map((reason) => counts[reason] + ' ' + (exclusionLabels[reason] || reason)).join(' · ');
+  }
   function render(panel, data) {
     panel._data = data;
     panel.innerHTML = '<header><div><p class="eyebrow">CAMPAÑAS · WHATSAPP</p><h2>Cyber BP GO</h2><p>Plan Oro 100 Mb/s → Plan Platino 300 Mb/s</p></div><button class="btn" data-cyber="refresh">Actualizar</button></header>' +
@@ -17,7 +23,7 @@
       '<p><strong>' + (data.open ? 'Vigente' : 'Fuera de vigencia') + '</strong> · 30 de septiembre al 5 de octubre de 2026 · Hora de Chile</p>' +
       '<p>Plantilla Meta: <strong>' + esc(data.template.status) + '</strong>' + (data.template.matches === false ? ' · El texto aprobado debe coincidir con esta oferta.' : '') + '</p>' +
       (data.cortadosCheckFailed ? '<p class="cyber-warning">⚠️ No se pudo verificar la planilla de clientes cortados. No se puede enviar hasta actualizar y confirmar que esto se resuelva.</p>' : '') +
-      '<div class="cyber-actions"><button class="btn secondary" data-cyber="template">Solicitar aprobación de plantilla</button><span>' + data.eligible.length + ' clientes disponibles · ' + data.humanExcluded + ' en atención humana excluidos</span></div>' +
+      '<div class="cyber-actions"><button class="btn secondary" data-cyber="template">Solicitar aprobación de plantilla</button><span>' + data.eligible.length + ' clientes disponibles · ' + data.humanExcluded + ' en atención humana excluidos' + (data.excluded.length ? ' · ' + exclusionSummary(data.excluded) + ' excluidos' : '') + '</span></div>' +
       '<p>Revisa y selecciona hasta 20 clientes por lote. Los intentos ya registrados no se repetirán.</p>' +
       '<div class="cyber-table"><table><thead><tr><th>Enviar</th><th>Cliente</th><th>Teléfono</th><th>Plan actual</th></tr></thead><tbody>' +
       data.eligible.map((c) => '<tr><td><input type="checkbox" aria-label="Seleccionar ' + esc(c.name) + '" value="' + esc(c.phone) + '"></td><td>' + esc(c.name) + '</td><td>' + esc(c.phone) + '</td><td>' + esc(c.plan) + '</td></tr>').join('') +
