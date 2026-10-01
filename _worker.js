@@ -2312,43 +2312,50 @@ function cyberNormalize(value) {
 }
 
 // El negocio pidió limitar la campaña a clientes instalados hasta agosto de 2026 (no ofrecer el
-// upgrade a quien recién está empezando el servicio, o cuya instalación ni siquiera terminó). La
-// ficha de cliente no tiene fecha de instalación, pero sí existe en workOrders (type "Instalacion",
-// plannedDate, status). Sin ninguna orden registrada se asume que el cliente es anterior al uso de
-// esta tabla (las primeras órdenes trazadas son de junio de 2026) y por lo tanto instalado antes del
-// corte. Con orden(es) registradas, tiene que existir al menos una Finalizada en o antes del corte
-// -- una instalación agendada, reagendada o que requiere nueva visita no cuenta como instalada
-// todavía, sin importar qué tan antigua sea la fecha planificada.
+// upgrade a quien recién está empezando el servicio). La "planilla madre" (sincronizada en
+// app_state.billingCustomers, no en app_state.customers) trae installationDate por cliente; sin
+// ella no había forma de aplicar este corte.
 const CYBER_INSTALL_CUTOFF = "2026-08-31";
+const CYBER_SPANISH_MONTHS = {
+  enero: "01", febrero: "02", marzo: "03", abril: "04", mayo: "05", junio: "06",
+  julio: "07", agosto: "08", septiembre: "09", setiembre: "09", octubre: "10", noviembre: "11", diciembre: "12",
+};
 
-function cyberInstalledByCutoff(workOrders, customerId, cutoff = CYBER_INSTALL_CUTOFF) {
-  const orders = workOrders.filter((w) => w?.type === "Instalacion" && w?.customerId === customerId);
-  if (!orders.length) return true;
-  return orders.some((w) => w.status === "Finalizado" && w.plannedDate && w.plannedDate <= cutoff);
+// installationDate casi siempre viene "YYYY-MM-DD", pero la planilla importada trae al menos un
+// caso en español ("24 julio 2026") y otro con un año que no cuadra ("2026-12-17" entre puros
+// registros de diciembre de 2025 -- probablemente un typo de digitación, no se corrige a ciegas).
+// Sin poder normalizar la fecha, no hay base para decidir el corte, así que se marca como
+// "installation_date_unknown" en vez de arriesgar una comparación de texto incorrecta (un string
+// no-ISO compara mal contra "2026-08-31" letra por letra).
+function cyberParseInstallDate(value) {
+  const raw = String(value || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  const match = cyberNormalize(raw).match(/^(\d{1,2})\s+([a-z]+)\s+(\d{4})$/);
+  const month = match && CYBER_SPANISH_MONTHS[match[2]];
+  return month ? `${match[3]}-${month}-${match[1].padStart(2, "0")}` : null;
 }
 
-// La cartera (app_state.customers) nunca tuvo un plan llamado "Oro" ni campos active/status/estado
-// -- son objetos planos {id,name,rut,phone,email,address,plan,mapUrl,accessNotes}, y "plan" guarda
-// la velocidad contratada ("100 Mb/s", "300 Mb/s", "500 Mb/s"). "Plan Oro" (100 Mb/s a $18.000, ver
-// CYBER_UPGRADE/PLAN_GROUPS) es como el negocio llama a ese nivel, no un valor que exista en los
-// datos. El corte/suspensión real tampoco vive acá: viene de la planilla sincronizada que ya usa
-// /api/billing/cortados (ver cortadosPhoneSet). Con el filtro anterior (buscar la palabra "oro" y
-// excluir por active/status) la campaña no tenía NINGÚN destinatario elegible y, si lo hubiera
-// tenido, no habría excluido a los clientes realmente cortados.
+// La cartera operativa (app_state.customers) nunca tuvo un plan llamado "Oro" ni fecha de
+// instalación ni un campo active/status confiable (siempre null, o true incluso para clientes ya
+// cortados). "Plan Oro" ($18.000, ver CYBER_UPGRADE) es un precio, no un nombre de plan: en la
+// planilla real conviven "BASICO 30MB" (la mayoría, etiqueta heredada de antes de la mejora de
+// velocidad) y "BASICO 100MB" al mismo precio -- filtrar por nombre de plan dejaba fuera a la
+// mayoría de los clientes de ese nivel. El corte/suspensión real tampoco vive acá: viene de la
+// planilla sincronizada que ya usa /api/billing/cortados (ver cortadosPhoneSet).
 function cyberCandidates(state, cortadosPhones) {
   const selected = [], excluded = [], seen = new Set();
-  const workOrders = Array.isArray(state.workOrders) ? state.workOrders : [];
-  for (const c of Array.isArray(state.customers) ? state.customers : []) {
-    const plan = cyberNormalize(c.plan);
-    if (!/^100\s*mb\/s$/.test(plan)) continue;
-    const phone = normalizeWhatsAppPhone(c.phone);
+  for (const b of Array.isArray(state.billingCustomers) ? state.billingCustomers : []) {
+    if (Number(b.monthlyAmount) !== 18000) continue;
+    const phone = normalizeWhatsAppPhone(b.phone);
+    const installDate = cyberParseInstallDate(b.installationDate);
     const reason = !/^569\d{8}$/.test(phone) ? "invalid_phone"
       : cortadosPhones?.has(phone) ? "inactive"
-      : !cyberInstalledByCutoff(workOrders, c.id) ? "installed_after_cutoff"
+      : !installDate ? "installation_date_unknown"
+      : installDate > CYBER_INSTALL_CUTOFF ? "installed_after_cutoff"
       : seen.has(phone) ? "duplicate" : null;
-    if (reason) { excluded.push({ id: c.id, reason }); continue; }
+    if (reason) { excluded.push({ id: b.id, reason }); continue; }
     seen.add(phone);
-    selected.push({ id: String(c.id || ""), name: String(c.name || ""), phone, plan: String(c.plan || "") });
+    selected.push({ id: String(b.id || ""), name: String(b.customerName || b.name || ""), phone, plan: String(b.plan || "") });
   }
   return { selected, excluded };
 }
