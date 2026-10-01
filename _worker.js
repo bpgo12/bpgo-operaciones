@@ -253,6 +253,17 @@ function hasExplicitPaymentIntent(value) {
   return /\b(pagu[eé]|pago|pagado|transferencia|transfer[ií]|dep[oó]sito|comprobante)\b/i.test(String(value || ""));
 }
 
+// El cliente suele anteponer una frase antes del nombre real ("Nombre:", "Mi nombre es", "Al
+// nombre de", copiando la etiqueta que le mandamos) -- sin quitarla antes de validar, isPlausible
+// AccountName la rechazaba completa (por palabras de mas, o puntuacion suelta como el ":" que queda
+// tras "Nombre :"), y el bot volvia a pedir un nombre que el cliente ya habia dado.
+function extractAccountName(value) {
+  let name = String(value || "").trim().slice(0, 200).replace(/\s+/g, " ");
+  name = name.replace(/^(mi nombre es|el nombre es|es a nombre de|a nombre de|al nombre de|nombre( del titular)?)\s*:?\s*/i, "").trim();
+  name = name.replace(/^[.:,-]+\s*/, "").trim();
+  return name;
+}
+
 function isPlausibleAccountName(value) {
   const name = String(value || "").trim().replace(/\s+/g, " ");
   if (name.length < 5 || name.length > 120 || /\d|https?:|@/.test(name)) return false;
@@ -463,6 +474,27 @@ async function getBotSessionRow(env, phone) {
 async function getBotSessionMode(env, phone) {
   const row = await getBotSessionRow(env, phone);
   return row?.mode === "human" ? "human" : "bot";
+}
+
+const AUTO_REACTIVATE_AFTER_MS = 45 * 60 * 1000;
+
+// Solo se reactiva sola una sesión que quedó en modo humano porque alguien de BPGO tomó la
+// conversación DIRECTAMENTE (respondió manual desde el panel o desde la app de WhatsApp Business)
+// -- nunca cuando el motivo fue que el bot creó un caso de negocio (pago/visita/descuento/
+// contratación) que sigue esperando que Carlos lo revise explícitamente; esos casos deben seguir
+// congelados hasta reactivación manual, tal como antes. Se exige además que haya pasado el tiempo
+// mínimo desde la ÚLTIMA actividad real de la conversación (no desde que se activó el modo humano),
+// para no reactivar el bot mientras un humano sigue escribiendo activamente.
+const AUTO_REACTIVATABLE_REASONS = new Set(["manual_reply", "manual_whatsapp_reply", "manual_takeover"]);
+
+async function shouldAutoReactivate(env, phone, session, currentMessageId) {
+  if (!session || session.mode !== "human" || !AUTO_REACTIVATABLE_REASONS.has(session.escalation_reason)) return false;
+  const lastMessage = await env.DB.prepare(
+    "SELECT created_at FROM whatsapp_inbox_messages WHERE phone = ? AND message_id != ? ORDER BY created_at DESC LIMIT 1"
+  ).bind(phone, currentMessageId || "").first();
+  if (!lastMessage) return false;
+  const lastActivityMs = Date.parse(lastMessage.created_at);
+  return Number.isFinite(lastActivityMs) && Date.now() - lastActivityMs >= AUTO_REACTIVATE_AFTER_MS;
 }
 
 async function setBotSessionMode(env, phone, mode, reason, actor) {
@@ -1608,11 +1640,16 @@ async function runBotForInboundMessages(env, changes) {
             }
           }
         }
-        const mode = await getBotSessionMode(env, phone);
-        if (mode === "human") {
-          // El mensaje ya fue guardado en la bandeja. Mientras un humano tenga la conversación,
-          // nunca se llama a la IA ni se responde; solo "Reactivar bot" puede devolverla al bot.
-          continue;
+        const sessionRow = await getBotSessionRow(env, phone);
+        if (sessionRow?.mode === "human") {
+          if (await shouldAutoReactivate(env, phone, sessionRow, message.id)) {
+            await setBotSessionMode(env, phone, "bot", "auto_reactivated_after_inactivity");
+          } else {
+            // El mensaje ya fue guardado en la bandeja. Mientras un humano tenga la conversación
+            // (y no se cumplan las condiciones de reactivación automática de arriba), nunca se
+            // llama a la IA ni se responde; "Reactivar bot" también puede devolverla al bot.
+            continue;
+          }
         }
         if (await handleCyberReply(env, credentials, message)) continue;
         const preferAudio = message.type === "audio";
@@ -1715,7 +1752,7 @@ async function runBotForInboundMessages(env, changes) {
             await sendBotReply(env, credentials, phone, "Entendido, no registramos la visita. Escríbenos si cambias de opinión. 🙌", preferAudio);
             continue;
           }
-          const reportedName = String(text).trim().slice(0, 200);
+          const reportedName = extractAccountName(text);
           if (!isPlausibleAccountName(reportedName)) {
             await sendBotReply(env, credentials, phone, "Necesito el nombre del titular del servicio, por ejemplo: Juan Pérez.", preferAudio);
             continue;
@@ -1740,7 +1777,7 @@ async function runBotForInboundMessages(env, changes) {
             await sendBotReply(env, credentials, phone, "Entendido, de todas formas dejamos tu comprobante en revisión. Cualquier cosa, escríbenos. 🙏", preferAudio);
             continue;
           }
-          const reportedName = String(text).trim().slice(0, 200);
+          const reportedName = extractAccountName(text);
           if (!isPlausibleAccountName(reportedName)) {
             await sendBotReply(env, credentials, phone, "Necesito el nombre del titular del servicio, por ejemplo: Juan Pérez.", preferAudio);
             continue;
@@ -1765,7 +1802,7 @@ async function runBotForInboundMessages(env, changes) {
             await sendBotReply(env, credentials, phone, "Entendido, no seguimos con la revisión. Cualquier cosa, escríbenos. 🙌", preferAudio);
             continue;
           }
-          const reportedName = String(text).trim().slice(0, 200);
+          const reportedName = extractAccountName(text);
           if (!isPlausibleAccountName(reportedName)) {
             await sendBotReply(env, credentials, phone, "Necesito el nombre del titular del servicio, por ejemplo: Juan Pérez.", preferAudio);
             continue;
