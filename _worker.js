@@ -2311,20 +2311,39 @@ function cyberNormalize(value) {
   return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
 }
 
-function cyberCandidates(state) {
+// La cartera (app_state.customers) nunca tuvo un plan llamado "Oro" ni campos active/status/estado
+// -- son objetos planos {id,name,rut,phone,email,address,plan,mapUrl,accessNotes}, y "plan" guarda
+// la velocidad contratada ("100 Mb/s", "300 Mb/s", "500 Mb/s"). "Plan Oro" (100 Mb/s a $18.000, ver
+// CYBER_UPGRADE/PLAN_GROUPS) es como el negocio llama a ese nivel, no un valor que exista en los
+// datos. El corte/suspensión real tampoco vive acá: viene de la planilla sincronizada que ya usa
+// /api/billing/cortados (ver cortadosPhoneSet). Con el filtro anterior (buscar la palabra "oro" y
+// excluir por active/status) la campaña no tenía NINGÚN destinatario elegible y, si lo hubiera
+// tenido, no habría excluido a los clientes realmente cortados.
+function cyberCandidates(state, cortadosPhones) {
   const selected = [], excluded = [], seen = new Set();
   for (const c of Array.isArray(state.customers) ? state.customers : []) {
     const plan = cyberNormalize(c.plan);
-    if (!/\boro\b/.test(plan) || /\b(platino|300)\b/.test(plan)) continue;
+    if (!/^100\s*mb\/s$/.test(plan)) continue;
     const phone = normalizeWhatsAppPhone(c.phone);
     const reason = !/^569\d{8}$/.test(phone) ? "invalid_phone"
-      : c.active === false || /cortad|suspend|inactiv|baja/.test(cyberNormalize(c.status || c.estado)) ? "inactive"
+      : cortadosPhones?.has(phone) ? "inactive"
       : seen.has(phone) ? "duplicate" : null;
     if (reason) { excluded.push({ id: c.id, reason }); continue; }
     seen.add(phone);
     selected.push({ id: String(c.id || ""), name: String(c.name || ""), phone, plan: String(c.plan || "") });
   }
   return { selected, excluded };
+}
+
+// Mismo origen que /api/billing/cortados (ver más abajo), reutilizado acá para no mandar la
+// campaña a alguien que el negocio ya cortó por no pago. Si la planilla no responde, se devuelve
+// null (no una lista vacía) para no confundir "sin cortados" con "no se pudo verificar".
+async function cortadosPhoneSet() {
+  const syncUrl = "https://script.google.com/macros/s/AKfycbxQWG6fkP1_V8quAUCGN0q2kDtHq5nT4kmOXjTtqdkP9kBaEx_KoE0KAwnG39QhxJvd/exec?cortados=1&token=bpgo_sheets_sync_2026_seguro";
+  const upstream = await fetch(syncUrl, { cache: "no-store" }).catch(() => null);
+  const payload = await upstream?.json().catch(() => null);
+  if (!upstream?.ok || !payload?.ok || !Array.isArray(payload.cortados)) return null;
+  return new Set(payload.cortados.map((value) => normalizeWhatsAppPhone(value)));
 }
 
 function cyberButtonAction(message) {
@@ -2350,7 +2369,8 @@ async function cyberSnapshot(env) {
   await ensureCyberTables(env);
   const row = await env.DB.prepare("SELECT data FROM app_state WHERE id='main'").first();
   if (!row?.data) throw new Error("No se pudo leer la cartera actual.");
-  const candidates = cyberCandidates(JSON.parse(row.data));
+  const cortados = await cortadosPhoneSet();
+  const candidates = cyberCandidates(JSON.parse(row.data), cortados);
   const sends = await env.DB.prepare(`SELECT c.recipient AS phone, c.message_id, c.created_at,
     r.customer_name, r.response, s.status AS delivery_status
     FROM whatsapp_campaign_sends c
@@ -2365,7 +2385,8 @@ async function cyberSnapshot(env) {
   const digest = await crypto.subtle.digest("SHA-256", encoder.encode(fingerprint));
   const previewId = Array.from(new Uint8Array(digest), (x) => x.toString(16).padStart(2, "0")).join("");
   return { campaign: CYBER_UPGRADE, open: cyberIsOpen(), eligible, excluded: candidates.excluded,
-    humanExcluded: candidates.selected.filter((x) => held.has(x.phone)).length, sends: sends.results || [], previewId };
+    humanExcluded: candidates.selected.filter((x) => held.has(x.phone)).length, sends: sends.results || [], previewId,
+    cortadosCheckFailed: cortados === null };
 }
 
 function cyberTemplateDefinition() {
@@ -2400,6 +2421,7 @@ async function sendCyberCampaign(env, body) {
   if (!cyberIsOpen()) throw new Error("La promoción no está vigente.");
   if (body.confirm !== CYBER_UPGRADE.id) throw new Error("Confirma la campaña antes de enviar.");
   const snapshot = await cyberSnapshot(env);
+  if (snapshot.cortadosCheckFailed) throw new Error("No se pudo verificar la lista de clientes cortados. Intenta de nuevo en unos minutos.");
   if (body.previewId !== snapshot.previewId) throw new Error("La cartera cambió. Actualiza y revisa la selección.");
   const phones = Array.isArray(body.phones) ? [...new Set(body.phones)] : [];
   if (!phones.length || phones.length > 20) throw new Error("Selecciona entre 1 y 20 destinatarios por lote.");

@@ -49,7 +49,10 @@ vm.runInContext(`
   ${functionSource("isOptOutMessage")}
   ${functionSource("matchPlanGroup")}
   ${functionSource("extractAccountName")}
-  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment, mentionsServiceOutage, mentionsTechnicalIssueOrVisit, isOptOutMessage, matchPlanGroup, extractAccountName };
+  ${functionSource("normalizeWhatsAppPhone")}
+  ${functionSource("cyberNormalize")}
+  ${functionSource("cyberCandidates")}
+  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment, mentionsServiceOutage, mentionsTechnicalIssueOrVisit, isOptOutMessage, matchPlanGroup, extractAccountName, normalizeWhatsAppPhone, cyberNormalize, cyberCandidates };
 `, context);
 
 const api = context.api;
@@ -124,6 +127,46 @@ assert.match(worker, /const BOT_REPLY_DEBOUNCE_MS = 6000/);
 assert.match(worker, /async function markLatestMessage\(env, phone, messageId\)/);
 assert.match(worker, /async function isStillLatestMessage\(env, phone, messageId, waitMs = BOT_REPLY_DEBOUNCE_MS\)/);
 assert.match(worker, /if \(!\(await isStillLatestMessage\(env, phone, message\.id\)\)\) continue/);
+
+// Campaña Cyber (2026-10-01): la cartera real (app_state.customers) nunca tuvo un plan llamado
+// "Oro" ni campos active/status/estado -- son objetos {id,name,rut,phone,email,address,plan,...}
+// y "plan" guarda la velocidad ("100 Mb/s"/"300 Mb/s"/"500 Mb/s"). El filtro original (buscar la
+// palabra "oro") no tenía NINGÚN cliente elegible en la cartera real; esta prueba usa la forma
+// exacta de los datos reales para que no se repita.
+{
+  const customers = [
+    { id: "a", name: "Cliente Oro Uno", phone: "987811014", plan: "100 Mb/s" },
+    { id: "b", name: "Cliente Oro Cortado", phone: "966341140", plan: "100 Mb/s" },
+    { id: "c", name: "Cliente Platino", phone: "937638489", plan: "300 Mb/s" },
+    { id: "d", name: "Cliente Giga", phone: "944852483", plan: "500 Mb/s" },
+    { id: "e", name: "Cliente Sin Plan", phone: "921660635", plan: "No aplica" },
+    { id: "f", name: "Teléfono inválido", phone: "123", plan: "100 Mb/s" },
+    { id: "g", name: "Duplicado", phone: "987811014", plan: "100 Mb/s" },
+  ];
+  const cortados = new Set(["56966341140"]);
+  const result = api.cyberCandidates({ customers }, cortados);
+  // assert.deepEqual compara objetos vm vs. Node-realm por prototipo (siempre falla aunque la
+  // estructura sea idéntica) -- se comparan propiedades sueltas en vez de arrays/objetos completos.
+  assert.equal(result.selected.length, 1);
+  assert.equal(result.selected[0].id, "a");
+  assert.equal(result.selected[0].phone, "56987811014");
+  const excludedB = result.excluded.find((x) => x.id === "b");
+  assert.equal(excludedB?.reason, "inactive");
+  const excludedF = result.excluded.find((x) => x.id === "f");
+  assert.equal(excludedF?.reason, "invalid_phone");
+  const excludedG = result.excluded.find((x) => x.id === "g");
+  assert.equal(excludedG?.reason, "duplicate");
+  assert.equal(result.selected.some((x) => x.id === "c"), false, "300 Mb/s (Platino) must not be targeted");
+  assert.equal(result.selected.some((x) => x.id === "d"), false, "500 Mb/s must not be targeted");
+  assert.equal(result.selected.some((x) => x.id === "e"), false, "\"No aplica\" must not be targeted");
+  // Sin la lista de cortados (sync caído) no se debe asumir que nadie está cortado -- cyberSnapshot
+  // marca cortadosCheckFailed y sendCyberCampaign rechaza el envío en ese caso.
+  const noSync = api.cyberCandidates({ customers }, undefined);
+  assert.equal(noSync.selected.some((x) => x.id === "b"), true);
+}
+assert.match(worker, /async function cortadosPhoneSet\(\)/);
+assert.match(worker, /cortadosCheckFailed: cortados === null/);
+assert.match(worker, /if \(snapshot\.cortadosCheckFailed\) throw new Error\("No se pudo verificar la lista de clientes cortados/);
 
 // Caso real (2026-10-01, teléfono 56937638489): "Si" y "Que valores tiene" llegaron en DOS webhooks
 // separados, 10s aparte. Cada uno pasó su propio chequeo de "más nuevo" antes de llamar a la IA
