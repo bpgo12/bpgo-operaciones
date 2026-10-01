@@ -48,7 +48,8 @@ vm.runInContext(`
   ${functionSource("mentionsTechnicalIssueOrVisit")}
   ${functionSource("isOptOutMessage")}
   ${functionSource("matchPlanGroup")}
-  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment, mentionsServiceOutage, mentionsTechnicalIssueOrVisit, isOptOutMessage, matchPlanGroup };
+  ${functionSource("extractAccountName")}
+  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment, mentionsServiceOutage, mentionsTechnicalIssueOrVisit, isOptOutMessage, matchPlanGroup, extractAccountName };
 `, context);
 
 const api = context.api;
@@ -133,6 +134,15 @@ for (const sector of ["Lanalhue", "Peleco", "Trangilboro", "Llenquehue"]) {
   assert.equal(api.matchPlanGroup(sector), "otros", `${sector} must map to the otros plan group`);
 }
 assert.equal(api.matchPlanGroup("Sector desconocido"), null);
+
+// Caso real: el cliente antepuso una frase al nombre ("Al nombre de...", "Nombre : ...") y el bot
+// lo rechazaba completo, volviendo a pedir un nombre que ya le habían dado.
+assert.equal(api.isPlausibleAccountName(api.extractAccountName("Al nombre de . Pedro Rodríguez luengo")), true);
+assert.equal(api.extractAccountName("Al nombre de . Pedro Rodríguez luengo"), "Pedro Rodríguez luengo");
+assert.equal(api.isPlausibleAccountName(api.extractAccountName("Nombre : Pedro Rodríguez luengo")), true);
+assert.equal(api.extractAccountName("Nombre : Pedro Rodríguez luengo"), "Pedro Rodríguez luengo");
+assert.equal(api.extractAccountName("Mi nombre es Juan Pérez"), "Juan Pérez");
+assert.equal(api.extractAccountName("Juan Pérez"), "Juan Pérez");
 assert.match(worker, /if \(message\.id && message\.from\) await markLatestMessage\(env, message\.from, message\.id\)\.catch\(\(\) => null\);/);
 assert.match(worker, /if \(message\.type === "reaction"\) continue;/);
 assert.match(worker, /async function recentInboundMedia\(env, phone\)/);
