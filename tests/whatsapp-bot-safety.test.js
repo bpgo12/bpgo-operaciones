@@ -125,6 +125,14 @@ assert.match(worker, /async function markLatestMessage\(env, phone, messageId\)/
 assert.match(worker, /async function isStillLatestMessage\(env, phone, messageId, waitMs = BOT_REPLY_DEBOUNCE_MS\)/);
 assert.match(worker, /if \(!\(await isStillLatestMessage\(env, phone, message\.id\)\)\) continue/);
 
+// Caso real (2026-10-01, teléfono 56937638489): "Si" y "Que valores tiene" llegaron en DOS webhooks
+// separados, 10s aparte. Cada uno pasó su propio chequeo de "más nuevo" antes de llamar a la IA
+// (en ese momento, cada uno de verdad lo era), pero el primero en llegar tardó más en responder
+// (latencia del modelo) y para cuando terminó, el segundo ya se había marcado como más nuevo --
+// el bot mandó la misma respuesta de precios dos veces. El chequeo debe repetirse SIN espera
+// adicional justo antes de ejecutar la acción, para descartar la respuesta ya obsoleta.
+assert.match(worker, /const action = await callBotResponder\(env, context, \{ type: message\.type \|\| "unknown", text \}, media\);[\s\S]{0,1200}if \(!\(await isStillLatestMessage\(env, phone, message\.id, 0\)\)\) continue;[\s\S]{0,50}await executeBotAction\(/);
+
 // Sectores ya conectados (misma tarifa que Cayucupil) que no estaban en matchPlanGroup, por lo que
 // un prospecto nuevo de esas zonas siempre requería aclaración manual.
 for (const sector of ["Los Aromos", "La Curva", "Tres Sauces", "Fundo Anique", "Rucañire", "Cayucupil"]) {

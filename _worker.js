@@ -1840,6 +1840,15 @@ async function runBotForInboundMessages(env, changes) {
         if (mediaId) media = await fetchWhatsAppMediaBase64(credentials, mediaId).catch(() => null);
         const context = await buildBotContext(env, phone, name);
         const action = await callBotResponder(env, context, { type: message.type || "unknown", text }, media);
+        // La llamada a la IA puede tardar varios segundos. Si el cliente mandó dos mensajes seguidos
+        // en webhooks SEPARADOS (no en el mismo lote, donde el truco de marcar-todos-primero ya
+        // protege), cada uno pasa su propio chequeo de "más nuevo" ANTES de llamar a la IA porque en
+        // ese momento de verdad lo era -- el problema aparece si el primero en llegar es más lento en
+        // responder (por latencia del modelo) y el segundo ya se envió y marcó mientras tanto: sin
+        // este segundo chequeo, ambos terminaban mandando una respuesta (a veces idéntica, porque para
+        // entonces el contexto de ambos ya incluía el mensaje más nuevo). Se repite el chequeo recién
+        // acá, justo antes de ejecutar la acción, sin espera adicional (ya se esperó lo suficiente).
+        if (!(await isStillLatestMessage(env, phone, message.id, 0))) continue;
         await executeBotAction(env, credentials, phone, action, {
           customerName: name, messageId: message.id, preferAudio, customerText: text,
           mediaId, mediaType,
