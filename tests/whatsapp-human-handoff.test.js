@@ -45,6 +45,11 @@ assert.match(inbox, /Tomar conversación/);
 assert.match(inbox, /Reactivar bot/);
 assert.match(inbox, /data-conversation-mode/);
 
+// Campaña Cyber (2026-10-01): el usuario pidió que "Me interesa" / "Hablar con ejecutivo" avisen
+// a Carlos por WhatsApp igual que un comprobante de pago, no solo que cambien el modo a humano.
+assert.match(worker, /await notifyStaff\(env, credentials, "carlos", "Campaña Cyber BP GO", previous\?\.customer_name, message\.from, summary, \{ sourceMessageId: message\.id \}\);/);
+assert.match(worker, /await notifyStaff[\s\S]*?await setBotSessionMode\(env, message\.from, "human", `cyber_upgrade_\$\{response\}`\);/);
+
 // Prueba funcional aislada de shouldAutoReactivate con un D1 falso, para verificar la lógica real
 // (no solo el texto), incluyendo el caso que 84dd2f no cubría: nunca reactivar un caso de negocio.
 const context = { Date, Number, Set };
