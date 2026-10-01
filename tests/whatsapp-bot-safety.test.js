@@ -193,7 +193,7 @@ assert.match(worker, /const action = await callBotResponder\(env, context, \{ ty
 
 // Sectores ya conectados (misma tarifa que Cayucupil) que no estaban en matchPlanGroup, por lo que
 // un prospecto nuevo de esas zonas siempre requería aclaración manual.
-for (const sector of ["Los Aromos", "La Curva", "Tres Sauces", "Fundo Anique", "Rucañire", "Cayucupil"]) {
+for (const sector of ["Los Aromos", "La Curva", "Tres Sauces", "Fundo Anique", "Rucañire", "Cayucupil", "Cañete"]) {
   assert.equal(api.matchPlanGroup(sector), "cayucupil", `${sector} must map to the cayucupil plan group`);
 }
 for (const sector of ["Lanalhue", "Peleco", "Trangilboro", "Llenquehue"]) {

@@ -935,7 +935,7 @@ function matchPlanGroup(sectorText) {
   // Normaliza acentos (Rucañire -> rucanire) para no repetir el bug ya visto con "señal": una ñ
   // sin tilde escrita por el cliente no debe impedir el match.
   const norm = String(sectorText || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
-  if (["cayucupil", "los aromos", "la curva", "tres sauces", "fundo anique", "rucanire"].some((s) => norm.includes(s))) return "cayucupil";
+  if (["cayucupil", "los aromos", "la curva", "tres sauces", "fundo anique", "rucanire", "canete"].some((s) => norm.includes(s))) return "cayucupil";
   if (["peleco", "lanalhue", "trangilboro", "llenquehue"].some((s) => norm.includes(s))) return "otros";
   return null;
 }
@@ -2563,6 +2563,52 @@ async function handleCyberReply(env, credentials, message) {
   return true;
 }
 
+// Un cliente con factibilidad YA confirmada (esperando elegir plan, o esperando mandar sus datos
+// de instalación) es el lead más valioso del embudo de venta -- si Carlos no nota que quedó sin
+// responder, se puede "escapar" sin que nadie se entere. Corre cada 10 minutos (ver
+// sales-lead-followup.yml) y manda UN recordatorio al cliente + un aviso a Carlos, una sola vez
+// por lead (nunca repetido, para no ser invasivo) cuando pasan 20 minutos sin ningún mensaje
+// entrante de ese teléfono. Se compara contra el último mensaje ENTRANTE real (no contra
+// updated_at del lead), porque un mensaje que no logra completar el campo pedido no actualiza
+// updated_at pero sí demuestra que el cliente sigue ahí.
+const SALES_LEAD_FOLLOWUP_AFTER_MS = 20 * 60 * 1000;
+const SALES_LEAD_FOLLOWUP_STATUSES = ["awaiting_plan", "awaiting_installation_data"];
+
+async function ensureSalesLeadFollowupColumn(env) {
+  await env.DB.prepare("ALTER TABLE whatsapp_sales_leads ADD COLUMN followup_sent_at TEXT").run().catch(() => null);
+}
+
+async function followUpStaleSalesLeads(env) {
+  await ensureWhatsAppBotTables(env);
+  await ensureSalesLeadFollowupColumn(env);
+  const credentials = await getWhatsAppCredentials(env);
+  if (!credentials.phoneNumberId || !credentials.accessToken) return { ok: false, error: "WhatsApp no está configurado." };
+  const placeholders = SALES_LEAD_FOLLOWUP_STATUSES.map(() => "?").join(",");
+  const leads = await env.DB.prepare(`SELECT * FROM whatsapp_sales_leads
+    WHERE status IN (${placeholders}) AND followup_sent_at IS NULL ORDER BY updated_at ASC LIMIT 50`)
+    .bind(...SALES_LEAD_FOLLOWUP_STATUSES).all();
+  const results = [];
+  for (const lead of (leads.results || [])) {
+    if (await getBotSessionMode(env, lead.phone) === "human") continue;
+    const lastInbound = await env.DB.prepare(`SELECT created_at FROM whatsapp_inbox_messages
+      WHERE phone=? AND direction='inbound' ORDER BY created_at DESC LIMIT 1`).bind(lead.phone).first();
+    const lastActivity = lastInbound?.created_at ? Date.parse(lastInbound.created_at) : Date.parse(lead.updated_at);
+    if (Date.now() - lastActivity < SALES_LEAD_FOLLOWUP_AFTER_MS) continue;
+    // Claim antes de mandar nada: si dos ejecuciones se solaparan, solo una debe notificar.
+    const claim = await env.DB.prepare("UPDATE whatsapp_sales_leads SET followup_sent_at=datetime('now') WHERE id=? AND followup_sent_at IS NULL").bind(lead.id).run();
+    if (!claim.meta?.changes) continue;
+    const message = lead.status === "awaiting_plan"
+      ? "¡Hola! 😊 Vimos que no alcanzaste a responder -- ¿tienes alguna duda sobre los planes que te enviamos? Avísanos y seguimos cuando quieras. 🙌"
+      : "¡Hola! 😊 Nos falta que nos envíes tus datos para coordinar la instalación. ¿Seguimos? Cualquier duda, avísanos. 🙌";
+    await sendWhatsAppText(env, credentials, lead.phone, message).catch(() => null);
+    await notifyStaff(env, credentials, "carlos", "Seguimiento de venta", lead.installation_name || lead.customer_name, lead.phone,
+      `Cliente con factibilidad confirmada sin respuesta hace más de 20 minutos (estado: ${lead.status}). Sector: ${lead.sector || "no indicado"}.`,
+      { sourceMessageId: `followup-${lead.id}` });
+    results.push(lead.id);
+  }
+  return { ok: true, followedUp: results.length };
+}
+
 // El 2026-10-01 Meta aceptó el envío (message_id) pero el delivery real falló para TODOS los
 // mensajes de este lote con "Business eligibility payment issue" (cuenta con pago pendiente) --
 // cyberSnapshot excluye como "ya intentado" cualquier teléfono con una fila en
@@ -2729,7 +2775,10 @@ async function readSession(request, secret) {
   return payload.exp > Date.now() ? payload : null;
 }
 
-async function verifyBillingAutomationOidc(request) {
+// Generalizado desde la verificación original (solo cobranza) para que el nuevo seguimiento de
+// leads de venta pueda reusar exactamente la misma validación OIDC (firma RS256 contra el JWKS de
+// GitHub + claims de repo/rama/workflow) en vez de duplicar todo este bloque por cada automatización.
+async function verifyGithubActionsOidc(request, { audience, workflowPath }) {
   const token = String(request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
   const parts = token.split(".");
   if (parts.length !== 3) return null;
@@ -2748,15 +2797,23 @@ async function verifyBillingAutomationOidc(request) {
   if (!key) return null;
   const validSignature = await crypto.subtle.verify({ name: "RSASSA-PKCS1-v1_5" }, key, fromBase64Url(parts[2]), encoder.encode(`${parts[0]}.${parts[1]}`)).catch(() => false);
   const now = Math.floor(Date.now() / 1000);
-  const audience = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+  const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
   const validClaims = claims.iss === "https://token.actions.githubusercontent.com"
-    && audience.includes("bpgo-billing-automation")
+    && aud.includes(audience)
     && claims.repository === "bpgo12/bpgo-operaciones"
     && claims.ref === "refs/heads/main"
     && ["schedule", "workflow_dispatch", "workflow_run"].includes(claims.event_name)
-    && claims.workflow_ref === "bpgo12/bpgo-operaciones/.github/workflows/billing-automation.yml@refs/heads/main"
+    && claims.workflow_ref === `bpgo12/bpgo-operaciones/.github/workflows/${workflowPath}@refs/heads/main`
     && Number(claims.exp) > now && Number(claims.iat) <= now + 60 && (!claims.nbf || Number(claims.nbf) <= now + 60);
   return validSignature && validClaims ? claims : null;
+}
+
+async function verifyBillingAutomationOidc(request) {
+  return verifyGithubActionsOidc(request, { audience: "bpgo-billing-automation", workflowPath: "billing-automation.yml" });
+}
+
+async function verifySalesFollowUpOidc(request) {
+  return verifyGithubActionsOidc(request, { audience: "bpgo-sales-followup", workflowPath: "sales-lead-followup.yml" });
 }
 
 export default {
@@ -3071,6 +3128,13 @@ export default {
       if (!oidc) return Response.json({ ok: false, error: "Ejecución automática no autorizada." }, { status: 401 });
       const result = await runBillingAutomation(env);
       return Response.json(result, { status: result.ok || result.skipped || result.blocked ? 200 : 502 });
+    }
+
+    if (url.pathname === "/api/whatsapp/sales-leads/follow-up" && request.method === "POST") {
+      const oidc = await verifySalesFollowUpOidc(request);
+      if (!oidc) return Response.json({ ok: false, error: "Ejecución automática no autorizada." }, { status: 401 });
+      const result = await followUpStaleSalesLeads(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
+      return Response.json(result, { status: result.ok ? 200 : 502 });
     }
 
     if (url.pathname === "/api/billing/automation" && request.method === "GET") {
