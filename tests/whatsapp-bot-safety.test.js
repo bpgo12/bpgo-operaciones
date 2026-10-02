@@ -210,6 +210,14 @@ assert.equal(api.isPlausibleAccountName(api.extractAccountName("Nombre : Pablo L
 assert.equal(api.extractAccountName("Nombre : Pablo Luengo Rios"), "Pablo Luengo Rios");
 assert.equal(api.extractAccountName("Mi nombre es Juan Pérez"), "Juan Pérez");
 assert.equal(api.extractAccountName("Juan Pérez"), "Juan Pérez");
+
+// Caso real (2026-10-02, 56912000026): un saludo ("Buenos dias") contestó la pregunta "¿a nombre de
+// quién está contratado?" de una visita pendiente y quedó registrada la solicitud a nombre de "Buenos dias".
+for (const greeting of ["Buenos dias", "Buenas tardes", "Hola buenas", "Buenos días", "Consulta tenía hora"]) {
+  assert.equal(api.isPlausibleAccountName(api.extractAccountName(greeting)), false, `${greeting} no es un nombre`);
+}
+assert.equal(api.isPlausibleAccountName("Pablo Luengo Rios"), true);
+assert.equal(api.isPlausibleAccountName("Buenaventura Soto"), true);
 assert.match(worker, /if \(message\.id && message\.from\) await markLatestMessage\(env, message\.from, message\.id\)\.catch\(\(\) => null\);/);
 assert.match(worker, /if \(message\.type === "reaction"\) continue;/);
 assert.match(worker, /async function recentInboundMedia\(env, phone\)/);
