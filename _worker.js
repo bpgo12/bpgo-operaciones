@@ -947,6 +947,26 @@ function formatPlansMessage(groupKey) {
   return `¡Buenas noticias! Sí tenemos factibilidad en tu sector. 🎉\n\nEstos son los planes disponibles:\n${lines}\n\nCosto de instalación (pago único): $${INSTALLATION_COST.toLocaleString("es-CL")}\n\n¿Cuál plan te gustaría contratar?`;
 }
 
+// Caso real (2026-10-01): un mensaje que no calza con ningún plan reenviaba el mismo texto de
+// "¡Buenas noticias! Sí tenemos factibilidad..." de nuevo -- si el cliente ya lo había recibido
+// segundos antes, se veía (con razón) como que el bot mandó el mismo mensaje dos veces. Este
+// recordatorio es más corto y no repite el anuncio de factibilidad, que ya se dijo una vez.
+function formatPlanReminderMessage(groupKey) {
+  const group = PLAN_GROUPS[groupKey];
+  if (!group) return null;
+  const lines = group.plans.map((p) => `• ${p.speed} — $${p.price.toLocaleString("es-CL")}/mes`).join("\n");
+  return `Para continuar, respóndeme con el plan que prefieras:\n${lines}\n\n¿Cuál plan te gustaría contratar?`;
+}
+
+// Mismo caso real: la clienta en realidad estaba preguntando algo ("¿debo cancelar en el momento
+// que instalen?"), no intentando nombrar un plan -- había que escalarla a un agente, no insistir
+// con el mismo mensaje de planes como si no hubiera dicho nada.
+function looksLikeQuestion(text) {
+  if (/\?/.test(String(text || ""))) return true;
+  const normalized = cyberNormalize(text);
+  return /^(debo|puedo|necesito saber|que pasa|como|cuando|donde|por que|porque|cuanto|hay que|tengo que)\b/.test(normalized);
+}
+
 function matchChosenPlan(groupKey, text) {
   const group = PLAN_GROUPS[groupKey];
   if (!group) return null;
@@ -1723,8 +1743,13 @@ async function runBotForInboundMessages(env, changes) {
                 .bind(`${plan.speed} ($${plan.price})`, salesLead.id).run();
               await sendBotReply(env, credentials, phone, planConfirmationMessage(plan), preferAudio);
               await sendBotReply(env, credentials, phone, INSTALLATION_DATA_REQUEST_MESSAGE, preferAudio);
+            } else if (looksLikeQuestion(text)) {
+              await sendBotReply(env, credentials, phone, "Voy a dejar esta consulta para que te la responda un agente en breve. 🙏", preferAudio);
+              await notifyStaff(env, credentials, "carlos", "Consulta de venta", salesLead.customer_name, phone,
+                `Cliente con factibilidad confirmada, antes de elegir plan preguntó: "${text}"`, { sourceMessageId: message.id });
+              await setBotSessionMode(env, phone, "human", "case_created_new_customer");
             } else {
-              await sendBotReply(env, credentials, phone, formatPlansMessage(salesLead.plan_group), preferAudio);
+              await sendBotReply(env, credentials, phone, formatPlanReminderMessage(salesLead.plan_group), preferAudio);
             }
             continue;
           }
