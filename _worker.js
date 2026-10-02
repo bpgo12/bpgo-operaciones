@@ -348,6 +348,39 @@ async function findCustomerForWhatsApp(env, phone, fallbackName) {
   return { matchedByPhone: false, id: null, name: fallbackName || null, address: null, balance: null, dueDate: null, paymentStatus: null, billingAuthoritative: false, billingAmbiguous: false };
 }
 
+const LOCATION_REMINDER_MESSAGE = "Necesitamos que nos compartas tu ubicación desde WhatsApp: toca el ícono 📎 (adjuntar) y elige \"Ubicación\". Así podemos revisar la factibilidad exacta.";
+const SCHEDULED_INSTALL_STATUSES =["Programada", "Instalacion Programada", "Confirmada"];
+
+// Caso real (2026-10-02, 56990934462): una clienta con la instalación ya programada para ese mismo
+// día preguntó "para cuándo nos van a visitar" y el bot la trató como prospecto nuevo (le preguntó
+// el sector, le pidió ubicación una y otra vez). Si el teléfono ya es de un cliente registrado con
+// una orden de instalación agendada, hay que contestarle desde ahí, no abrirle un embudo de venta.
+async function findScheduledInstallation(env, phone) {
+  const row = await env.DB.prepare("SELECT data FROM app_state WHERE id = 'main'").first().catch(() => null);
+  const state = row?.data ? JSON.parse(row.data) : null;
+  const wanted = normalizeComparablePhone(phone);
+  if (!state || !wanted) return null;
+  const ids = new Set();
+  for (const customer of Array.isArray(state.customers) ? state.customers : []) {
+    if (normalizeComparablePhone(customer.phone || "") === wanted && customer.id) ids.add(String(customer.id));
+  }
+  for (const customer of Array.isArray(state.billingCustomers) ? state.billingCustomers : []) {
+    if (normalizeComparablePhone(customer.phone || "") === wanted && customer.customerId) ids.add(String(customer.customerId));
+  }
+  const p = chileDateParts();
+  const today = `${p.year}-${String(p.month).padStart(2, "0")}-${String(p.day).padStart(2, "0")}`;
+  const orders = (Array.isArray(state.workOrders) ? state.workOrders : [])
+    .filter((w) => w?.type === "Instalacion" && ids.has(String(w.customerId)) && SCHEDULED_INSTALL_STATUSES.includes(w.status) && w.plannedDate >= today)
+    .sort((a, b) => String(a.plannedDate).localeCompare(String(b.plannedDate)));
+  return orders.length ? { plannedDate: orders[0].plannedDate, today, knownCustomer: true } : { knownCustomer: ids.size > 0 };
+}
+
+function describeInstallDate(plannedDate, today) {
+  if (plannedDate === today) return "hoy";
+  const label = new Intl.DateTimeFormat("es-CL", { weekday: "long", day: "numeric", month: "long", timeZone: "UTC" }).format(new Date(`${plannedDate}T12:00:00Z`)).replace(",", "");
+  return `el ${label}`;
+}
+
 async function ensureWhatsAppBotTables(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_bot_sessions (
     phone TEXT PRIMARY KEY,
@@ -1511,6 +1544,19 @@ async function executeBotAction(env, credentials, phone, action, message) {
     // desde acá en adelante -- nunca se vuelve a llamar al modelo mientras haya una solicitud
     // en curso (ver el chequeo de whatsapp_sales_leads en runBotForInboundMessages).
     await ensureWhatsAppBotTables(env);
+    const install = await findScheduledInstallation(env, phone).catch(() => null);
+    if (install?.plannedDate) {
+      await sendBotReply(env, credentials, phone,
+        `¡Hola! 😊 Tu instalación ya está programada para ${describeInstallDate(install.plannedDate, install.today)}. El técnico se pondrá en contacto contigo durante el día. Si necesitas cambiar algo, escríbenos por acá. 🙌`, preferAudio);
+      return;
+    }
+    if (install?.knownCustomer) {
+      await setBotSessionMode(env, phone, "human", "bot_escalated");
+      await sendBotReply(env, credentials, phone, "Ya te comunico con un agente de BPGO, en breve te responde por acá. 🙌", preferAudio);
+      await notifyStaff(env, credentials, "carlos", "Conversación escalada", await getKnownAccountName(env, phone), phone,
+        `Cliente ya registrado consulta por contratación/visita: "${String(message.customerText || "").slice(0, 150)}"`, { sourceMessageId: message.messageId });
+      return;
+    }
     await env.DB.prepare(`INSERT INTO whatsapp_sales_leads (id, phone, customer_name, status, created_at, updated_at)
       VALUES (?, ?, ?, 'awaiting_sector', datetime('now'), datetime('now'))`)
       .bind(crypto.randomUUID(), phone, message.customerName || null).run();
@@ -1735,7 +1781,20 @@ async function runBotForInboundMessages(env, changes) {
               await notifyStaff(env, credentials, "carlos", "Solicitud de factibilidad", name || salesLead.customer_name, phone,
                 `Sector: ${salesLead.sector || "no indicado"}. Ubicación: ${mapsLink}`, { caseId: null, factibilidadLeadId: salesLead.id, sourceMessageId: message.id });
             } else {
-              await sendBotReply(env, credentials, phone, "Necesitamos que nos compartas tu ubicación desde WhatsApp: toca el ícono 📎 (adjuntar) y elige \"Ubicación\". Así podemos revisar la factibilidad exacta.", preferAudio);
+              // Caso real (2026-10-02): una persona mayor que no sabía compartir la ubicación recibió
+              // el mismo recordatorio 5 veces seguidas. Tras un primer recordatorio se escala a un
+              // agente (con lo que escribió para ubicarla) en vez de repetirlo indefinidamente.
+              const reminded = await env.DB.prepare(`SELECT COUNT(*) AS n FROM whatsapp_inbox_messages
+                WHERE phone = ? AND direction = 'outbound' AND message_text = ? AND created_at >= replace(?, ' ', 'T')`)
+                .bind(phone, LOCATION_REMINDER_MESSAGE, salesLead.created_at).first();
+              if ((reminded?.n || 0) >= 1) {
+                await sendBotReply(env, credentials, phone, "No te preocupes, si no puedes enviar la ubicación te ayuda un agente por acá en breve. 🙏", preferAudio);
+                await notifyStaff(env, credentials, "carlos", "Solicitud de factibilidad sin ubicación", name || salesLead.customer_name, phone,
+                  `Sector: ${salesLead.sector || "no indicado"}. No logra compartir la ubicación${String(text || "").trim() ? `; dijo: "${String(text).trim().slice(0, 150)}"` : ""}.`, { sourceMessageId: message.id });
+                await setBotSessionMode(env, phone, "human", "case_created_new_customer");
+              } else {
+                await sendBotReply(env, credentials, phone, LOCATION_REMINDER_MESSAGE, preferAudio);
+              }
             }
             continue;
           }

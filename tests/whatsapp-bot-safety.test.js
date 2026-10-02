@@ -211,6 +211,42 @@ assert.equal(api.extractAccountName("Nombre : Pedro Rodríguez luengo"), "Pedro 
 assert.equal(api.extractAccountName("Mi nombre es Juan Pérez"), "Juan Pérez");
 assert.equal(api.extractAccountName("Juan Pérez"), "Juan Pérez");
 
+// Caso real (2026-10-02, 56990934462): clienta con instalación ya programada para ese día preguntó
+// "para cuándo nos van a visitar" y el bot la trató como prospecto nuevo, pidiéndole ubicación 5 veces.
+assert.match(worker, /const install = await findScheduledInstallation\(env, phone\)\.catch\(\(\) => null\);\s*\n\s*if \(install\?\.plannedDate\)/);
+assert.match(worker, /if \(\(reminded\?\.n \|\| 0\) >= 1\) \{[\s\S]{0,900}setBotSessionMode\(env, phone, "human", "case_created_new_customer"\)/);
+{
+  const ctx = { Intl, Date, Set, Array, String, Number };
+  vm.createContext(ctx);
+  vm.runInContext(`
+    const SPANISH_MONTH_NAMES = [];
+    const SCHEDULED_INSTALL_STATUSES = ["Programada", "Instalacion Programada", "Confirmada"];
+    ${functionSource("normalizeWhatsAppPhone")}
+    ${functionSource("normalizeComparablePhone")}
+    ${functionSource("chileDateParts")}
+    async ${functionSource("findScheduledInstallation")}
+    ${functionSource("describeInstallDate")}
+    this.api = { findScheduledInstallation, describeInstallDate };
+  `, ctx);
+  const state = {
+    customers: [{ id: "c1", phone: "990934462 " }],
+    billingCustomers: [],
+    workOrders: [
+      { type: "Instalacion", customerId: "c1", status: "Programada", plannedDate: "2999-01-01" },
+      { type: "Instalacion", customerId: "c1", status: "Finalizado", plannedDate: "2999-01-02" },
+    ],
+  };
+  const env = { DB: { prepare: () => ({ first: async () => ({ data: JSON.stringify(state) }) }) } };
+  Promise.all([ctx.api.findScheduledInstallation(env, "56990934462"), ctx.api.findScheduledInstallation(env, "56911112222")])
+    .then(([found, unknown]) => {
+      assert.equal(found.plannedDate, "2999-01-01");
+      assert.equal(unknown.knownCustomer, false);
+    })
+    .catch((error) => { console.error(error); process.exit(1); });
+  assert.equal(ctx.api.describeInstallDate("2026-10-02", "2026-10-02"), "hoy");
+  assert.match(ctx.api.describeInstallDate("2026-10-03", "2026-10-02"), /sábado 3 de octubre/);
+}
+
 // Caso real (2026-10-02, 56985843355): un saludo ("Buenos dias") contestó la pregunta "¿a nombre de
 // quién está contratado?" de una visita pendiente y quedó registrada la solicitud a nombre de "Buenos dias".
 for (const greeting of ["Buenos dias", "Buenas tardes", "Hola buenas", "Buenos días", "Consulta tenía hora"]) {
