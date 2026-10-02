@@ -967,6 +967,19 @@ const PLAN_GROUPS = {
 };
 const INSTALLATION_COST = 25000;
 
+// Caso real (2026-10-02, +56 9 3763 8489): una clienta preguntó si la instalación "se paga en la
+// boleta" y la IA, sin ninguna regla al respecto, le inventó que sí. La política real es que el costo
+// de instalación + el mes proporcional se pagan EL DÍA de la instalación, nunca en la boleta.
+const INSTALLATION_PAYMENT_POLICY = `📌 Al momento de la instalación se debe pagar el costo de instalación 🔧 ($${INSTALLATION_COST.toLocaleString("es-CL")}), más el valor del servicio del mes por adelantado 📆, el cual se calcula de forma proporcional según los días que resten del mes ⏳.\n\nQuedamos atentos a cualquier consulta.\nBP GO 💻⚡`;
+
+function isInstallationPaymentQuestion(text) {
+  const normalized = cyberNormalize(text);
+  if (!/\binstala(cion|ciones|r|rme|rse|rlo)?\b/.test(normalized)) return false;
+  // Un comprobante o un pago ya hecho es otro flujo (cobranza), no una duda sobre cómo se cobra.
+  if (/\b(pague|pagado|pagamos|transferi|transferencia|comprobante|deposite)\b/.test(normalized)) return false;
+  return /\b(cuanto (cuesta|sale|vale|es|cobran|pago|pagar|hay que pagar)|costo|cuesta|valor|precio|cobran|cobro|pago|pagar|pagan|paga|boleta)\b/.test(normalized);
+}
+
 function matchPlanGroup(sectorText) {
   // Normaliza acentos (Rucañire -> rucanire) para no repetir el bug ya visto con "señal": una ñ
   // sin tilde escrita por el cliente no debe impedir el match.
@@ -1024,7 +1037,7 @@ function matchChosenPlan(groupKey, text) {
 }
 
 function planConfirmationMessage(plan) {
-  return `¡Excelente decisión! Con el plan ${plan.speed} ($${plan.price.toLocaleString("es-CL")}/mes) puedes realizar todo lo necesario para navegar. 🎉\n\n📌 Al momento de la instalación se debe pagar el costo de instalación 🔧 ($${INSTALLATION_COST.toLocaleString("es-CL")}), más el valor del servicio del mes por adelantado 📆, el cual se calcula de forma proporcional según los días que resten del mes ⏳.\n\nQuedamos atentos a cualquier consulta.\nBP GO 💻⚡`;
+  return `¡Excelente decisión! Con el plan ${plan.speed} ($${plan.price.toLocaleString("es-CL")}/mes) puedes realizar todo lo necesario para navegar. 🎉\n\n${INSTALLATION_PAYMENT_POLICY}`;
 }
 
 const NO_FACTIBILIDAD_MESSAGE = "Lamentablemente por el momento no contamos con factibilidad técnica en tu sector 😔. Dejamos registrada tu solicitud y, apenas ampliemos cobertura en tu zona, te avisaremos de inmediato. ¡Gracias por tu interés en BPGO! 💙";
@@ -1126,6 +1139,7 @@ Reglas duras, nunca las rompas:
 - Reserva la acción "escalate" solo para: el cliente pide explícitamente hablar con una persona, insulta, hace un reclamo grave, o pregunta algo puntual que no sabes con certeza (fuera de las FAQs y de los datos de cliente dados). Si el mensaje es corto, ambiguo, tiene errores de tipeo, o simplemente no lo entiendes (ej. "hol", una palabra suelta, algo cortado), NUNCA escales por eso solo: usa "reply" y pide amablemente que repita o aclare qué necesita. Escala únicamente si ya pediste aclaración y el cliente sigue sin poder comunicar lo que necesita.
 - Si el cliente escribe porque quiere CONTRATAR internet por primera vez (no es cliente ya identificado, o pide un nuevo punto/dirección), usa la acción "new_customer_request" y no digas nada más tú: el sistema se encarga de preguntar el sector, pedir la ubicación, revisar factibilidad con el equipo y mostrar los planes, todo por su cuenta. Esto incluye cuando el cliente responde a un aviso/campaña de zona nueva habilitada (ej. "sí", "qué valores tiene", "quiero agendar") y cuando pregunta por precios o planes SIN estar identificado como cliente -- en ambos casos usa "new_customer_request", NUNCA cotices un plan o precio de memoria ni con las FAQs: los precios dependen del sector exacto (hay más de un tarifario) y solo el flujo determinístico sabe cuál corresponde una vez que el cliente dice su sector.
 - Cuando el cliente deja claro que quiere instalarse, conectarse, o retomar/resolver una visita de instalación que quedó pendiente (aunque la situación sea confusa: un cupo, una instalación a medias, alguien de la familia que no estaba), no encadenes varias preguntas parafraseando lo mismo ("¿te refieres a...?", "entiendo que... ¿quieres que...?") en mensajes separados -- quédate con la interpretación más razonable de lo que ya dijo y avanza directo con energía de venta hacia el siguiente paso concreto (qué falta para agendar, qué dato necesitas, confirmar la visita), en vez de sonar administrativo o darle vueltas pidiendo que aclare algo que ya quedó claro.
+- Política de pago de la INSTALACIÓN (única versión válida, nunca la contradigas ni la inventes distinta): el costo de instalación ($25.000) más el mes de servicio por adelantado, calculado proporcional a los días que resten del mes, se pagan AL MOMENTO DE LA INSTALACIÓN. NUNCA se cobran en la boleta ni se difieren al primer mes de servicio. Si el cliente pregunta si la instalación o su costo "se paga en la boleta", responde claramente que NO. Si dudas de cualquier otro detalle de cómo se cobra una instalación, usa "escalate" en vez de inventar.
 - Para todo lo demás (preguntas frecuentes, saludos, consultas generales que sí puedes responder con las FAQs dadas), usa la acción "reply".
 
 Debes responder SIEMPRE llamando a la herramienta bpgo_bot_action con una única acción.`;
@@ -1759,6 +1773,15 @@ async function runBotForInboundMessages(env, changes) {
         const salesLead = await env.DB.prepare(
           "SELECT * FROM whatsapp_sales_leads WHERE phone = ? AND status NOT IN ('completed','cancelled','no_factibilidad') ORDER BY created_at DESC LIMIT 1"
         ).bind(phone).first();
+        // Duda sobre cómo se paga la instalación: respuesta fija con la política real, sin pasar por la
+        // IA ni por el embudo (que la leería como dato de instalación). Dentro del embudo, un "¿y eso se
+        // paga en la boleta?" sin mencionar la palabra instalación también es esta misma duda.
+        const salesLeadPaying = salesLead && ["awaiting_plan", "awaiting_installation_data"].includes(salesLead.status)
+          && looksLikeQuestion(text) && /\b(boleta|pago|pagar|paga|pagan|cobran|cobro)\b/.test(cyberNormalize(text));
+        if (String(text || "").trim() && !isOptOutMessage(text) && (isInstallationPaymentQuestion(text) || salesLeadPaying)) {
+          await sendBotReply(env, credentials, phone, `Al momento de la instalación se paga el costo de instalación ($${INSTALLATION_COST.toLocaleString("es-CL")}) más el mes de servicio por adelantado, proporcional a los días que resten del mes. No se cobra en la boleta. 😊\n\nCualquier otra duda, escríbenos.`, preferAudio);
+          continue;
+        }
         if (salesLead) {
           if (isOptOutMessage(text)) {
             await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?").bind(salesLead.id).run();

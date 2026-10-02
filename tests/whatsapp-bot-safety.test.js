@@ -247,6 +247,29 @@ assert.match(worker, /if \(\(reminded\?\.n \|\| 0\) >= 1\) \{[\s\S]{0,900}setBot
   assert.match(ctx.api.describeInstallDate("2026-10-03", "2026-10-02"), /sábado 3 de octubre/);
 }
 
+// Caso real (2026-10-02, +56 9 3763 8489): la clienta preguntó si el costo de instalación "se paga en
+// la boleta" y la IA respondió que sí (inventado). La política real: se paga AL MOMENTO de la
+// instalación junto con el mes proporcional por adelantado; nunca en la boleta.
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`
+    ${functionSource("cyberNormalize")}
+    ${functionSource("isInstallationPaymentQuestion")}
+    this.api = { isInstallationPaymentQuestion };
+  `, ctx);
+  for (const yes of ["¿La instalación se paga en la boleta?", "cuanto cuesta la instalacion", "Cuánto es el costo de instalar", "como pago la instalación"]) {
+    assert.equal(ctx.api.isInstallationPaymentQuestion(yes), true, yes);
+  }
+  for (const no of ["¿Cuánto demora la instalación?", "Pagué la instalación, te envío el comprobante", "Quiero la instalación para hoy", "el de 50mb"]) {
+    assert.equal(ctx.api.isInstallationPaymentQuestion(no), false, no);
+  }
+}
+assert.match(worker, /const INSTALLATION_PAYMENT_POLICY = `📌 Al momento de la instalación se debe pagar el costo de instalación/);
+assert.match(worker, /function planConfirmationMessage[\s\S]{0,700}\$\{INSTALLATION_PAYMENT_POLICY\}/);
+assert.match(worker, /Política de pago de la INSTALACIÓN[\s\S]{0,400}NUNCA se cobran en la boleta/);
+assert.match(worker, /isInstallationPaymentQuestion\(text\) \|\| salesLeadPaying\)\) \{\s*\n\s*await sendBotReply\(env, credentials, phone, `Al momento de la instalación se paga[\s\S]{0,300}No se cobra en la boleta/);
+
 // Caso real (2026-10-02, 56985843355): un saludo ("Buenos dias") contestó la pregunta "¿a nombre de
 // quién está contratado?" de una visita pendiente y quedó registrada la solicitud a nombre de "Buenos dias".
 for (const greeting of ["Buenos dias", "Buenas tardes", "Hola buenas", "Buenos días", "Consulta tenía hora"]) {
