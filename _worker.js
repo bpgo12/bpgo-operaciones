@@ -2422,6 +2422,20 @@ const CYBER_UPGRADE = Object.freeze({
   bannerPath: "/assets/cyber-banner-v2.png",
 });
 
+// Plantilla de respaldo SOLO TEXTO (2026-10-02): v2 (con banner) llevaba más de un día "En revisión" y
+// la promo cierra el 5/10. Misma campaña (mismo id => mismos envíos, botones y respuestas), pero con otro
+// nombre de plantilla y otro cuerpo -- Meta rechaza como duplicada una plantilla con el mismo cuerpo
+// y pie que otra existente, así que NO puede ser el mismo texto. Sin encabezado de imagen, por lo que
+// no depende de la revisión del banner. El envío usa la primera variante aprobada (imagen primero).
+const CYBER_TEMPLATE_VARIANTS = Object.freeze({
+  image: Object.freeze({ template: CYBER_UPGRADE.template, text: CYBER_UPGRADE.text, header: true }),
+  text: Object.freeze({
+    template: "cyber_oro_platino_v2_texto",
+    text: "🔥 ¡CYBER BP GO! Sube de Plan Oro a *Plan Platino 300 Mb/s*, 3 veces más veloz 🚀\n\n💥 *12% de descuento*: pagas solo *$21.990/mes* durante 6 meses (valor normal $25.000).\n\n✅ Más velocidad para ver, trabajar y jugar sin cortes.\n⏰ Válido hasta el lunes 5 de octubre.\n\n¿Quieres que te hagamos el cambio? 👇",
+    header: false,
+  }),
+});
+
 function cyberIsOpen(date = new Date()) {
   const p = chileDateParts(date);
   const day = `${p.year}-${String(p.month).padStart(2, "0")}-${String(p.day).padStart(2, "0")}`;
@@ -2535,10 +2549,11 @@ async function cyberSnapshot(env) {
     cortadosCheckFailed: cortados === null };
 }
 
-function cyberTemplateDefinition(headerHandle) {
-  return { name: CYBER_UPGRADE.template, language: CYBER_UPGRADE.language, category: "MARKETING",
-    components: [{ type: "HEADER", format: "IMAGE", example: { header_handle: [headerHandle] } },
-      { type: "BODY", text: CYBER_UPGRADE.text },
+function cyberTemplateDefinition(headerHandle, variant = "image") {
+  const v = CYBER_TEMPLATE_VARIANTS[variant] || CYBER_TEMPLATE_VARIANTS.image;
+  return { name: v.template, language: CYBER_UPGRADE.language, category: "MARKETING",
+    components: [...(v.header ? [{ type: "HEADER", format: "IMAGE", example: { header_handle: [headerHandle] } }] : []),
+      { type: "BODY", text: v.text },
       { type: "BUTTONS", buttons: CYBER_UPGRADE.buttons.map((text) => ({ type: "QUICK_REPLY", text })) }] };
 }
 
@@ -2566,29 +2581,43 @@ async function uploadCyberBannerToMeta(env, origin, credentials) {
   return uploadData.h;
 }
 
-async function cyberTemplate(env, create = false, origin = "") {
+async function cyberTemplateVariant(env, variant, create = false, origin = "") {
+  const v = CYBER_TEMPLATE_VARIANTS[variant];
   const c = await getWhatsAppCredentials(env);
   if (!c.accessToken || !c.wabaId) throw new Error("Falta la conexión con Meta.");
   const endpoint = `https://graph.facebook.com/v25.0/${encodeURIComponent(c.wabaId)}/message_templates`;
   const headers = { authorization: `Bearer ${c.accessToken}`, "content-type": "application/json" };
-  const res = await fetch(`${endpoint}?name=${CYBER_UPGRADE.template}&fields=name,status,language,category,components`, { headers });
+  const res = await fetch(`${endpoint}?name=${v.template}&fields=name,status,language,category,components`, { headers });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error("No se pudo consultar la plantilla en Meta.");
-  const found = (data.data || []).find((x) => x.name === CYBER_UPGRADE.template && x.language === CYBER_UPGRADE.language);
+  const found = (data.data || []).find((x) => x.name === v.template && x.language === CYBER_UPGRADE.language);
   if (found) {
     const body = found.components?.find((x) => x.type === "BODY")?.text;
     const buttons = found.components?.find((x) => x.type === "BUTTONS")?.buttons || [];
     const header = found.components?.find((x) => x.type === "HEADER");
-    const matches = body === CYBER_UPGRADE.text && found.category === "MARKETING"
+    const matches = body === v.text && found.category === "MARKETING"
       && buttons.length === 3 && buttons.every((x, i) => x.type === "QUICK_REPLY" && x.text === CYBER_UPGRADE.buttons[i])
-      && header?.format === "IMAGE";
-    return { status: found.status, matches, ready: found.status === "APPROVED" && matches };
+      && (v.header ? header?.format === "IMAGE" : !header);
+    return { variant, name: v.template, status: found.status, matches, ready: found.status === "APPROVED" && matches };
   }
-  if (!create) return { status: "NOT_FOUND", matches: false, ready: false };
-  const headerHandle = await uploadCyberBannerToMeta(env, origin, c);
-  const result = await fetch(endpoint, { method: "POST", headers, body: JSON.stringify(cyberTemplateDefinition(headerHandle)) });
-  if (!result.ok) throw new Error("Meta no aceptó la creación de la plantilla.");
-  return { status: "PENDING", matches: true, ready: false };
+  if (!create) return { variant, name: v.template, status: "NOT_FOUND", matches: false, ready: false };
+  const headerHandle = v.header ? await uploadCyberBannerToMeta(env, origin, c) : null;
+  const result = await fetch(endpoint, { method: "POST", headers, body: JSON.stringify(cyberTemplateDefinition(headerHandle, variant)) });
+  if (!result.ok) {
+    const detail = await result.json().catch(() => ({}));
+    throw new Error(`Meta no aceptó la creación de la plantilla${detail?.error?.error_user_msg ? `: ${detail.error.error_user_msg}` : "."}`);
+  }
+  return { variant, name: v.template, status: "PENDING", matches: true, ready: false };
+}
+
+// Estado combinado: `ready` si CUALQUIERA de las dos variantes está aprobada; `variant` es la que se
+// usará para enviar (la de imagen tiene prioridad si ambas están listas).
+async function cyberTemplate(env, create = false, origin = "", variant = "image") {
+  if (create) return cyberTemplateVariant(env, variant === "text" ? "text" : "image", true, origin);
+  const image = await cyberTemplateVariant(env, "image", false, origin).catch(() => ({ variant: "image", status: "UNAVAILABLE", matches: false, ready: false }));
+  const text = await cyberTemplateVariant(env, "text", false, origin).catch(() => ({ variant: "text", status: "UNAVAILABLE", matches: false, ready: false }));
+  const active = image.ready ? image : text.ready ? text : null;
+  return { ...(active || image), ready: Boolean(active), activeVariant: active?.variant || null, variants: { image, text } };
 }
 
 async function sendCyberCampaign(env, body, origin = "") {
@@ -2601,7 +2630,9 @@ async function sendCyberCampaign(env, body, origin = "") {
   if (!phones.length || phones.length > 20) throw new Error("Selecciona entre 1 y 20 destinatarios por lote.");
   const eligible = new Map(snapshot.eligible.map((x) => [x.phone, x]));
   if (phones.some((phone) => !eligible.has(phone))) throw new Error("Hay destinatarios que ya no son elegibles.");
-  if (!(await cyberTemplate(env, false, origin)).ready) throw new Error("La plantilla debe estar aprobada y coincidir con la oferta.");
+  const approved = await cyberTemplate(env, false, origin);
+  if (!approved.ready) throw new Error("La plantilla debe estar aprobada y coincidir con la oferta.");
+  const sendVariant = CYBER_TEMPLATE_VARIANTS[approved.activeVariant];
   const credentials = await getWhatsAppCredentials(env);
   if (!credentials.phoneNumberId || !credentials.accessToken) throw new Error("WhatsApp no está configurado.");
   const results = [];
@@ -2617,9 +2648,9 @@ async function sendCyberCampaign(env, body, origin = "") {
       const response = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/messages`, {
         method: "POST", headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
         body: JSON.stringify({ messaging_product: "whatsapp", to: phone, type: "template",
-          template: { name: CYBER_UPGRADE.template, language: { code: CYBER_UPGRADE.language },
+          template: { name: sendVariant.template, language: { code: CYBER_UPGRADE.language },
             components: [
-              { type: "header", parameters: [{ type: "image", image: { link: `${origin}${CYBER_UPGRADE.bannerPath}` } }] },
+              ...(sendVariant.header ? [{ type: "header", parameters: [{ type: "image", image: { link: `${origin}${CYBER_UPGRADE.bannerPath}` } }] }] : []),
               ...["interest", "human", "decline"].map((action, i) => ({ type: "button", sub_type: "quick_reply", index: String(i),
                 parameters: [{ type: "payload", payload: `${CYBER_UPGRADE.id}:${action}` }] })),
             ] } }),
@@ -2632,7 +2663,7 @@ async function sendCyberCampaign(env, body, origin = "") {
       await saveWhatsAppStatus(env, { messageId, recipient: phone, status: "accepted" });
       await env.DB.prepare(`INSERT OR IGNORE INTO whatsapp_inbox_messages
         (message_id,phone,direction,message_type,message_text,created_at) VALUES (?,?,'outbound','template',?,?)`)
-        .bind(messageId, phone, CYBER_UPGRADE.text, new Date().toISOString()).run();
+        .bind(messageId, phone, sendVariant.text, new Date().toISOString()).run();
       await env.DB.prepare("INSERT OR IGNORE INTO whatsapp_upgrade_requests (campaign,phone,customer_name) VALUES (?,?,?)")
         .bind(CYBER_UPGRADE.id, phone, eligible.get(phone).name).run();
       results.push({ phone, status: "accepted" });
@@ -2757,7 +2788,7 @@ async function handleCyberApi(request, env, session) {
       return Response.json({ ...snapshot, template }, { headers: { "cache-control": "no-store" } });
     }
     const body = await request.json();
-    if (request.method === "POST" && body.action === "template") return Response.json(await cyberTemplate(env, true, origin));
+    if (request.method === "POST" && body.action === "template") return Response.json(await cyberTemplate(env, true, origin, body.variant === "text" ? "text" : "image"));
     if (request.method === "POST" && body.action === "send") return Response.json(await sendCyberCampaign(env, body, origin));
     if (request.method === "POST" && body.action === "retryFailed") return Response.json(await retryCyberFailed(env));
     if (request.method === "PATCH" && body.action === "converted") {

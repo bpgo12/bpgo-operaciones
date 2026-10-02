@@ -18,13 +18,16 @@
   }
   function render(panel, data) {
     panel._data = data;
+    const variants = (data.template && data.template.variants) || { image: data.template || {}, text: { status: 'NOT_FOUND' } };
     panel.innerHTML = '<header><div><p class="eyebrow">CAMPAÑAS · WHATSAPP</p><h2>Cyber BP GO</h2><p>Plan Oro 100 Mb/s → Plan Platino 300 Mb/s</p></div><button class="btn" data-cyber="refresh">Actualizar</button></header>' +
       (data.campaign.bannerPath ? '<img class="cyber-banner" src="' + esc(data.campaign.bannerPath) + '" alt="Banner Cyber BP GO">' : '') +
       '<blockquote>' + esc(data.campaign.text).replace(/\n/g, '<br>') + '</blockquote>' +
       '<p><strong>' + (data.open ? 'Vigente' : 'Fuera de vigencia') + '</strong> · 30 de septiembre al 5 de octubre de 2026 · Hora de Chile</p>' +
-      '<p>Plantilla Meta: <strong>' + esc(data.template.status) + '</strong>' + (data.template.matches === false ? ' · El texto aprobado debe coincidir con esta oferta.' : '') + '</p>' +
+      '<p>Plantilla con banner: <strong>' + esc(variants.image.status) + '</strong>' + (variants.image.status !== 'NOT_FOUND' && variants.image.matches === false ? ' · El texto aprobado debe coincidir con esta oferta.' : '') +
+      '<br>Plantilla de respaldo (solo texto): <strong>' + esc(variants.text.status) + '</strong>' + (variants.text.status !== 'NOT_FOUND' && variants.text.matches === false ? ' · El texto aprobado debe coincidir con esta oferta.' : '') +
+      '<br>Se enviará con: <strong>' + (data.template.activeVariant === 'image' ? 'plantilla con banner' : data.template.activeVariant === 'text' ? 'plantilla de respaldo (solo texto)' : 'ninguna aprobada todavía') + '</strong></p>' +
       (data.cortadosCheckFailed ? '<p class="cyber-warning">⚠️ No se pudo verificar la planilla de clientes cortados. No se puede enviar hasta actualizar y confirmar que esto se resuelva.</p>' : '') +
-      '<div class="cyber-actions"><button class="btn secondary" data-cyber="template">Solicitar aprobación de plantilla</button><span>' + data.eligible.length + ' clientes disponibles · ' + data.humanExcluded + ' en atención humana excluidos' + (data.excluded.length ? ' · ' + exclusionSummary(data.excluded) + ' excluidos' : '') + '</span></div>' +
+      '<div class="cyber-actions"><button class="btn secondary" data-cyber="template">Solicitar aprobación de plantilla</button><button class="btn secondary" data-cyber="templateText">Solicitar plantilla de respaldo (solo texto)</button><span>' + data.eligible.length + ' clientes disponibles · ' + data.humanExcluded + ' en atención humana excluidos' + (data.excluded.length ? ' · ' + exclusionSummary(data.excluded) + ' excluidos' : '') + '</span></div>' +
       '<p>Revisa y selecciona hasta 20 clientes por lote. Los intentos ya registrados no se repetirán.</p>' +
       '<div class="cyber-batch-actions"><button class="btn secondary" data-cyber="select20">Seleccionar próximos 20</button><button class="btn secondary" data-cyber="clearselection">Limpiar selección</button><span class="cyber-selected-count">0 seleccionados</span></div>' +
       '<div class="cyber-table"><table><thead><tr><th>Enviar</th><th>Cliente</th><th>Teléfono</th><th>Plan actual</th></tr></thead><tbody>' +
@@ -74,6 +77,7 @@
       button.disabled = true;
       try {
         if (action === "template") await api("POST", { action: "template" });
+        if (action === "templateText") await api("POST", { action: "template", variant: "text" });
         if (action === "send") {
           const phones = Array.from(panel.querySelectorAll('input:checked')).map((x) => x.value);
           if (!phones.length || phones.length > 20) throw new Error("Selecciona entre 1 y 20 clientes.");
