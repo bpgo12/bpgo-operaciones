@@ -269,6 +269,9 @@ function isPlausibleAccountName(value) {
   if (name.length < 5 || name.length > 120 || /\d|https?:|@/.test(name)) return false;
   const normalized = name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   if (/^(gracias|listo|si|no|ya|correcto|ese es|esta pagado|ahi esta pagado|ya pague|pagado)(\b|[.!])/i.test(normalized)) return false;
+  // Saludos y frases de conversación no son nombres: "Buenos dias" (2 palabras, solo letras) pasaba
+  // todos los filtros y se registró una visita "a nombre de Buenos dias".
+  if (/^(hola|buenos|buenas|buen|saludos|hey|ok|okay|consulta|quiero|necesito|tengo|perfecto|dale|claro|vale|disculpa|disculpe|oiga|alo)\b/i.test(normalized)) return false;
   const words = name.split(" ").filter(Boolean);
   return words.length >= 2 && words.length <= 6 && words.every((word) => /^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ'-]{2,}$/.test(word));
 }
