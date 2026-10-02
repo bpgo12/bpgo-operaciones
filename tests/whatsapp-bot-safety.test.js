@@ -51,11 +51,12 @@ vm.runInContext(`
   ${functionSource("extractAccountName")}
   ${functionSource("normalizeWhatsAppPhone")}
   ${functionSource("cyberNormalize")}
+  ${functionSource("looksLikeQuestion")}
   const CYBER_INSTALL_CUTOFF = "2026-08-31";
   const CYBER_SPANISH_MONTHS = { enero: "01", febrero: "02", marzo: "03", abril: "04", mayo: "05", junio: "06", julio: "07", agosto: "08", septiembre: "09", setiembre: "09", octubre: "10", noviembre: "11", diciembre: "12" };
   ${functionSource("cyberParseInstallDate")}
   ${functionSource("cyberCandidates")}
-  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment, mentionsServiceOutage, mentionsTechnicalIssueOrVisit, isOptOutMessage, matchPlanGroup, extractAccountName, normalizeWhatsAppPhone, cyberNormalize, cyberParseInstallDate, cyberCandidates };
+  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment, mentionsServiceOutage, mentionsTechnicalIssueOrVisit, isOptOutMessage, matchPlanGroup, extractAccountName, normalizeWhatsAppPhone, cyberNormalize, cyberParseInstallDate, cyberCandidates, looksLikeQuestion };
 `, context);
 
 const api = context.api;
@@ -213,6 +214,19 @@ assert.match(worker, /if \(message\.id && message\.from\) await markLatestMessag
 assert.match(worker, /if \(message\.type === "reaction"\) continue;/);
 assert.match(worker, /async function recentInboundMedia\(env, phone\)/);
 assert.match(worker, /const carriedOver = await recentInboundMedia\(env, phone\)/);
+
+// Caso real (2026-10-01, teléfono 56994955003): con factibilidad confirmada y los planes ya
+// enviados, la clienta preguntó "Debo cancelar en el momento q instalen los 25" en vez de nombrar
+// un plan. matchChosenPlan no reconoce nada (el "25" suelto no calza con ninguna velocidad: 100,
+// 300 ni 500), así que el bot reenviaba el MISMO mensaje "¡Buenas noticias!..." de factibilidad --
+// para la clienta se veía como que el bot le mandó dos veces seguidas lo mismo. Una pregunta debe
+// escalarse a un agente, no repetirse el anuncio completo como si no hubiera dicho nada.
+assert.equal(api.looksLikeQuestion("Debo cancelar en el momento q instalen los 25"), true);
+assert.equal(api.looksLikeQuestion("¿Cuánto demora la instalación?"), true);
+assert.equal(api.looksLikeQuestion("300mb/s"), false);
+assert.equal(api.looksLikeQuestion("el de 25.000"), false);
+assert.match(worker, /function formatPlanReminderMessage\(groupKey\)/);
+assert.match(worker, /else if \(looksLikeQuestion\(text\)\) \{[\s\S]{0,400}sourceMessageId: message\.id \}\);[\s\S]{0,150}setBotSessionMode\(env, phone, "human", "case_created_new_customer"\);/);
 
 // classifyInstallationFragment: caso real -- el cliente mandó una pregunta en vez de un dato, y
 // debía descartarse en vez de quedar "anotada" como si fuera parte del nombre.
