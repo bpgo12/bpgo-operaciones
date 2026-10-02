@@ -1611,6 +1611,10 @@ async function runBotForInboundMessages(env, changes) {
               .bind("Pago confirmado y aplicado a facturación vía botón de WhatsApp.", caseId).run();
             const who = caseRow.reported_name || caseRow.customer_name || "el cliente";
             await sendWhatsAppText(env, credentials, phone, `✅ Listo, pago registrado para ${who} (${applied.record.reference || applied.record.billingMonth}). Saldo actualizado en facturación.`);
+            // Carlos tocaba "Registrar pago" y el cliente se quedaba sin ninguna confirmación de
+            // que su pago quedó aplicado -- solo el staff se enteraba.
+            await sendWhatsAppText(env, credentials, normalizeWhatsAppPhone(caseRow.phone),
+              "¡Hola! Hemos confirmado tu pago. 🎉 Tu servicio está activo. Si tienes alguna duda, no dudes en escribirnos. 😊").catch(() => null);
           } else {
             const reasonText = applied.reason === "no_pending_record"
               ? "no encontré un cobro pendiente para ese teléfono en facturación"
