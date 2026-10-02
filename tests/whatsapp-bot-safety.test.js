@@ -384,3 +384,30 @@ const replyRoute = worker.slice(worker.indexOf('url.pathname === "/api/whatsapp/
 assert.ok(replyRoute.indexOf('setBotSessionMode(env, phone, "human", "manual_reply", session)') < replyRoute.indexOf("await fetch(endpoint"));
 
 console.log("whatsapp bot safety: ok");
+
+// Plantilla de respaldo solo texto (2026-10-02): la v2 con banner llevaba >1 día en revisión. La de
+// respaldo comparte campaña/botones pero NO puede repetir el cuerpo (Meta rechaza duplicados) ni
+// llevar encabezado de imagen, y debe respetar los límites de Meta (cuerpo 1024, botón 25).
+{
+  const start = worker.indexOf("const CYBER_UPGRADE = Object.freeze");
+  const end = worker.indexOf("function cyberIsOpen");
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`${worker.slice(start, end)}\nthis.api = { CYBER_UPGRADE, CYBER_TEMPLATE_VARIANTS };`, ctx);
+  const { CYBER_UPGRADE, CYBER_TEMPLATE_VARIANTS } = ctx.api;
+  assert.equal(CYBER_TEMPLATE_VARIANTS.image.template, CYBER_UPGRADE.template);
+  assert.equal(CYBER_TEMPLATE_VARIANTS.image.header, true);
+  assert.equal(CYBER_TEMPLATE_VARIANTS.text.header, false);
+  assert.notEqual(CYBER_TEMPLATE_VARIANTS.text.template, CYBER_TEMPLATE_VARIANTS.image.template);
+  assert.notEqual(CYBER_TEMPLATE_VARIANTS.text.text, CYBER_TEMPLATE_VARIANTS.image.text);
+  assert.match(CYBER_TEMPLATE_VARIANTS.text.template, /^[a-z0-9_]+$/);
+  assert.ok(CYBER_TEMPLATE_VARIANTS.text.text.length <= 1024);
+  assert.doesNotMatch(CYBER_TEMPLATE_VARIANTS.text.text, /\{\{/);
+  assert.match(CYBER_TEMPLATE_VARIANTS.text.text, /21\.990/);
+  assert.match(CYBER_TEMPLATE_VARIANTS.text.text, /5 de octubre/);
+  assert.ok(CYBER_UPGRADE.buttons.every((b) => b.length <= 25));
+}
+assert.match(worker, /\.\.\.\(v\.header \? \[\{ type: "HEADER", format: "IMAGE"/);
+assert.match(worker, /\.\.\.\(sendVariant\.header \? \[\{ type: "header"/);
+assert.match(worker, /name: sendVariant\.template/);
+assert.match(worker, /const active = image\.ready \? image : text\.ready \? text : null;/);
