@@ -422,3 +422,8 @@ assert.match(worker, /if \(!cyberIsOpen\(\)\) \{\s*\n\s*results\.push\(\{ phone,
 assert.doesNotMatch(worker, /await getBotSessionMode\(env, phone\) === "human"\) \{\s*\n\s*results\.push/);
 assert.match(worker, /if \(await handleCyberReply\(env, credentials, message\)\) continue;\s*\n\s*const sessionRow = await getBotSessionRow\(env, phone\);/);
 assert.match(worker, /if \(!alreadyHuman\) await setBotSessionMode\(env, message\.from, "human", `cyber_upgrade_\$\{response\}`\);/);
+
+// 2026-10-03: quien presiona "Me interesa"/"Hablar con ejecutivo" recibe un acuse en texto libre (dentro de
+// la ventana de 24 h, sin depender de plantillas). Fuera de plazo no se promete el precio promocional.
+assert.match(worker, /const ack = response === "interested"\s*\n\s*\? "¡Excelente! 🎉 Recibimos tu solicitud[^"]*\$21\.990\/mes durante 6 meses[^"]*"\s*\n\s*: response === "human"[\s\S]{0,400}: "Gracias por escribirnos\. La promoción Cyber ya terminó;/);
+assert.match(worker, /await sendWhatsAppText\(env, credentials, message\.from, ack\)\.catch\(\(\) => null\);/);
