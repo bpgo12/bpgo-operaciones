@@ -2709,7 +2709,16 @@ async function handleCyberReply(env, credentials, message) {
       ? "Cliente presionó 'Hablar con ejecutivo' en la campaña Cyber Oro→Platino."
       : "Cliente respondió a la campaña Cyber Oro→Platino fuera de plazo (después del 5 de octubre). No se le prometió el precio promocional.";
     await notifyStaff(env, credentials, "carlos", "Campaña Cyber BP GO", previous?.customer_name, message.from, summary, { sourceMessageId: message.id });
-    // Handoff first; no acknowledgement after entering human mode.
+    // Acuse al cliente (2026-10-03): antes quien presionaba "Me interesa" no recibía nada y quedaba en
+    // silencio hasta que Carlos lo viera. Es texto libre dentro de la ventana de 24 h (el cliente
+    // acaba de escribir), así que no depende de plantillas ni de la facturación de Meta. Nunca promete
+    // el precio fuera de plazo. La protección contra repetición es el chequeo previous.response arriba.
+    const ack = response === "interested"
+      ? "¡Excelente! 🎉 Recibimos tu solicitud para mejorar al *Plan Platino 300 Mb/s* con 12% de descuento ($21.990/mes durante 6 meses). Un ejecutivo de BP GO te contactará por este mismo medio para coordinar el cambio. 🙌"
+      : response === "human"
+      ? "¡Claro! Ya avisé a un ejecutivo de BP GO para que te responda por este mismo medio en breve. 🙏"
+      : "Gracias por escribirnos. La promoción Cyber ya terminó; un ejecutivo de BP GO revisará tu caso y te contactará por este mismo medio. 🙏";
+    await sendWhatsAppText(env, credentials, message.from, ack).catch(() => null);
     // Si ya estaba con un agente se respeta el motivo original de esa conversación.
     if (!alreadyHuman) await setBotSessionMode(env, message.from, "human", `cyber_upgrade_${response}`);
   }
