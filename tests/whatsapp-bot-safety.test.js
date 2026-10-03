@@ -411,3 +411,14 @@ assert.match(worker, /\.\.\.\(v\.header \? \[\{ type: "HEADER", format: "IMAGE"/
 assert.match(worker, /\.\.\.\(sendVariant\.header \? \[\{ type: "header"/);
 assert.match(worker, /name: sendVariant\.template/);
 assert.match(worker, /const active = image\.ready \? image : text\.ready \? text : null;/);
+
+// 2026-10-02: Carlos decidió que la atención humana NO excluye de la campaña Cyber (la marca "human" es
+// casi siempre residual: 91 comprobantes de pago nunca se desmarcan). Por eso (a) ni el snapshot ni el
+// envío filtran por modo humano, y (b) el botón de un cliente en modo humano se atiende ANTES del filtro
+// que descarta sus mensajes, o su respuesta se perdería sin avisarle a Carlos.
+assert.match(worker, /const eligible = candidates\.selected\.filter\(\(x\) => !attempted\.has\(x\.phone\)\);/);
+assert.match(worker, /humanExcluded: 0, humanIncluded:/);
+assert.match(worker, /if \(!cyberIsOpen\(\)\) \{\s*\n\s*results\.push\(\{ phone, status: "skipped" \}\)/);
+assert.doesNotMatch(worker, /await getBotSessionMode\(env, phone\) === "human"\) \{\s*\n\s*results\.push/);
+assert.match(worker, /if \(await handleCyberReply\(env, credentials, message\)\) continue;\s*\n\s*const sessionRow = await getBotSessionRow\(env, phone\);/);
+assert.match(worker, /if \(!alreadyHuman\) await setBotSessionMode\(env, message\.from, "human", `cyber_upgrade_\$\{response\}`\);/);
