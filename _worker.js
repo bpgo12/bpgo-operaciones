@@ -1738,6 +1738,9 @@ async function runBotForInboundMessages(env, changes) {
             }
           }
         }
+        // Los botones de la campaña Cyber se atienden ANTES del filtro de atención humana: la campaña
+        // también se envía a clientes marcados como "human", y su respuesta no puede perderse.
+        if (await handleCyberReply(env, credentials, message)) continue;
         const sessionRow = await getBotSessionRow(env, phone);
         if (sessionRow?.mode === "human") {
           if (await shouldAutoReactivate(env, phone, sessionRow, message.id)) {
@@ -1749,7 +1752,6 @@ async function runBotForInboundMessages(env, changes) {
             continue;
           }
         }
-        if (await handleCyberReply(env, credentials, message)) continue;
         const preferAudio = message.type === "audio";
         let text = inboundMessageText(message);
         if (preferAudio && message.audio?.id) {
@@ -2538,14 +2540,17 @@ async function cyberSnapshot(env) {
     LEFT JOIN whatsapp_message_status s ON s.message_id=c.message_id
     WHERE c.campaign=? ORDER BY c.created_at DESC`).bind(CYBER_UPGRADE.id).all();
   const attempted = new Set((sends.results || []).map((x) => x.phone));
+  // 2026-10-02: la atención humana YA NO excluye de la campaña (decisión de Carlos). La marca "human"
+  // casi siempre es residual (p. ej. 91 comprobantes de pago que nunca se desmarcan), y excluirla dejaba
+  // fuera ~93 de ~241 clientes. Se sigue informando cuántos están en ese modo, solo como dato.
   const human = await env.DB.prepare("SELECT phone FROM whatsapp_bot_sessions WHERE mode='human'").all();
   const held = new Set((human.results || []).map((x) => x.phone));
-  const eligible = candidates.selected.filter((x) => !attempted.has(x.phone) && !held.has(x.phone));
+  const eligible = candidates.selected.filter((x) => !attempted.has(x.phone));
   const fingerprint = JSON.stringify(eligible.map((x) => [x.id, x.phone, x.plan]).sort());
   const digest = await crypto.subtle.digest("SHA-256", encoder.encode(fingerprint));
   const previewId = Array.from(new Uint8Array(digest), (x) => x.toString(16).padStart(2, "0")).join("");
   return { campaign: CYBER_UPGRADE, open: cyberIsOpen(), eligible, excluded: candidates.excluded,
-    humanExcluded: candidates.selected.filter((x) => held.has(x.phone)).length, sends: sends.results || [], previewId,
+    humanExcluded: 0, humanIncluded: eligible.filter((x) => held.has(x.phone)).length, sends: sends.results || [], previewId,
     cortadosCheckFailed: cortados === null };
 }
 
@@ -2637,7 +2642,7 @@ async function sendCyberCampaign(env, body, origin = "") {
   if (!credentials.phoneNumberId || !credentials.accessToken) throw new Error("WhatsApp no está configurado.");
   const results = [];
   for (const phone of phones) {
-    if (!cyberIsOpen() || await getBotSessionMode(env, phone) === "human") {
+    if (!cyberIsOpen()) {
       results.push({ phone, status: "skipped" }); continue;
     }
     // Claim before network I/O: concurrent batches and ambiguous timeouts must never resend.
@@ -2675,7 +2680,9 @@ async function sendCyberCampaign(env, body, origin = "") {
 async function handleCyberReply(env, credentials, message) {
   const action = cyberButtonAction(message);
   if (!action) return false;
-  if (await getBotSessionMode(env, message.from) === "human") return true;
+  // Los clientes en atención humana también reciben la campaña, así que su botón se procesa igual:
+  // antes se descartaba en silencio y Carlos nunca se enteraba de que el cliente había respondido.
+  const alreadyHuman = await getBotSessionMode(env, message.from) === "human";
   await ensureCyberTables(env);
   const sent = await env.DB.prepare("SELECT message_id FROM whatsapp_campaign_sends WHERE campaign=? AND recipient=?")
     .bind(CYBER_UPGRADE.id, message.from).first();
@@ -2690,7 +2697,7 @@ async function handleCyberReply(env, credentials, message) {
     source_message_id=excluded.source_message_id, updated_at=datetime('now')`)
     .bind(CYBER_UPGRADE.id, message.from, response, message.id).run();
   if (response === "declined") {
-    if (await getBotSessionMode(env, message.from) !== "human")
+    if (!alreadyHuman)
       await sendWhatsAppText(env, credentials, message.from, "Entendido, no seguimos con esta promoción.");
   } else {
     // Igual que con los comprobantes de pago: un aviso de WhatsApp a Carlos (misma plantilla
@@ -2703,7 +2710,8 @@ async function handleCyberReply(env, credentials, message) {
       : "Cliente respondió a la campaña Cyber Oro→Platino fuera de plazo (después del 5 de octubre). No se le prometió el precio promocional.";
     await notifyStaff(env, credentials, "carlos", "Campaña Cyber BP GO", previous?.customer_name, message.from, summary, { sourceMessageId: message.id });
     // Handoff first; no acknowledgement after entering human mode.
-    await setBotSessionMode(env, message.from, "human", `cyber_upgrade_${response}`);
+    // Si ya estaba con un agente se respeta el motivo original de esa conversación.
+    if (!alreadyHuman) await setBotSessionMode(env, message.from, "human", `cyber_upgrade_${response}`);
   }
   return true;
 }
