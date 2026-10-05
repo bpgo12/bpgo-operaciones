@@ -523,3 +523,22 @@ assert.match(worker, /WHERE id = 'main' AND updated_at IS \?/);
 assert.match(worker, /toLocaleString\("es-CL", \{ timeZone: "America\/Santiago" \}\)/);
 // (6) El token de la planilla ya no vive solo en el código: se puede sobrescribir por variable de entorno.
 assert.match(worker, /env\?\.CORTADOS_SYNC_URL \|\| CORTADOS_SYNC_URL_FALLBACK/);
+
+// Caso real (2026-10-05, 56942968352): cliente sin internet respondió solo su nombre ("Rodrigo pavez") a la
+// pregunta de un agente y el bot le dijo su saldo pendiente. Los datos de cobranza solo se ofrecen a la IA si
+// el mensaje actual habla de pagos, y el prompt prohíbe sacar el tema de plata por su cuenta.
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`${functionSource("mentionsBillingTopic")}\nthis.api = { mentionsBillingTopic };`, ctx);
+  for (const yes of ["¿cuánto debo?", "ya pagué", "mando el comprobante", "cuando vence mi boleta", "cual es mi saldo", "voy a cancelar hoy"]) {
+    assert.equal(ctx.api.mentionsBillingTopic(yes), true, yes);
+  }
+  for (const no of ["Rodrigo pavez", "Hola llevo varios dias sin internet", "no tengo señal", "la luz del router está roja", "buenos dias"]) {
+    assert.equal(ctx.api.mentionsBillingTopic(no), false, no);
+  }
+}
+assert.match(worker, /const billingTopic = mentionsBillingTopic\(inboundMessage\?\.text\);/);
+assert.match(worker, /billingTopic && context\.customer\.paymentStatus/);
+assert.match(worker, /billingTopic && context\.customer\.dueDate/);
+assert.match(worker, /NUNCA menciones saldo, deuda, monto pendiente, estado de pago ni vencimiento si en el mensaje ACTUAL/);

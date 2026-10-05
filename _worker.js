@@ -1272,6 +1272,7 @@ Reglas duras, nunca las rompas:
 - Reserva la acción "escalate" solo para: el cliente pide explícitamente hablar con una persona, insulta, hace un reclamo grave, o pregunta algo puntual que no sabes con certeza (fuera de las FAQs y de los datos de cliente dados). Si el mensaje es corto, ambiguo, tiene errores de tipeo, o simplemente no lo entiendes (ej. "hol", una palabra suelta, algo cortado), NUNCA escales por eso solo: usa "reply" y pide amablemente que repita o aclare qué necesita. Escala únicamente si ya pediste aclaración y el cliente sigue sin poder comunicar lo que necesita.
 - Si el cliente escribe porque quiere CONTRATAR internet por primera vez (no es cliente ya identificado, o pide un nuevo punto/dirección), usa la acción "new_customer_request" y no digas nada más tú: el sistema se encarga de preguntar el sector, pedir la ubicación, revisar factibilidad con el equipo y mostrar los planes, todo por su cuenta. Esto incluye cuando el cliente responde a un aviso/campaña de zona nueva habilitada (ej. "sí", "qué valores tiene", "quiero agendar") y cuando pregunta por precios o planes SIN estar identificado como cliente -- en ambos casos usa "new_customer_request", NUNCA cotices un plan o precio de memoria ni con las FAQs: los precios dependen del sector exacto (hay más de un tarifario) y solo el flujo determinístico sabe cuál corresponde una vez que el cliente dice su sector.
 - Cuando el cliente deja claro que quiere instalarse, conectarse, o retomar/resolver una visita de instalación que quedó pendiente (aunque la situación sea confusa: un cupo, una instalación a medias, alguien de la familia que no estaba), no encadenes varias preguntas parafraseando lo mismo ("¿te refieres a...?", "entiendo que... ¿quieres que...?") en mensajes separados -- quédate con la interpretación más razonable de lo que ya dijo y avanza directo con energía de venta hacia el siguiente paso concreto (qué falta para agendar, qué dato necesitas, confirmar la visita), en vez de sonar administrativo o darle vueltas pidiendo que aclare algo que ya quedó claro.
+- NUNCA menciones saldo, deuda, monto pendiente, estado de pago ni vencimiento si en el mensaje ACTUAL el cliente no preguntó por pagos o cobranza. Si el cliente reporta una falla de internet o responde una pregunta de identificación (por ejemplo solo su nombre), continúa con SU problema: confirma lo que dijo y sigue el flujo técnico o de visita; no cambies de tema a su cuenta.
 - Política de pago de la INSTALACIÓN (única versión válida, nunca la contradigas ni la inventes distinta): el costo de instalación ($25.000) más el mes de servicio por adelantado, calculado proporcional a los días que resten del mes, se pagan AL MOMENTO DE LA INSTALACIÓN. NUNCA se cobran en la boleta ni se difieren al primer mes de servicio. Si el cliente pregunta si la instalación o su costo "se paga en la boleta", responde claramente que NO. Si dudas de cualquier otro detalle de cómo se cobra una instalación, usa "escalate" en vez de inventar.
 - Para todo lo demás (preguntas frecuentes, saludos, consultas generales que sí puedes responder con las FAQs dadas), usa la acción "reply".
 
@@ -1284,6 +1285,13 @@ function formatCurrency(value) {
 }
 
 const BILLING_REVIEW_REPLY = "Voy a dejar esta consulta para revisión del equipo antes de confirmarte el monto.";
+
+// Un mensaje "habla de plata" solo si menciona pagos, saldo, deuda, boleta, vencimiento o montos. Se usa para
+// decidir si la IA puede ver (y por tanto mencionar) los datos de cobranza del cliente.
+function mentionsBillingTopic(value) {
+  const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ");
+  return /\b(pag\w*|saldo|deuda|debo|debe|adeud\w*|vence\w*|vencimiento|boleta|factura|cuenta|cobr\w*|monto|mensualidad|cuanto|comprobante|transfer\w*|deposit\w*|cancel\w*)\b/.test(text);
+}
 
 function isBalanceQuestion(value) {
   const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ");
@@ -1398,14 +1406,20 @@ async function callBotResponder(env, context, inboundMessage, media) {
   let customerLine = "No se pudo identificar al cliente en el sistema por su número.";
   if (context.customer?.name) {
     const balanceText = formatCurrency(context.customer.balance);
+    // Caso real (2026-10-05, 56942968352): un cliente sin internet respondió solo su nombre ("Rodrigo pavez")
+    // a la pregunta de un agente y el bot contestó "El saldo registrado en tu cuenta es de $18.000, estado
+    // pendiente" -- nadie había preguntado por plata. Los datos de cobranza solo se le muestran a la IA cuando
+    // el mensaje actual habla de pagos; si no, no están disponibles para mencionarlos.
+    const billingTopic = mentionsBillingTopic(inboundMessage?.text);
     const details = [
       context.customer.address ? `dirección ${context.customer.address}` : null,
-      context.customer.billingAuthoritative && balanceText ? `saldo registrado ${balanceText}` : "saldo no disponible para confirmación automática",
-      context.customer.paymentStatus ? `estado ${context.customer.paymentStatus}` : null,
+      !billingTopic ? "datos de cobranza omitidos: el cliente no consultó por pagos, NO menciones saldo, deuda ni estado de pago"
+        : context.customer.billingAuthoritative && balanceText ? `saldo registrado ${balanceText}` : "saldo no disponible para confirmación automática",
+      billingTopic && context.customer.paymentStatus ? `estado ${context.customer.paymentStatus}` : null,
       // dueDate en los registros de facturación suele quedar fijo desde la contratación y no se
       // actualiza mes a mes (mismo valor en julio/agosto/septiembre) -- mostrarlo cuando ya pasó
       // hace que el bot le diga al cliente una fecha de vencimiento vieja como si fuera vigente.
-      context.customer.dueDate && Date.parse(context.customer.dueDate) >= Date.now() ? `vencimiento ${context.customer.dueDate}` : null,
+      billingTopic && context.customer.dueDate && Date.parse(context.customer.dueDate) >= Date.now() ? `vencimiento ${context.customer.dueDate}` : null,
     ].filter(Boolean).join(", ");
     customerLine = `Cliente identificado: ${context.customer.name} (${details}).`;
   }
