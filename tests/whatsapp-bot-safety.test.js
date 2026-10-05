@@ -542,3 +542,52 @@ assert.match(worker, /const billingTopic = mentionsBillingTopic\(inboundMessage\
 assert.match(worker, /billingTopic && context\.customer\.paymentStatus/);
 assert.match(worker, /billingTopic && context\.customer\.dueDate/);
 assert.match(worker, /NUNCA menciones saldo, deuda, monto pendiente, estado de pago ni vencimiento si en el mensaje ACTUAL/);
+
+// Comprobantes (2026-10-05): la IA lee también PDFs; el aviso a Carlos trae una verificación (monto vs deuda
+// pendiente y operación repetida). Nada de esto marca pagos: solo informa a quien los registra.
+{
+  const ctx = { Math, Number, String, Array, JSON, Promise };
+  vm.createContext(ctx);
+  vm.runInContext(`
+    ${functionSource("normalizeWhatsAppPhone")}
+    ${functionSource("normalizeReceiptTransactionId")}
+    async ${functionSource("buildReceiptCheck")}
+    ${functionSource("hasExplicitPaymentIntent")}
+    ${functionSource("hasStrongReceiptEvidence")}
+    this.api = { normalizeReceiptTransactionId, buildReceiptCheck, hasStrongReceiptEvidence };
+  `, ctx);
+  assert.equal(ctx.api.normalizeReceiptTransactionId("Op. 12-345 678"), "OP12345678");
+  assert.equal(ctx.api.normalizeReceiptTransactionId("123"), null);
+  const records = [{ phone: "56911112222", status: "Pendiente", amount: 18000, billingMonth: "octubre" },
+    { phone: "56933334444", status: "Pendiente", amount: 18000, billingMonth: "septiembre" },
+    { phone: "56933334444", status: "Pendiente", amount: 18000, billingMonth: "octubre" }];
+  const makeEnv = (duplicate) => ({ DB: { prepare: (sql) => ({ bind: () => ({
+    first: async () => (/billingRecords|app_state/.test(sql) ? { data: JSON.stringify({ billingRecords: records }) } : duplicate),
+    run: async () => ({}),
+  }), first: async () => ({ data: JSON.stringify({ billingRecords: records }) }) }) } });
+  Promise.all([
+    ctx.api.buildReceiptCheck(makeEnv(null), "56911112222", { extracted_amount: 18000 }, "c1"),
+    ctx.api.buildReceiptCheck(makeEnv(null), "56911112222", { extracted_amount: 25000 }, "c1"),
+    ctx.api.buildReceiptCheck(makeEnv(null), "56933334444", { extracted_amount: 36000 }, "c1"),
+    ctx.api.buildReceiptCheck(makeEnv(null), "56955556666", { extracted_amount: 18000 }, "c1"),
+    ctx.api.buildReceiptCheck(makeEnv(null), "56911112222", {}, "c1"),
+    ctx.api.buildReceiptCheck(makeEnv({ id: "c0", phone: "56900000000", created_at: "2026-10-01T10:00:00Z" }), "56911112222", { extracted_amount: 18000, transaction_id: "ABC123456" }, "c1"),
+  ]).then(([exact, mismatch, sum, none, noAmount, repeated]) => {
+    assert.match(exact, /COINCIDE con octubre pendiente/);
+    assert.match(mismatch, /NO coincide/);
+    assert.match(sum, /COINCIDE con la suma de 2 meses/);
+    assert.match(none, /no hay deuda pendiente/);
+    assert.match(noAmount, /No se pudo leer el monto/);
+    assert.match(repeated, /POSIBLE REPETIDO/);
+  }).catch((error) => { console.error(error); process.exit(1); });
+  const strong = { receipt_evidence: ["bank", "amount", "date_time"] };
+  assert.equal(ctx.api.hasStrongReceiptEvidence(strong, { mediaType: "document", mediaMime: "application/pdf", mediaId: "m1" }), true);
+  assert.equal(ctx.api.hasStrongReceiptEvidence(strong, { mediaType: "document", mediaMime: "application/msword", mediaId: "m1" }), false);
+  assert.equal(ctx.api.hasStrongReceiptEvidence(strong, { mediaType: "image", mediaMime: "image/jpeg", mediaId: "m1" }), true);
+}
+assert.match(worker, /type: "file", file: \{ filename: "comprobante\.pdf", file_data: `data:application\/pdf;base64,\$\{media\.base64\}` \}/);
+assert.match(worker, /if \(\(!response \|\| !response\.ok\) && isPdf\) \{\s*\n\s*pdfUnread = true;/);
+assert.match(worker, /if \(pdfUnread\) \{ parsed\.receipt_evidence = \[\]/);
+assert.match(worker, /transaction_id: \{ type: "string"/);
+assert.match(worker, /mediaMime: media\?\.mimeType \|\| null/);
+assert.match(worker, /`Comprobante recibido\. \$\{receiptCheck\}`/);

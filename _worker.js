@@ -189,6 +189,46 @@ async function ensureWhatsAppAutomationTable(env) {
   )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_cases_status_created ON whatsapp_automation_cases(status, created_at DESC)").run();
   await env.DB.prepare("ALTER TABLE whatsapp_automation_cases ADD COLUMN reported_name TEXT").run().catch(() => null);
+  await env.DB.prepare("ALTER TABLE whatsapp_automation_cases ADD COLUMN receipt_tx TEXT").run().catch(() => null);
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_cases_receipt_tx ON whatsapp_automation_cases(receipt_tx)").run().catch(() => null);
+}
+
+// Verificación del comprobante para quien lo revisa (2026-10-05): el bot lee el monto y el número de operación
+// con la IA, los cruza con la deuda pendiente de la planilla y avisa si la operación ya apareció en otro caso.
+// NO registra ni marca nada como pagado: solo le da a Carlos la información para decidir más rápido.
+function normalizeReceiptTransactionId(value) {
+  const id = String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return id.length >= 6 ? id : null;
+}
+
+async function buildReceiptCheck(env, phone, action, caseId) {
+  const parts = [];
+  const amount = Math.round(Number(action.extracted_amount));
+  let pending = [];
+  try {
+    const row = await env.DB.prepare("SELECT data FROM app_state WHERE id = 'main'").first();
+    const state = row?.data ? JSON.parse(row.data) : null;
+    pending = (state?.billingRecords || []).filter((record) => normalizeWhatsAppPhone(record.phone) === phone && record.status === "Pendiente");
+  } catch { /* sin planilla disponible: se informa solo lo leído */ }
+  const money = (value) => `$${Number(value).toLocaleString("es-CL")}`;
+  if (Number.isFinite(amount) && amount > 0) {
+    const exact = pending.find((record) => Number(record.amount) === amount);
+    const total = pending.reduce((sum, record) => sum + (Number(record.amount) || 0), 0);
+    if (!pending.length) parts.push(`Monto leído ${money(amount)}; no hay deuda pendiente registrada para este número`);
+    else if (exact) parts.push(`Monto leído ${money(amount)}: COINCIDE con ${exact.billingMonth || "un mes"} pendiente`);
+    else if (pending.length > 1 && total === amount) parts.push(`Monto leído ${money(amount)}: COINCIDE con la suma de ${pending.length} meses pendientes`);
+    else parts.push(`Monto leído ${money(amount)}: NO coincide (pendiente ${pending.map((record) => money(record.amount)).join(" + ")})`);
+  } else {
+    parts.push("No se pudo leer el monto");
+  }
+  const tx = normalizeReceiptTransactionId(action.transaction_id);
+  if (tx) {
+    const duplicate = await env.DB.prepare("SELECT id, phone, created_at FROM whatsapp_automation_cases WHERE receipt_tx = ? AND id != ? LIMIT 1")
+      .bind(tx, caseId || "").first().catch(() => null);
+    if (duplicate) parts.push(`⚠️ POSIBLE REPETIDO: la operación ${tx} ya apareció en otro caso (${String(duplicate.created_at).slice(0, 10)}, +${duplicate.phone})`);
+    if (caseId) await env.DB.prepare("UPDATE whatsapp_automation_cases SET receipt_tx = ? WHERE id = ?").bind(tx, caseId).run().catch(() => null);
+  }
+  return parts.join(". ");
 }
 
 const SPANISH_MONTHS = {
@@ -278,7 +318,9 @@ function isPlausibleAccountName(value) {
 
 function hasStrongReceiptEvidence(action, message) {
   if (hasExplicitPaymentIntent(message.customerText)) return true;
-  if (message.mediaType !== "image" || !message.mediaId) return false;
+  // Un PDF solo cuenta como evidencia si la IA realmente lo pudo leer (ver callBotResponder, entrada "file").
+  const readable = message.mediaType === "image" || (message.mediaType === "document" && /pdf/i.test(String(message.mediaMime || "")));
+  if (!readable || !message.mediaId) return false;
   const evidence = new Set(Array.isArray(action.receipt_evidence) ? action.receipt_evidence : []);
   const identity = ["receipt_title", "bank", "transaction_id"].some((item) => evidence.has(item));
   const transaction = ["amount", "date_time", "recipient", "origin_account", "destination_account"].filter((item) => evidence.has(item)).length;
@@ -1428,17 +1470,25 @@ async function callBotResponder(env, context, inboundMessage, media) {
     .join("\n");
   const userContent = [];
   let mediaNote = "";
+  // Los comprobantes en PDF (bancos, Webpay) también se leen: OpenAI acepta PDF como entrada "file". Si el
+  // modelo configurado no lo soporta o el PDF es muy grande, se reintenta sin el PDF (ver más abajo) en vez
+  // de dejar al cliente sin respuesta.
+  const isPdf = Boolean(media && /pdf/i.test(media.mimeType)) && media.base64.length <= 12 * 1024 * 1024;
   if (media && media.mimeType.startsWith("image/")) {
     userContent.push({ type: "image_url", image_url: { url: `data:${media.mimeType};base64,${media.base64}` } });
+  } else if (isPdf) {
+    userContent.push({ type: "file", file: { filename: "comprobante.pdf", file_data: `data:application/pdf;base64,${media.base64}` } });
   } else if (media) {
     mediaNote = "\n\n(El cliente adjuntó un documento que no se puede visualizar aquí. NO asumas que es comprobante; solo trátalo como pago si el texto/caption lo indica explícitamente.)";
   }
-  userContent.push({
+  const textPart = {
     type: "text",
     text: `FAQs de BPGO:\n${context.faq}\n\n${customerLine}\n\nÚltimos mensajes de la conversación:\n${historyLines || "(sin historial previo)"}\n\nNuevo mensaje del cliente (${inboundMessage.type}): ${inboundMessage.text || "(sin texto, ver adjunto)"}${mediaNote}`,
-  });
+  };
+  const pdfFallbackNote = "\n\n(El cliente adjuntó un documento que no se puede visualizar aquí. NO asumas que es comprobante; solo trátalo como pago si el texto/caption lo indica explícitamente.)";
+  userContent.push(textPart);
 
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+  const callOpenAi = (content) => fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -1452,7 +1502,7 @@ async function callBotResponder(env, context, inboundMessage, media) {
       max_tokens: 600,
       messages: [
         { role: "system", content: BOT_SYSTEM_PROMPT },
-        { role: "user", content: userContent },
+        { role: "user", content },
       ],
       tools: [{
         type: "function",
@@ -1468,6 +1518,7 @@ async function callBotResponder(env, context, inboundMessage, media) {
               reason: { type: "string", description: "Motivo de la visita/incidencia/revisión de cobro o de la escalación." },
               extracted_amount: { type: "number", description: "Monto pagado, solo si se lee con certeza en la imagen del comprobante (payment_ack)." },
               extracted_date: { type: "string", description: "Fecha del pago, solo si se lee con certeza en la imagen del comprobante (payment_ack)." },
+              transaction_id: { type: "string", description: "Número de operación/transacción/folio del comprobante, solo si se lee con certeza (payment_ack). Sirve para detectar comprobantes repetidos." },
               receipt_evidence: { type: "array", items: { type: "string", enum: ["receipt_title", "bank", "amount", "date_time", "origin_account", "destination_account", "recipient", "transaction_id"] }, description: "Señales visibles reales del comprobante. Mínimo 3 para payment_ack sin texto explícito." },
               days_without_service: { type: "number", description: "Cantidad de días que el cliente dijo haber estado sin servicio (billing_review_request)." },
             },
@@ -1478,12 +1529,22 @@ async function callBotResponder(env, context, inboundMessage, media) {
       tool_choice: { type: "function", function: { name: "bpgo_bot_action" } },
     }),
   }).catch(() => null);
+  let response = await callOpenAi(userContent);
+  let pdfUnread = false;
+  if ((!response || !response.ok) && isPdf) {
+    pdfUnread = true;
+    // El modelo configurado puede no aceptar PDF: se reintenta sin el archivo, con la nota de "documento
+    // no visible", que es el comportamiento anterior (nunca peor que antes).
+    response = await callOpenAi([{ ...textPart, text: `${textPart.text}${pdfFallbackNote}` }]);
+  }
   if (!response || !response.ok) return { action: "escalate", reason: "bot_api_error" };
   const payload = await response.json().catch(() => null);
   const toolCall = payload?.choices?.[0]?.message?.tool_calls?.[0];
   if (!toolCall?.function?.arguments) return { action: "escalate", reason: "bot_parse_error" };
   const parsed = (() => { try { return JSON.parse(toolCall.function.arguments); } catch { return null; } })();
   if (!parsed?.action) return { action: "escalate", reason: "bot_parse_error" };
+  // Si el PDF no se pudo leer, ninguna "evidencia" del comprobante puede ser real: se descarta.
+  if (pdfUnread) { parsed.receipt_evidence = []; parsed.extracted_amount = undefined; parsed.transaction_id = undefined; }
   return parsed;
 }
 
@@ -1600,6 +1661,11 @@ async function executeBotAction(env, credentials, phone, action, message) {
         .bind(Number.isFinite(Number(action.extracted_amount)) ? Math.round(Number(action.extracted_amount)) : null,
           action.extracted_date || null, caseRow.id).run();
     }
+    const receiptCheck = await buildReceiptCheck(env, phone, action, caseRow?.id || null).catch(() => "");
+    if (caseRow && receiptCheck) {
+      await env.DB.prepare("UPDATE whatsapp_automation_cases SET summary = ? WHERE id = ?")
+        .bind(`Comprobante de pago recibido para validación. Verificación: ${receiptCheck}`, caseRow.id).run().catch(() => null);
+    }
     const matchedCustomer = await findCustomerForWhatsApp(env, phone, message.customerName);
     // A diferencia del flujo donde el cliente escribe el nombre (que sí pasa por
     // isPlausibleAccountName), este "known" puede venir del nombre registrado en la planilla o de
@@ -1614,7 +1680,7 @@ async function executeBotAction(env, credentials, phone, action, message) {
         await env.DB.prepare("UPDATE whatsapp_automation_cases SET reported_name = ? WHERE id = ?").bind(known, caseRow.id).run();
       }
       await sendBotReply(env, credentials, phone, action.text || "Recibimos tu comprobante, en breve lo revisamos. ¡Gracias! 🙏", preferAudio);
-      await notifyStaff(env, credentials, "carlos", "Comprobante de pago", known, phone, "Cliente envió comprobante de pago para revisión.", { caseId: caseRow?.id || null, sourceMessageId: message.messageId });
+      await notifyStaff(env, credentials, "carlos", "Comprobante de pago", known, phone, `Comprobante recibido. ${receiptCheck}`.trim(), { caseId: caseRow?.id || null, sourceMessageId: message.messageId });
       await setBotSessionMode(env, phone, "human", "case_created_payment");
       return;
     }
@@ -2132,7 +2198,10 @@ async function runBotForInboundMessages(env, changes) {
           }
           await env.DB.prepare("DELETE FROM whatsapp_pending_payments WHERE phone = ?").bind(phone).run();
           await sendBotReply(env, credentials, phone, `Gracias, dejamos tu comprobante asociado a nombre de ${reportedName}. El equipo lo confirmará pronto. 🙏`, preferAudio);
-          await notifyStaff(env, credentials, "carlos", "Comprobante de pago", reportedName, phone, "Cliente envió comprobante de pago para revisión.", { caseId: pendingPayment.case_id || null, sourceMessageId: message.id });
+          const storedCase = pendingPayment.case_id
+            ? await env.DB.prepare("SELECT summary FROM whatsapp_automation_cases WHERE id = ?").bind(pendingPayment.case_id).first().catch(() => null) : null;
+          const storedCheck = String(storedCase?.summary || "").split("Verificación: ")[1] || "";
+          await notifyStaff(env, credentials, "carlos", "Comprobante de pago", reportedName, phone, `Comprobante recibido. ${storedCheck}`.trim(), { caseId: pendingPayment.case_id || null, sourceMessageId: message.id });
           await setBotSessionMode(env, phone, "human", "case_created_payment");
           continue;
         }
@@ -2183,7 +2252,7 @@ async function runBotForInboundMessages(env, changes) {
         if (!(await isStillLatestMessage(env, phone, message.id, 0))) continue;
         await executeBotAction(env, credentials, phone, action, {
           customerName: name, messageId: message.id, preferAudio, customerText: text,
-          mediaId, mediaType,
+          mediaId, mediaType, mediaMime: media?.mimeType || null,
         });
       } catch {
         await setBotSessionMode(env, phone, "human", "bot_exception").catch(() => null);
