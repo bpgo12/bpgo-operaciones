@@ -460,7 +460,11 @@ assert.match(worker, /const HUMAN_NO_RESPONSE_TAKEOVER_MS = 10 \* 60 \* 1000;/);
 assert.match(worker, /m\.created_at = \(SELECT MAX\(created_at\) FROM whatsapp_inbox_messages WHERE phone = s\.phone\)/);
 assert.match(worker, /m\.message_type = 'text'/);
 assert.match(worker, /s\.updated_at <= \?/);
-assert.match(worker, /claimInboundMessageForBot\(env, `retake:\$\{row\.message_id\}`\)/);
+assert.match(worker, /claimInboundMessageForBot\(env, `retake-claim:\$\{row\.message_id\}`\)/);
+// El claim de la retoma NO puede usar el mismo id que el mensaje sintético (`retake:<id>`): runBotForInboundMessages
+// lo reclama de nuevo y, al verlo ya procesado, se saltaría el mensaje sin responder (bug real 2026-10-05).
+assert.doesNotMatch(worker, /claimInboundMessageForBot\(env, `retake:/);
+assert.match(worker, /id: `retake:\$\{row\.message_id\}`, from: row\.phone/);
 assert.match(worker, /setBotSessionMode\(env, row\.phone, "bot", "auto_reactivated_unanswered"\)/);
 assert.match(worker, /const takeoverTask = takeOverUnansweredHumanChats\(env\)\.catch\(\(\) => null\);/);
 assert.match(worker, /const takeover = await takeOverUnansweredHumanChats\(env\)/);
