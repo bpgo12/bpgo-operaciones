@@ -180,7 +180,7 @@ assert.match(worker, /if \(!\(await isStillLatestMessage\(env, phone, message\.i
 assert.equal(api.cyberParseInstallDate("2026-08-31"), "2026-08-31");
 assert.equal(api.cyberParseInstallDate("24 julio 2026"), "2026-07-24");
 assert.equal(api.cyberParseInstallDate("no disponible"), null);
-assert.match(worker, /async function cortadosPhoneSet\(\)/);
+assert.match(worker, /async function cortadosPhoneSet\(env\)/);
 assert.match(worker, /cortadosCheckFailed: cortados === null/);
 assert.match(worker, /if \(snapshot\.cortadosCheckFailed\) throw new Error\("No se pudo verificar la lista de clientes cortados/);
 
@@ -483,3 +483,43 @@ assert.match(worker, /const takeover = await takeOverUnansweredHumanChats\(env\)
     assert.equal(ctx.api.isClosingPleasantry(no), false, no);
   }
 }
+
+// ---- Auditoría 2026-10-05 ----
+// (1) Bucle con otro bot (22+ mensajes con un número que respondía ofertas de Movistar): no responder a
+// respuestas automáticas + tope de mensajes por teléfono/ventana.
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`
+    ${functionSource("cyberNormalize")}
+    ${functionSource("isLikelyAutoReply")}
+    ${functionSource("isClosingPleasantry")}
+    this.api = { isLikelyAutoReply, isClosingPleasantry };
+  `, ctx);
+  for (const yes of ["¡Hola, que alegría verte por acá! 😍 Descubre las ofertas para ti", "¡Ningún problema! Te avisaremos en otra ocasión cuando tengamos más ofertas exclusivas para ti",
+    "Este es un mensaje automático, no responder", "Gracias por contactarnos. Nuestro horario de atención es de 9 a 18"]) {
+    assert.equal(ctx.api.isLikelyAutoReply(yes), true, yes);
+  }
+  for (const no of ["Hola, no tengo internet", "Quiero contratar el plan de 300", "Buenos días, necesito ayuda con mi pago", "Me interesa"]) {
+    assert.equal(ctx.api.isLikelyAutoReply(no), false, no);
+  }
+}
+assert.match(worker, /const BOT_LOOP_MAX_REPLIES = 8;/);
+assert.match(worker, /if \(!isStaffPhone && await guardAgainstBotLoop\(env, credentials, phone, message\)\) continue;/);
+assert.match(worker, /setBotSessionMode\(env, phone, "human", "bot_loop_suspected"\)/);
+// (2) Chats sin responder: resumen a Carlos + ventana de retoma hasta 23 h (límite de WhatsApp).
+assert.match(worker, /const HUMAN_NO_RESPONSE_MAX_AGE_MS = 23 \* 60 \* 60 \* 1000;/);
+assert.match(worker, /async function alertStaffUnansweredChats\(env\)/);
+assert.match(worker, /const digest = await alertStaffUnansweredChats\(env\)/);
+assert.match(worker, /case_type = 'Chats sin responder'/);
+// (3) Avisos fallidos por 131042 se reintentan solos (24 h, 30 min entre intentos).
+assert.match(worker, /status = 'failed' AND error_code = '131042' AND created_at > datetime\('now', '-24 hours'\)/);
+assert.match(worker, /last_attempt_at < datetime\('now', '-30 minutes'\)/);
+// (4) Sin META_APP_SECRET no se ejecuta un "Registrar pago" falsificable desde el webhook.
+assert.match(worker, /if \(!env\.META_APP_SECRET\) \{[\s\S]{0,700}confirm_payment:[\s\S]{0,200}unsigned_webhook_payment_action_dropped/);
+// (5) IA con timeout; el pago aplicado no pisa cambios concurrentes del estado y usa hora de Chile.
+assert.match(worker, /signal: AbortSignal\.timeout\(25000\)/);
+assert.match(worker, /WHERE id = 'main' AND updated_at IS \?/);
+assert.match(worker, /toLocaleString\("es-CL", \{ timeZone: "America\/Santiago" \}\)/);
+// (6) El token de la planilla ya no vive solo en el código: se puede sobrescribir por variable de entorno.
+assert.match(worker, /env\?\.CORTADOS_SYNC_URL \|\| CORTADOS_SYNC_URL_FALLBACK/);

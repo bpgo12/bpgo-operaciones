@@ -569,7 +569,9 @@ async function alertStaffCustomerWroteInHumanMode(env, credentials, phone, messa
 // Los adjuntos (posibles comprobantes) nunca se reprocesan así. Se evalúa al final de cada webhook de Meta
 // y en la corrida de 10 minutos de GitHub Actions; claimInboundMessageForBot impide responder dos veces.
 const HUMAN_NO_RESPONSE_TAKEOVER_MS = 10 * 60 * 1000;
-const HUMAN_NO_RESPONSE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+// 23 h: pasada la ventana de 24 h de WhatsApp ya no se puede escribir texto libre (solo plantillas), así que
+// no tiene sentido intentar más allá.
+const HUMAN_NO_RESPONSE_MAX_AGE_MS = 23 * 60 * 60 * 1000;
 const HUMAN_NO_RESPONSE_BATCH = 3;
 
 // "Ya perfecto gracias" después de que un humano resolvió no necesita que el bot vuelva a contestar.
@@ -608,6 +610,43 @@ async function takeOverUnansweredHumanChats(env) {
     ] } }]).catch(() => null);
   }
   return { ok: true, taken };
+}
+
+// Auditoría 2026-10-05: había clientes con consultas reales ("sabes por qué no tengo internet", "q pasa
+// con la tv", un audio) sin respuesta hace 1-3 días, en conversaciones que ya no recupera el bot (fuera de
+// la ventana de 24 h) y cuyo aviso individual falló o nunca existió. Cada ~10 min (corrida de GitHub
+// Actions) se manda a Carlos UN resumen -- como mucho cada 3 horas, por el espaciado de Meta -- con los
+// chats cuyo último mensaje es del cliente (texto/audio/imagen/documento) y llevan > 30 min sin respuesta.
+const UNANSWERED_DIGEST_AFTER_MIN = 30;
+const UNANSWERED_DIGEST_COOLDOWN_HOURS = 3;
+const UNANSWERED_DIGEST_MAX_AGE_HOURS = 72;
+
+async function alertStaffUnansweredChats(env) {
+  await ensureWhatsAppBotTables(env);
+  await ensureWhatsAppInboxTable(env);
+  await ensureStaffNotificationsLogTable(env);
+  const recent = await env.DB.prepare(
+    "SELECT 1 AS found FROM staff_notifications_log WHERE case_type = 'Chats sin responder' AND created_at > datetime('now', ?) LIMIT 1"
+  ).bind(`-${UNANSWERED_DIGEST_COOLDOWN_HOURS} hours`).first();
+  if (recent) return { ok: true, sent: false, reason: "cooldown" };
+  const rows = await env.DB.prepare(`SELECT m.phone, m.created_at AS last_at, m.message_type, m.message_text
+    FROM whatsapp_inbox_messages m
+    WHERE m.direction = 'inbound' AND m.message_type IN ('text', 'audio', 'image', 'document')
+      AND m.created_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) AND m.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
+      AND m.created_at = (SELECT MAX(created_at) FROM whatsapp_inbox_messages WHERE phone = m.phone)
+    ORDER BY m.created_at ASC LIMIT 40`)
+    .bind(`-${UNANSWERED_DIGEST_AFTER_MIN} minutes`, `-${UNANSWERED_DIGEST_MAX_AGE_HOURS} hours`).all();
+  const staffPhones = new Set([env.STAFF_PHONE_CARLOS, env.STAFF_PHONE_EDUARDO].map((value) => normalizeWhatsAppPhone(value)).filter(Boolean));
+  // Un "gracias" final o la respuesta automática de otra empresa no son clientes esperando respuesta.
+  const waiting = (rows.results || []).filter((row) => !staffPhones.has(row.phone)
+    && !(row.message_type === "text" && (isClosingPleasantry(row.message_text) || isLikelyAutoReply(row.message_text))));
+  if (!waiting.length) return { ok: true, sent: false, reason: "none" };
+  const list = waiting.slice(0, 6).map((row) => `+${row.phone}`).join(", ");
+  const credentials = await getWhatsAppCredentials(env);
+  const result = await notifyStaff(env, credentials, "carlos", "Chats sin responder", "Varios clientes", "interno",
+    `${waiting.length} cliente(s) esperan respuesta hace más de ${UNANSWERED_DIGEST_AFTER_MIN} min: ${list}${waiting.length > 6 ? " y más" : ""}. Revisa la bandeja de WhatsApp.`,
+    { sourceMessageId: `digest-${new Date().toISOString().slice(0, 13)}` });
+  return { ok: true, sent: true, waiting: waiting.length, result };
 }
 
 async function setBotSessionMode(env, phone, mode, reason, actor) {
@@ -969,9 +1008,18 @@ async function flushQueuedStaffNotifications(env) {
     const pending = await env.DB.prepare(
       "SELECT * FROM staff_notifications_log WHERE role=? AND status='pending' ORDER BY created_at ASC LIMIT 1"
     ).bind(role).first();
-    if (!pending) continue;
-    const result = await deliverStaffNotification(env, credentials, pending).catch((error) => ({ ok: false, error: String(error?.message || error) }));
-    results.push({ role, id: pending.id, ...result });
+    // Auditoría 2026-10-05: 34 avisos a Carlos fallaron con 131042 (problema de pago de Meta) y nunca se
+    // reintentaron solos, así que cuando el pago se arreglaba esos casos seguían sin avisarse. Si no hay
+    // nada pendiente, se reintenta UN aviso fallido por 131042 de las últimas 24 h (los más viejos ya son
+    // ruido), con al menos 30 min entre intentos del mismo aviso para no insistir mientras siga el bloqueo.
+    const retry = pending ? null : await env.DB.prepare(`SELECT * FROM staff_notifications_log
+      WHERE role = ? AND status = 'failed' AND error_code = '131042' AND created_at > datetime('now', '-24 hours')
+      AND (last_attempt_at IS NULL OR last_attempt_at < datetime('now', '-30 minutes'))
+      ORDER BY created_at ASC LIMIT 1`).bind(role).first();
+    const target = pending || retry;
+    if (!target) continue;
+    const result = await deliverStaffNotification(env, credentials, target).catch((error) => ({ ok: false, error: String(error?.message || error) }));
+    results.push({ role, id: target.id, retried: Boolean(retry), ...result });
   }
   return { ok: true, results };
 }
@@ -1382,6 +1430,9 @@ async function callBotResponder(env, context, inboundMessage, media) {
       "content-type": "application/json",
       authorization: `Bearer ${env.OPENAI_API_KEY}`,
     },
+    // Auditoría: sin timeout, una IA colgada dejaba la tarea del webhook esperando y al cliente sin
+    // respuesta; con timeout cae a "bot_api_error" (escalar a un humano), igual que cualquier otro fallo.
+    signal: AbortSignal.timeout(25000),
     body: JSON.stringify({
       model: String(env.OPENAI_MODEL || "gpt-4o-mini"),
       max_tokens: 600,
@@ -1437,8 +1488,8 @@ function currentBillingMonthEs() {
 // en la facturación real. Solo se llama tras confirmación humana explícita -- nunca desde el bot --
 // y solo si hay exactamente un registro de cobranza candidato, para no adivinar a cuál mes/servicio
 // corresponde el pago cuando hay ambigüedad.
-async function applyPaymentToBillingRecord(env, phone, extractedAmount) {
-  const row = await env.DB.prepare("SELECT data FROM app_state WHERE id = 'main'").first();
+async function applyPaymentToBillingRecord(env, phone, extractedAmount, attempt = 0) {
+  const row = await env.DB.prepare("SELECT data, updated_at FROM app_state WHERE id = 'main'").first();
   const state = row ? JSON.parse(row.data) : null;
   if (!state || !Array.isArray(state.billingRecords)) return { ok: false, reason: "no_state" };
   const pending = state.billingRecords.filter((record) => normalizeWhatsAppPhone(record.phone) === phone && record.status === "Pendiente");
@@ -1450,10 +1501,18 @@ async function applyPaymentToBillingRecord(env, phone, extractedAmount) {
   if (!target) return { ok: false, reason: "ambiguous_record", candidates: pending.length };
   target.status = "Pagado";
   target.followUpStatus = "Pago confirmado";
-  target.notes = `Pago confirmado por el equipo BPGO vía WhatsApp el ${new Date().toLocaleString("es-CL")}.`;
+  // El reloj del Worker es UTC: sin timeZone la nota quedaba con la hora UTC como si fuera hora de Chile.
+  target.notes = `Pago confirmado por el equipo BPGO vía WhatsApp el ${new Date().toLocaleString("es-CL", { timeZone: "America/Santiago" })}.`;
   target.lastMessageAt = new Date().toISOString();
-  await env.DB.prepare("UPDATE app_state SET data = ?, updated_at = datetime('now') WHERE id = 'main'")
-    .bind(JSON.stringify(state)).run();
+  // Se reescribe TODO el estado de la app (un solo JSON): si alguien guardó desde el panel entre la lectura y
+  // esta escritura, el UPDATE a ciegas le pisaba sus cambios. Ahora solo escribe si nadie lo tocó (misma
+  // updated_at) y, si hubo un cambio en medio, relee y reaplica (hasta 3 veces) en vez de pisarlo.
+  const written = await env.DB.prepare("UPDATE app_state SET data = ?, updated_at = datetime('now') WHERE id = 'main' AND updated_at IS ?")
+    .bind(JSON.stringify(state), row.updated_at ?? null).run();
+  if (!written.meta?.changes) {
+    if (attempt >= 2) return { ok: false, reason: "state_conflict" };
+    return applyPaymentToBillingRecord(env, phone, extractedAmount, attempt + 1);
+  }
   return { ok: true, record: target };
 }
 
@@ -1717,6 +1776,36 @@ async function recentInboundMedia(env, phone) {
   return { mediaId: row.media_id, mediaType: row.message_type };
 }
 
+// Auditoría 2026-10-05: el bot quedó en un bucle de 22+ mensajes con OTRO bot automático (un número que
+// contestaba con ofertas tipo "¡Hola, que alegría verte por acá!... Descubre las ofertas", "Te avisaremos
+// en otra ocasión"), gastando IA y mensajes de Meta sin fin. Dos defensas independientes:
+//  1) no se le responde a un mensaje que huele a respuesta automática de una empresa;
+//  2) tope por teléfono: si el bot ya envió BOT_LOOP_MAX_REPLIES textos en BOT_LOOP_WINDOW_MIN minutos, se
+//     deja de responder, la conversación pasa a atención humana y se avisa a Carlos una vez.
+const BOT_LOOP_MAX_REPLIES = 8;
+const BOT_LOOP_WINDOW_MIN = 10;
+
+function isLikelyAutoReply(text) {
+  const normalized = cyberNormalize(text);
+  if (!normalized) return false;
+  return /\b(mensaje automatico|respuesta automatica|este es un mensaje automatico|no responder a este mensaje|descubre las ofertas|que alegria verte por aca|te avisaremos en otra ocasion|ofertas exclusivas para ti|fuera de(l)? horario de atencion|nuestro horario de atencion es|gracias por contactar(nos| a)|hemos recibido tu mensaje|te responderemos a la brevedad|en este momento no (podemos|estamos))\b/.test(normalized);
+}
+
+async function guardAgainstBotLoop(env, credentials, phone, message) {
+  const text = inboundMessageText(message);
+  if (isLikelyAutoReply(text)) return true;
+  const recent = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM whatsapp_inbox_messages WHERE phone = ? AND direction = 'outbound' AND message_type = 'text'
+     AND created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)`
+  ).bind(phone, `-${BOT_LOOP_WINDOW_MIN} minutes`).first();
+  if ((recent?.n || 0) < BOT_LOOP_MAX_REPLIES) return false;
+  await setBotSessionMode(env, phone, "human", "bot_loop_suspected");
+  await notifyStaff(env, credentials, "carlos", "Conversación pausada", await getKnownAccountName(env, phone).catch(() => null), phone,
+    `El bot envió ${recent.n} mensajes en ${BOT_LOOP_WINDOW_MIN} minutos a este número; puede ser otro bot o un bucle. Se pausó la conversación.`,
+    { sourceMessageId: message.id }).catch(() => null);
+  return true;
+}
+
 async function runBotForInboundMessages(env, changes) {
   if (String(env.WHATSAPP_BOT_ENABLED || "").toLowerCase() !== "true") return;
   const credentials = await getWhatsAppCredentials(env);
@@ -1838,6 +1927,7 @@ async function runBotForInboundMessages(env, changes) {
             continue;
           }
         }
+        if (!isStaffPhone && await guardAgainstBotLoop(env, credentials, phone, message)) continue;
         const preferAudio = message.type === "audio";
         let text = inboundMessageText(message);
         if (preferAudio && message.audio?.id) {
@@ -2612,8 +2702,16 @@ function cyberCandidates(state, cortadosPhones) {
 // Mismo origen que /api/billing/cortados (ver más abajo), reutilizado acá para no mandar la
 // campaña a alguien que el negocio ya cortó por no pago. Si la planilla no responde, se devuelve
 // null (no una lista vacía) para no confundir "sin cortados" con "no se pudo verificar".
-async function cortadosPhoneSet() {
-  const syncUrl = "https://script.google.com/macros/s/AKfycbxQWG6fkP1_V8quAUCGN0q2kDtHq5nT4kmOXjTtqdkP9kBaEx_KoE0KAwnG39QhxJvd/exec?cortados=1&token=bpgo_sheets_sync_2026_seguro";
+// Auditoría 2026-10-05: el token de la planilla estaba escrito en el código (y por tanto en el repositorio).
+// Ahora se lee de la variable CORTADOS_SYNC_URL si existe; el valor anterior queda solo como respaldo para
+// no cortar el servicio hasta que se configure la variable y se rote el token en Google Apps Script.
+const CORTADOS_SYNC_URL_FALLBACK = "https://script.google.com/macros/s/AKfycbxQWG6fkP1_V8quAUCGN0q2kDtHq5nT4kmOXjTtqdkP9kBaEx_KoE0KAwnG39QhxJvd/exec?cortados=1&token=bpgo_sheets_sync_2026_seguro";
+function cortadosSyncUrl(env) {
+  return String(env?.CORTADOS_SYNC_URL || CORTADOS_SYNC_URL_FALLBACK).trim();
+}
+
+async function cortadosPhoneSet(env) {
+  const syncUrl = cortadosSyncUrl(env);
   const upstream = await fetch(syncUrl, { cache: "no-store" }).catch(() => null);
   const payload = await upstream?.json().catch(() => null);
   if (!upstream?.ok || !payload?.ok || !Array.isArray(payload.cortados)) return null;
@@ -2643,7 +2741,7 @@ async function cyberSnapshot(env) {
   await ensureCyberTables(env);
   const row = await env.DB.prepare("SELECT data FROM app_state WHERE id='main'").first();
   if (!row?.data) throw new Error("No se pudo leer la cartera actual.");
-  const cortados = await cortadosPhoneSet();
+  const cortados = await cortadosPhoneSet(env);
   const candidates = cyberCandidates(JSON.parse(row.data), cortados);
   const sends = await env.DB.prepare(`SELECT c.recipient AS phone, c.message_id, c.created_at,
     r.customer_name, r.response, s.status AS delivery_status
@@ -3210,7 +3308,7 @@ export default {
     if (url.pathname === "/api/billing/cortados" && request.method === "GET") {
       const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
       if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
-      const syncUrl = "https://script.google.com/macros/s/AKfycbxQWG6fkP1_V8quAUCGN0q2kDtHq5nT4kmOXjTtqdkP9kBaEx_KoE0KAwnG39QhxJvd/exec?cortados=1&token=bpgo_sheets_sync_2026_seguro";
+      const syncUrl = cortadosSyncUrl(env);
       const upstream = await fetch(syncUrl, { cache: "no-store" }).catch(() => null);
       const payload = await upstream?.json().catch(() => null);
       if (!upstream?.ok || !payload?.ok) {
@@ -3247,6 +3345,21 @@ export default {
       const changes = Array.isArray(body.entry)
         ? body.entry.flatMap((entry) => Array.isArray(entry.changes) ? entry.changes : [])
         : [];
+      // Auditoría 2026-10-05: la firma de Meta solo se exige si META_APP_SECRET está configurado (si no, el
+      // webhook acepta cualquier POST). Sin firma verificada, alguien podría falsificar el botón
+      // "Registrar pago" de un teléfono de staff y marcar pagos como pagados. Mientras no haya secreto, esas
+      // acciones con dinero se descartan en vez de ejecutarse; el resto del bot sigue funcionando igual.
+      if (!env.META_APP_SECRET) {
+        const staffPhones = new Set([env.STAFF_PHONE_CARLOS, env.STAFF_PHONE_EDUARDO].map((value) => normalizeWhatsAppPhone(value)).filter(Boolean));
+        for (const change of changes) {
+          if (!Array.isArray(change.value?.messages)) continue;
+          change.value.messages = change.value.messages.filter((message) => {
+            const forgedPaymentAction = staffPhones.has(normalizeWhatsAppPhone(message.from)) && String(message.button?.payload || "").startsWith("confirm_payment:");
+            if (forgedPaymentAction) console.error("unsigned_webhook_payment_action_dropped", message.id);
+            return !forgedPaymentAction;
+          });
+        }
+      }
       const statuses = changes.flatMap((change) => Array.isArray(change.value?.statuses) ? change.value.statuses : []);
       for (const item of statuses) {
         if (!item.id || !item.status) continue;
@@ -3412,7 +3525,8 @@ export default {
       // Misma corrida de 10 minutos: además retoma los chats en modo humano que nadie atendió (ver
       // takeOverUnansweredHumanChats). Un fallo aquí no debe tumbar el seguimiento de leads.
       const takeover = await takeOverUnansweredHumanChats(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
-      return Response.json({ ...result, takeover }, { status: result.ok ? 200 : 502 });
+      const digest = await alertStaffUnansweredChats(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
+      return Response.json({ ...result, takeover, digest }, { status: result.ok ? 200 : 502 });
     }
 
     if (url.pathname === "/api/billing/automation" && request.method === "GET") {
