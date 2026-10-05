@@ -560,6 +560,52 @@ async function alertStaffCustomerWroteInHumanMode(env, credentials, phone, messa
   return true;
 }
 
+// Regla del negocio (reiterada por Carlos 2026-10-05): si nadie del equipo atiende al cliente durante unos
+// minutos, el bot retoma la conversación de inmediato. Antes la única reactivación era por inactividad
+// (45 min) y solo para tomas manuales; un cliente en modo humano que escribía y no recibía respuesta
+// quedaba mudo indefinidamente. Ahora, si el ÚLTIMO mensaje de la conversación es del cliente (texto),
+// lleva sin respuesta >= HUMAN_NO_RESPONSE_TAKEOVER_MS y el modo humano tampoco se fijó en ese lapso (para
+// no pisar a alguien que acaba de tomar el chat desde el panel), el bot vuelve y responde ESE mensaje.
+// Los adjuntos (posibles comprobantes) nunca se reprocesan así. Se evalúa al final de cada webhook de Meta
+// y en la corrida de 10 minutos de GitHub Actions; claimInboundMessageForBot impide responder dos veces.
+const HUMAN_NO_RESPONSE_TAKEOVER_MS = 10 * 60 * 1000;
+const HUMAN_NO_RESPONSE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+const HUMAN_NO_RESPONSE_BATCH = 3;
+
+// "Ya perfecto gracias" después de que un humano resolvió no necesita que el bot vuelva a contestar.
+function isClosingPleasantry(text) {
+  const normalized = cyberNormalize(text).replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+  return normalized.length <= 40 && /^((ya|ok|okey|okay|listo|perfecto|vale|dale|bueno|bien|excelente|genial|super|muy bien|muchas|mil|gracias|de nada|saludos|chao|adios|hasta luego|un abrazo)( |$))+$/.test(normalized);
+}
+
+async function takeOverUnansweredHumanChats(env) {
+  if (String(env.WHATSAPP_BOT_ENABLED || "").toLowerCase() !== "true") return { ok: true, taken: 0 };
+  await ensureWhatsAppBotTables(env);
+  await ensureWhatsAppInboxTable(env);
+  const now = Date.now();
+  const newestAllowed = new Date(now - HUMAN_NO_RESPONSE_TAKEOVER_MS).toISOString();
+  const oldestAllowed = new Date(now - HUMAN_NO_RESPONSE_MAX_AGE_MS).toISOString();
+  const sessionCutoff = newestAllowed.replace("T", " ").slice(0, 19);
+  const rows = await env.DB.prepare(`SELECT s.phone, m.message_id, m.message_text, m.created_at
+    FROM whatsapp_bot_sessions s JOIN whatsapp_inbox_messages m ON m.phone = s.phone
+    WHERE s.mode = 'human' AND s.updated_at <= ? AND m.direction = 'inbound' AND m.message_type = 'text'
+      AND COALESCE(TRIM(m.message_text), '') != '' AND m.created_at <= ? AND m.created_at >= ?
+      AND m.created_at = (SELECT MAX(created_at) FROM whatsapp_inbox_messages WHERE phone = s.phone)
+    ORDER BY m.created_at ASC LIMIT ?`).bind(sessionCutoff, newestAllowed, oldestAllowed, HUMAN_NO_RESPONSE_BATCH).all();
+  const staffPhones = new Set([env.STAFF_PHONE_CARLOS, env.STAFF_PHONE_EDUARDO].map((value) => normalizeWhatsAppPhone(value)).filter(Boolean));
+  let taken = 0;
+  for (const row of rows.results || []) {
+    if (staffPhones.has(row.phone) || isClosingPleasantry(row.message_text)) continue;
+    if (!(await claimInboundMessageForBot(env, `retake:${row.message_id}`))) continue;
+    await setBotSessionMode(env, row.phone, "bot", "auto_reactivated_unanswered");
+    taken += 1;
+    await runBotForInboundMessages(env, [{ value: { contacts: [{ profile: {} }], messages: [
+      { id: `retake:${row.message_id}`, from: row.phone, type: "text", text: { body: row.message_text } },
+    ] } }]).catch(() => null);
+  }
+  return { ok: true, taken };
+}
+
 async function setBotSessionMode(env, phone, mode, reason, actor) {
   await ensureWhatsAppBotTables(env);
   const userId = actor?.userId ? String(actor.userId) : null;
@@ -3222,7 +3268,8 @@ export default {
       const messagesSaved = await saveInboundWhatsAppMessages(env, inboundChanges).catch(() => 0);
       const botTask = runBotForInboundMessages(env, inboundChanges).catch(() => null);
       const flushTask = flushQueuedStaffNotifications(env).catch(() => null);
-      if (ctx?.waitUntil) { ctx.waitUntil(botTask); ctx.waitUntil(flushTask); } else { await botTask; await flushTask; }
+      const takeoverTask = takeOverUnansweredHumanChats(env).catch(() => null);
+      if (ctx?.waitUntil) { ctx.waitUntil(botTask); ctx.waitUntil(flushTask); ctx.waitUntil(takeoverTask); } else { await botTask; await flushTask; await takeoverTask; }
       return Response.json({ ok: true, received: statuses.length, messagesSaved, manualEchoesSaved });
     }
 
@@ -3358,7 +3405,10 @@ export default {
       const oidc = await verifySalesFollowUpOidc(request);
       if (!oidc) return Response.json({ ok: false, error: "Ejecución automática no autorizada." }, { status: 401 });
       const result = await followUpStaleSalesLeads(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
-      return Response.json(result, { status: result.ok ? 200 : 502 });
+      // Misma corrida de 10 minutos: además retoma los chats en modo humano que nadie atendió (ver
+      // takeOverUnansweredHumanChats). Un fallo aquí no debe tumbar el seguimiento de leads.
+      const takeover = await takeOverUnansweredHumanChats(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
+      return Response.json({ ...result, takeover }, { status: result.ok ? 200 : 502 });
     }
 
     if (url.pathname === "/api/billing/automation" && request.method === "GET") {
