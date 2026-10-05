@@ -452,3 +452,30 @@ assert.match(worker, /if \(lastOut\?\.message_text !== FACTIBILIDAD_WAIT\)/);
     assert.equal(ctx.api.isRestartRequest(no), false, no);
   }
 }
+
+// Regla de Carlos (2026-10-05): si nadie atiende a un cliente en modo humano por unos minutos, el bot retoma.
+// Solo si el ÚLTIMO mensaje es del cliente (texto), sin respuesta >= 10 min, y el modo humano tampoco se fijó
+// en ese lapso; nunca con adjuntos ni con simples cierres de cortesía; una sola vez por mensaje.
+assert.match(worker, /const HUMAN_NO_RESPONSE_TAKEOVER_MS = 10 \* 60 \* 1000;/);
+assert.match(worker, /m\.created_at = \(SELECT MAX\(created_at\) FROM whatsapp_inbox_messages WHERE phone = s\.phone\)/);
+assert.match(worker, /m\.message_type = 'text'/);
+assert.match(worker, /s\.updated_at <= \?/);
+assert.match(worker, /claimInboundMessageForBot\(env, `retake:\$\{row\.message_id\}`\)/);
+assert.match(worker, /setBotSessionMode\(env, row\.phone, "bot", "auto_reactivated_unanswered"\)/);
+assert.match(worker, /const takeoverTask = takeOverUnansweredHumanChats\(env\)\.catch\(\(\) => null\);/);
+assert.match(worker, /const takeover = await takeOverUnansweredHumanChats\(env\)/);
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`
+    ${functionSource("cyberNormalize")}
+    ${functionSource("isClosingPleasantry")}
+    this.api = { isClosingPleasantry };
+  `, ctx);
+  for (const yes of ["Ya perfecto gracias", "Gracias", "ok listo", "Muchas gracias!", "👍 gracias"]) {
+    assert.equal(ctx.api.isClosingPleasantry(yes), true, yes);
+  }
+  for (const no of ["Buen día pago de Sergio catrileo jara", "Gracias pero sigo sin internet", "Hola", "Buenos días mi", "Algún ejecutivo para hablar"]) {
+    assert.equal(ctx.api.isClosingPleasantry(no), false, no);
+  }
+}
