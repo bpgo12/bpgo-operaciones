@@ -596,7 +596,11 @@ async function takeOverUnansweredHumanChats(env) {
   let taken = 0;
   for (const row of rows.results || []) {
     if (staffPhones.has(row.phone) || isClosingPleasantry(row.message_text)) continue;
-    if (!(await claimInboundMessageForBot(env, `retake:${row.message_id}`))) continue;
+    // OJO: runBotForInboundMessages ya hace su propio claim de `retake:<id>` (el id del mensaje sintético).
+    // Si acá se reclamara ese mismo id, el bot lo vería como "ya procesado" y saltaría el mensaje: la sesión
+    // volvía a modo bot pero NUNCA se respondía (bug real 2026-10-05, 56945234071). Por eso esta marca usa
+    // otra clave: solo impide que dos corridas retomen el mismo mensaje a la vez.
+    if (!(await claimInboundMessageForBot(env, `retake-claim:${row.message_id}`))) continue;
     await setBotSessionMode(env, row.phone, "bot", "auto_reactivated_unanswered");
     taken += 1;
     await runBotForInboundMessages(env, [{ value: { contacts: [{ profile: {} }], messages: [
