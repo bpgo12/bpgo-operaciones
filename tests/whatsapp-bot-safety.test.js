@@ -427,3 +427,28 @@ assert.match(worker, /if \(!alreadyHuman\) await setBotSessionMode\(env, message
 // la ventana de 24 h, sin depender de plantillas). Fuera de plazo no se promete el precio promocional.
 assert.match(worker, /const ack = response === "interested"\s*\n\s*\? "¡Excelente! 🎉 Recibimos tu solicitud[^"]*\$21\.990\/mes durante 6 meses[^"]*"\s*\n\s*: response === "human"[\s\S]{0,400}: "Gracias por escribirnos\. La promoción Cyber ya terminó;/);
 assert.match(worker, /await sendWhatsAppText\(env, credentials, message\.from, ack\)\.catch\(\(\) => null\);/);
+
+// Casos reales (2026-10-05): (1) un cliente en modo humano escribió pidiendo un ejecutivo y nadie se enteró
+// -> aviso a Carlos con cooldown; (2) en una prueba desde un número personal el bot repetía sin parar la lista
+// de planes y "no olvidaba" la conversación -> tope tras un recordatorio + comando para empezar de nuevo.
+assert.match(worker, /await alertStaffCustomerWroteInHumanMode\(env, credentials, phone, message\)\.catch\(\(\) => null\);\s*\n\s*continue;/);
+assert.match(worker, /case_type = 'Cliente en atención humana'/);
+assert.match(worker, /const HUMAN_MODE_ALERT_COOLDOWN_MIN = 60;/);
+assert.match(worker, /if \(\(planReminders\?\.n \|\| 0\) >= 1\) \{[\s\S]{0,300}te va a escribir un agente[\s\S]{0,600}setBotSessionMode\(env, phone, "human", "case_created_new_customer"\)/);
+assert.match(worker, /Ese plan no está disponible en tu sector\./);
+assert.match(worker, /if \(lastOut\?\.message_text !== FACTIBILIDAD_WAIT\)/);
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`
+    ${functionSource("cyberNormalize")}
+    ${functionSource("isRestartRequest")}
+    this.api = { isRestartRequest };
+  `, ctx);
+  for (const yes of ["Empezar de nuevo", "quiero volver a empezar", "reinicia la conversación", "olvida todo", "Desde cero por favor"]) {
+    assert.equal(ctx.api.isRestartRequest(yes), true, yes);
+  }
+  for (const no of ["reinicié el router", "ya hice el reinicio del router", "reinicia el router", "Quiero contratar", "Plan 30mb/s"]) {
+    assert.equal(ctx.api.isRestartRequest(no), false, no);
+  }
+}

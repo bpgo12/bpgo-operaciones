@@ -533,6 +533,33 @@ async function shouldAutoReactivate(env, phone, session, currentMessageId) {
   return Number.isFinite(lastActivityMs) && Date.now() - lastActivityMs >= AUTO_REACTIVATE_AFTER_MS;
 }
 
+// Caso real (2026-10-05, 56920144998): un cliente en modo humano escribió "Algún ejecutivo para hablar"
+// y durante ~13 minutos nadie respondió ni se enteró: con la conversación en modo humano el bot calla
+// (correcto), pero tampoco se avisaba a Carlos de que el cliente había escrito. Ahora llega UN aviso
+// por cliente cada hora como máximo, y ninguno si ya se le respondió hace menos de 30 minutos (es
+// decir, si un humano está atendiendo la conversación en este momento).
+const HUMAN_MODE_ALERT_COOLDOWN_MIN = 60;
+const HUMAN_MODE_RECENT_REPLY_MIN = 30;
+
+async function alertStaffCustomerWroteInHumanMode(env, credentials, phone, message) {
+  const recentAlert = await env.DB.prepare(
+    `SELECT 1 AS found FROM staff_notifications_log WHERE customer_phone = ? AND case_type = 'Cliente en atención humana'
+     AND created_at > datetime('now', ?) LIMIT 1`
+  ).bind(phone, `-${HUMAN_MODE_ALERT_COOLDOWN_MIN} minutes`).first();
+  if (recentAlert) return false;
+  const lastOutbound = await env.DB.prepare(
+    "SELECT created_at FROM whatsapp_inbox_messages WHERE phone = ? AND direction = 'outbound' ORDER BY created_at DESC LIMIT 1"
+  ).bind(phone).first();
+  const lastOutboundMs = lastOutbound?.created_at ? parseSqliteDatetime(lastOutbound.created_at) : NaN;
+  if (Number.isFinite(lastOutboundMs) && Date.now() - lastOutboundMs < HUMAN_MODE_RECENT_REPLY_MIN * 60 * 1000) return false;
+  const text = String(inboundMessageText(message) || "").trim();
+  const name = await getKnownAccountName(env, phone).catch(() => null);
+  await notifyStaff(env, credentials, "carlos", "Cliente en atención humana", name, phone,
+    text ? `Escribió y el bot no responde porque la conversación está en atención humana: "${text.slice(0, 180)}"` : "Escribió (adjunto o mensaje sin texto) y el bot no responde porque la conversación está en atención humana.",
+    { sourceMessageId: message.id });
+  return true;
+}
+
 async function setBotSessionMode(env, phone, mode, reason, actor) {
   await ensureWhatsAppBotTables(env);
   const userId = actor?.userId ? String(actor.userId) : null;
@@ -1004,7 +1031,15 @@ function formatPlanReminderMessage(groupKey) {
   const group = PLAN_GROUPS[groupKey];
   if (!group) return null;
   const lines = group.plans.map((p) => `• ${p.speed} — $${p.price.toLocaleString("es-CL")}/mes`).join("\n");
-  return `Para continuar, respóndeme con el plan que prefieras:\n${lines}\n\n¿Cuál plan te gustaría contratar?`;
+  return `${PLAN_REMINDER_MARKER}:\n${lines}\n\n¿Cuál plan te gustaría contratar?`;
+}
+const PLAN_REMINDER_MARKER = "Para continuar, respóndeme con el plan que prefieras";
+
+// Una persona puede pedir "empezar de nuevo" en medio de cualquier conversación del embudo de venta
+// (caso real 2026-10-05: el bot quedó "pegado" en la lista de planes y no olvidaba lo hablado).
+function isRestartRequest(text) {
+  // Frases explícitas a propósito: "reiniciar/reinicio" a secas se usa con el router en el soporte técnico.
+  return /\b(empezar de nuevo|comenzar de nuevo|volver a empezar|desde cero|nueva conversacion|reiniciar (la )?conversacion|reinicia (la )?conversacion|olvida (todo|lo que))\b/.test(cyberNormalize(text));
 }
 
 // Mismo caso real: la clienta en realidad estaba preguntando algo ("¿debo cancelar en el momento
@@ -1749,6 +1784,7 @@ async function runBotForInboundMessages(env, changes) {
             // El mensaje ya fue guardado en la bandeja. Mientras un humano tenga la conversación
             // (y no se cumplan las condiciones de reactivación automática de arriba), nunca se
             // llama a la IA ni se responde; "Reactivar bot" también puede devolverla al bot.
+            await alertStaffCustomerWroteInHumanMode(env, credentials, phone, message).catch(() => null);
             continue;
           }
         }
@@ -1775,6 +1811,12 @@ async function runBotForInboundMessages(env, changes) {
         const salesLead = await env.DB.prepare(
           "SELECT * FROM whatsapp_sales_leads WHERE phone = ? AND status NOT IN ('completed','cancelled','no_factibilidad') ORDER BY created_at DESC LIMIT 1"
         ).bind(phone).first();
+        if (String(text || "").trim() && isRestartRequest(text)) {
+          await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'cancelled', updated_at = datetime('now') WHERE phone = ? AND status NOT IN ('completed','cancelled','no_factibilidad')").bind(phone).run();
+          await env.DB.prepare("DELETE FROM whatsapp_pending_visits WHERE phone = ?").bind(phone).run();
+          await sendBotReply(env, credentials, phone, "Listo, empecemos de nuevo. 😊 ¿En qué te puedo ayudar?", preferAudio);
+          continue;
+        }
         // Duda sobre cómo se paga la instalación: respuesta fija con la política real, sin pasar por la
         // IA ni por el embudo (que la leería como dato de instalación). Dentro del embudo, un "¿y eso se
         // paga en la boleta?" sin mencionar la palabra instalación también es esta misma duda.
@@ -1824,7 +1866,10 @@ async function runBotForInboundMessages(env, changes) {
             continue;
           }
           if (salesLead.status === "awaiting_factibilidad") {
-            await sendBotReply(env, credentials, phone, "Seguimos revisando la factibilidad en tu sector, en breve te contactamos. 🙏", preferAudio);
+            // Se dice una sola vez: si ya fue lo último que se le escribió, no se repite igual.
+            const FACTIBILIDAD_WAIT = "Seguimos revisando la factibilidad en tu sector, en breve te contactamos. 🙏";
+            const lastOut = await env.DB.prepare("SELECT message_text FROM whatsapp_inbox_messages WHERE phone = ? AND direction = 'outbound' ORDER BY created_at DESC LIMIT 1").bind(phone).first();
+            if (lastOut?.message_text !== FACTIBILIDAD_WAIT) await sendBotReply(env, credentials, phone, FACTIBILIDAD_WAIT, preferAudio);
             continue;
           }
           if (salesLead.status === "awaiting_plan" && String(text || "").trim()) {
@@ -1840,7 +1885,24 @@ async function runBotForInboundMessages(env, changes) {
                 `Cliente con factibilidad confirmada, antes de elegir plan preguntó: "${text}"`, { sourceMessageId: message.id });
               await setBotSessionMode(env, phone, "human", "case_created_new_customer");
             } else {
-              await sendBotReply(env, credentials, phone, formatPlanReminderMessage(salesLead.plan_group), preferAudio);
+              // Caso real (2026-10-05, prueba desde un número personal): ante "Quiero contratar", "Plan
+              // 30mb/s" y "Soy de Peleco" el bot repetía la misma lista de planes sin parar. Tras un
+              // primer recordatorio se escala a un agente (con lo que escribió el cliente) en vez de
+              // insistir; y si pidió una velocidad que no existe en su sector, se le dice eso primero.
+              const planReminders = await env.DB.prepare(`SELECT COUNT(*) AS n FROM whatsapp_inbox_messages
+                WHERE phone = ? AND direction = 'outbound' AND message_text LIKE ? AND created_at >= replace(?, ' ', 'T')`)
+                .bind(phone, `%${PLAN_REMINDER_MARKER}%`, salesLead.created_at).first();
+              if ((planReminders?.n || 0) >= 1) {
+                await sendBotReply(env, credentials, phone, "Para ayudarte mejor, te va a escribir un agente por acá en breve. 🙏", preferAudio);
+                await notifyStaff(env, credentials, "carlos", "Consulta de venta", salesLead.customer_name, phone,
+                  `Cliente con factibilidad confirmada no logra elegir plan (sector: ${salesLead.sector || "no indicado"}); escribió: "${String(text).trim().slice(0, 150)}"`, { sourceMessageId: message.id });
+                await setBotSessionMode(env, phone, "human", "case_created_new_customer");
+              } else {
+                const asked = String(text).toLowerCase().replace(/[.,]/g, "").match(/(\d+)\s*mb/);
+                const offered = PLAN_GROUPS[salesLead.plan_group]?.plans.some((p) => parseInt(p.speed, 10) === Number(asked?.[1]));
+                const prefix = asked && !offered ? `Ese plan no está disponible en tu sector. ` : "";
+                await sendBotReply(env, credentials, phone, `${prefix}${formatPlanReminderMessage(salesLead.plan_group)}`, preferAudio);
+              }
             }
             continue;
           }
