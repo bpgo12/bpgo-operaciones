@@ -31,7 +31,9 @@ function functionSource(name) {
 assert.doesNotMatch(worker, /setBotSessionMode\(env, phone, "bot", "auto_reactivated_on_reply"\)/);
 assert.match(worker, /const AUTO_REACTIVATABLE_REASONS = new Set\(\["manual_reply", "manual_whatsapp_reply", "manual_takeover"\]\)/);
 assert.match(worker, /async function shouldAutoReactivate\(env, phone, session, currentMessageId\)/);
-assert.match(worker, /if \(!session \|\| session\.mode !== "human" \|\| !AUTO_REACTIVATABLE_REASONS\.has\(session\.escalation_reason\)\) return false;/);
+assert.match(worker, /if \(!session \|\| session\.mode !== "human"\) return false;/);
+assert.match(worker, /if \(!AUTO_REACTIVATABLE_REASONS\.has\(session\.escalation_reason\)\) return false;/);
+assert.match(worker, /const STALE_HUMAN_LOCK_MS = 6 \* 60 \* 60 \* 1000;/);
 assert.match(worker, /WHERE phone = \? AND message_id != \? ORDER BY created_at DESC LIMIT 1/);
 assert.match(worker, /if \(sessionRow\?\.mode === "human"\) \{[\s\S]*?shouldAutoReactivate[\s\S]*?continue;[\s\S]*?\}/);
 assert.match(worker, /if \(await getBotSessionMode\(env, message\.from\) !== "human"\) \{[\s\S]*?createAutomationCase/);
@@ -57,6 +59,8 @@ vm.createContext(context);
 vm.runInContext(`
   const AUTO_REACTIVATABLE_REASONS = new Set(["manual_reply", "manual_whatsapp_reply", "manual_takeover"]);
   const AUTO_REACTIVATE_AFTER_MS = 45 * 60 * 1000;
+  const STALE_HUMAN_LOCK_MS = 6 * 60 * 60 * 1000;
+  ${functionSource("parseSqliteDatetime")}
   async ${functionSource("shouldAutoReactivate")}
   this.shouldAutoReactivate = shouldAutoReactivate;
 `, context);
@@ -86,6 +90,18 @@ async function main() {
   // Caso de negocio pendiente de revisión -> NUNCA reactiva, sin importar cuánto tiempo pase.
   for (const reason of ["case_created_payment", "case_created_visit", "case_created_billing", "case_created_new_customer", "bot_escalated", "cyber_upgrade_interested", "cyber_upgrade_human", "cyber_upgrade_expired"]) {
     assert.equal(await context.shouldAutoReactivate(fakeEnv(oldIso), "56900000000", { mode: "human", escalation_reason: reason }, "msg1"), false, `${reason} must never auto-reactivate`);
+  }
+  // Bloqueo OLVIDADO (2026-10-06, 56948037190): un caso de negocio congelado hace días y sin ninguna actividad
+  // reciente ya no es una conversación atendida -> el bot retoma. Con actividad reciente, o una sesión
+  // fijada hace poco, sigue congelado.
+  const longAgo = new Date(Date.now() - 16 * 24 * 3600 * 1000).toISOString().replace("T", " ").slice(0, 19);
+  const justNow = new Date(Date.now() - 20 * 60 * 1000).toISOString().replace("T", " ").slice(0, 19);
+  const tenHoursAgoIso = new Date(Date.now() - 10 * 3600 * 1000).toISOString();
+  for (const reason of ["case_created_payment", "case_created_visit", "bot_escalated", "cyber_upgrade_interested"]) {
+    assert.equal(await context.shouldAutoReactivate(fakeEnv(tenHoursAgoIso), "56900000000", { mode: "human", escalation_reason: reason, updated_at: longAgo }, "msg1"), true, `${reason} stale lock must release`);
+    assert.equal(await context.shouldAutoReactivate(fakeEnv(oldIso), "56900000000", { mode: "human", escalation_reason: reason, updated_at: longAgo }, "msg1"), false, `${reason} with activity under 6h stays frozen`);
+    assert.equal(await context.shouldAutoReactivate(fakeEnv(recentIso), "56900000000", { mode: "human", escalation_reason: reason, updated_at: longAgo }, "msg1"), false, `${reason} with recent activity stays frozen`);
+    assert.equal(await context.shouldAutoReactivate(fakeEnv(oldIso), "56900000000", { mode: "human", escalation_reason: reason, updated_at: justNow }, "msg1"), false, `${reason} just set stays frozen`);
   }
   // Ya en modo bot -> no aplica.
   assert.equal(await context.shouldAutoReactivate(fakeEnv(oldIso), "56900000000", { mode: "bot", escalation_reason: "manual_reply" }, "msg1"), false);

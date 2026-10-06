@@ -565,13 +565,24 @@ const AUTO_REACTIVATE_AFTER_MS = 45 * 60 * 1000;
 // para no reactivar el bot mientras un humano sigue escribiendo activamente.
 const AUTO_REACTIVATABLE_REASONS = new Set(["manual_reply", "manual_whatsapp_reply", "manual_takeover"]);
 
+// Caso real (2026-10-06, 56948037190): una conversación quedó "congelada" por un comprobante el 20 de septiembre y
+// 16 días después la clienta escribió "Abra alguna cuenta para pagar mi plan" y el bot calló. Un bloqueo humano
+// que lleva horas sin NINGUNA actividad (ni del cliente ni del equipo) ya no es una conversación atendida: es un
+// bloqueo olvidado. Con cualquier motivo, si pasaron STALE_HUMAN_LOCK_MS sin actividad, el bot retoma al tiro.
+const STALE_HUMAN_LOCK_MS = 6 * 60 * 60 * 1000;
+
 async function shouldAutoReactivate(env, phone, session, currentMessageId) {
-  if (!session || session.mode !== "human" || !AUTO_REACTIVATABLE_REASONS.has(session.escalation_reason)) return false;
+  if (!session || session.mode !== "human") return false;
   const lastMessage = await env.DB.prepare(
     "SELECT created_at FROM whatsapp_inbox_messages WHERE phone = ? AND message_id != ? ORDER BY created_at DESC LIMIT 1"
   ).bind(phone, currentMessageId || "").first();
+  const lastActivityMs = lastMessage ? Date.parse(lastMessage.created_at) : NaN;
+  const sessionMs = parseSqliteDatetime(session.updated_at);
+  const staleLock = Number.isFinite(sessionMs) && Date.now() - sessionMs >= STALE_HUMAN_LOCK_MS
+    && (!Number.isFinite(lastActivityMs) || Date.now() - lastActivityMs >= STALE_HUMAN_LOCK_MS);
+  if (staleLock) return true;
+  if (!AUTO_REACTIVATABLE_REASONS.has(session.escalation_reason)) return false;
   if (!lastMessage) return false;
-  const lastActivityMs = Date.parse(lastMessage.created_at);
   return Number.isFinite(lastActivityMs) && Date.now() - lastActivityMs >= AUTO_REACTIVATE_AFTER_MS;
 }
 
@@ -610,7 +621,7 @@ async function alertStaffCustomerWroteInHumanMode(env, credentials, phone, messa
 // no pisar a alguien que acaba de tomar el chat desde el panel), el bot vuelve y responde ESE mensaje.
 // Los adjuntos (posibles comprobantes) nunca se reprocesan así. Se evalúa al final de cada webhook de Meta
 // y en la corrida de 10 minutos de GitHub Actions; claimInboundMessageForBot impide responder dos veces.
-const HUMAN_NO_RESPONSE_TAKEOVER_MS = 10 * 60 * 1000;
+const HUMAN_NO_RESPONSE_TAKEOVER_MS = 5 * 60 * 1000;
 // 23 h: pasada la ventana de 24 h de WhatsApp ya no se puede escribir texto libre (solo plantillas), así que
 // no tiene sentido intentar más allá.
 const HUMAN_NO_RESPONSE_MAX_AGE_MS = 23 * 60 * 60 * 1000;
