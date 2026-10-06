@@ -456,7 +456,7 @@ assert.match(worker, /if \(lastOut\?\.message_text !== FACTIBILIDAD_WAIT\)/);
 // Regla de Carlos (2026-10-05): si nadie atiende a un cliente en modo humano por unos minutos, el bot retoma.
 // Solo si el ÚLTIMO mensaje es del cliente (texto), sin respuesta >= 10 min, y el modo humano tampoco se fijó
 // en ese lapso; nunca con adjuntos ni con simples cierres de cortesía; una sola vez por mensaje.
-assert.match(worker, /const HUMAN_NO_RESPONSE_TAKEOVER_MS = 10 \* 60 \* 1000;/);
+assert.match(worker, /const HUMAN_NO_RESPONSE_TAKEOVER_MS = 5 \* 60 \* 1000;/);
 assert.match(worker, /m\.created_at = \(SELECT MAX\(created_at\) FROM whatsapp_inbox_messages WHERE phone = s\.phone\)/);
 assert.match(worker, /m\.message_type = 'text'/);
 assert.match(worker, /s\.updated_at <= \?/);
