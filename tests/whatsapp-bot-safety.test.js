@@ -591,3 +591,30 @@ assert.match(worker, /if \(pdfUnread\) \{ parsed\.receipt_evidence = \[\]/);
 assert.match(worker, /transaction_id: \{ type: "string"/);
 assert.match(worker, /mediaMime: media\?\.mimeType \|\| null/);
 assert.match(worker, /`Comprobante recibido\. \$\{receiptCheck\}`/);
+
+// Muestra real de respuestas del bot (2026-10-06): nota interna filtrada al cliente, promesa de llegada del
+// técnico, saludo respondido con la frase robótica prohibida y "Necesito el nombre del titular" repetido ante
+// cualquier mensaje.
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`
+    ${functionSource("cyberNormalize")}
+    ${functionSource("botTextProblem")}
+    ${functionSource("isPureGreeting")}
+    this.api = { botTextProblem, isPureGreeting };
+  `, ctx);
+  assert.equal(ctx.api.botTextProblem("El cliente quiere hablar con un ejecutivo y menciona que no recibió respuesta a su consulta de ayer."), "internal_note");
+  assert.equal(ctx.api.botTextProblem("Quedó registrada la solicitud. Un técnico llegará a tu domicilio mañana en la mañana. 👍"), "schedule_promise");
+  assert.equal(ctx.api.botTextProblem("De nada, Francisco. ¡Nos vemos mañana con el técnico! 🛠️"), "schedule_promise");
+  assert.equal(ctx.api.botTextProblem("Un técnico te contactará hoy"), "schedule_promise");
+  assert.equal(ctx.api.botTextProblem("Registramos tu solicitud de visita técnica, un agente te confirmará el horario. 🙌"), null);
+  assert.equal(ctx.api.botTextProblem("Reinicia el router por 2 minutos y cuéntame cómo sigue."), null);
+  for (const yes of ["Buenas tardes", "Hola", "hola buenas", "Buen día", "Buenos días!"]) assert.equal(ctx.api.isPureGreeting(yes), true, yes);
+  for (const no of ["Hola, no tengo internet", "Buenas tardes quiero pagar", "Consulta cuanto sale una caja repetidora"]) assert.equal(ctx.api.isPureGreeting(no), false, no);
+}
+assert.match(worker, /action = action\.action === "reply" \? \{ action: "escalate", reason: `bot_text_blocked_\$\{textProblem\}` \}/);
+assert.doesNotMatch(worker, /sendBotReply\(env, credentials, phone, action\.text \|\| "Ya te comunico con un agente/);
+assert.match(worker, /NUNCA prometas ni confirmes el día u hora en que llegará un técnico/);
+assert.match(worker, /if \(\(asked\?\.n \|\| 0\) < 2\) \{/);
+assert.equal((worker.match(/askForAccountNameOrHandOff\(env, credentials, phone, text, message, preferAudio\)/g) || []).length, 4); // definición + 3 usos

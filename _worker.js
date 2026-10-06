@@ -1314,6 +1314,7 @@ Reglas duras, nunca las rompas:
 - Reserva la acción "escalate" solo para: el cliente pide explícitamente hablar con una persona, insulta, hace un reclamo grave, o pregunta algo puntual que no sabes con certeza (fuera de las FAQs y de los datos de cliente dados). Si el mensaje es corto, ambiguo, tiene errores de tipeo, o simplemente no lo entiendes (ej. "hol", una palabra suelta, algo cortado), NUNCA escales por eso solo: usa "reply" y pide amablemente que repita o aclare qué necesita. Escala únicamente si ya pediste aclaración y el cliente sigue sin poder comunicar lo que necesita.
 - Si el cliente escribe porque quiere CONTRATAR internet por primera vez (no es cliente ya identificado, o pide un nuevo punto/dirección), usa la acción "new_customer_request" y no digas nada más tú: el sistema se encarga de preguntar el sector, pedir la ubicación, revisar factibilidad con el equipo y mostrar los planes, todo por su cuenta. Esto incluye cuando el cliente responde a un aviso/campaña de zona nueva habilitada (ej. "sí", "qué valores tiene", "quiero agendar") y cuando pregunta por precios o planes SIN estar identificado como cliente -- en ambos casos usa "new_customer_request", NUNCA cotices un plan o precio de memoria ni con las FAQs: los precios dependen del sector exacto (hay más de un tarifario) y solo el flujo determinístico sabe cuál corresponde una vez que el cliente dice su sector.
 - Cuando el cliente deja claro que quiere instalarse, conectarse, o retomar/resolver una visita de instalación que quedó pendiente (aunque la situación sea confusa: un cupo, una instalación a medias, alguien de la familia que no estaba), no encadenes varias preguntas parafraseando lo mismo ("¿te refieres a...?", "entiendo que... ¿quieres que...?") en mensajes separados -- quédate con la interpretación más razonable de lo que ya dijo y avanza directo con energía de venta hacia el siguiente paso concreto (qué falta para agendar, qué dato necesitas, confirmar la visita), en vez de sonar administrativo o darle vueltas pidiendo que aclare algo que ya quedó claro.
+- NUNCA prometas ni confirmes el día u hora en que llegará un técnico ("mañana", "hoy", "en la mañana", etc.): solo di que la solicitud quedó registrada y que un agente confirmará el horario. NUNCA inventes políticas, plazos o reglas de la empresa (por ejemplo "no se pueden cambiar las fechas de pago", cupos o promociones): si algo no está en las FAQs ni en los datos del cliente, usa "escalate". El campo "text" es siempre el mensaje DIRIGIDO al cliente, nunca una nota sobre él ("el cliente quiere...").
 - NUNCA menciones saldo, deuda, monto pendiente, estado de pago ni vencimiento si en el mensaje ACTUAL el cliente no preguntó por pagos o cobranza. Si el cliente reporta una falla de internet o responde una pregunta de identificación (por ejemplo solo su nombre), continúa con SU problema: confirma lo que dijo y sigue el flujo técnico o de visita; no cambies de tema a su cuenta.
 - Política de pago de la INSTALACIÓN (única versión válida, nunca la contradigas ni la inventes distinta): el costo de instalación ($25.000) más el mes de servicio por adelantado, calculado proporcional a los días que resten del mes, se pagan AL MOMENTO DE LA INSTALACIÓN. NUNCA se cobran en la boleta ni se difieren al primer mes de servicio. Si el cliente pregunta si la instalación o su costo "se paga en la boleta", responde claramente que NO. Si dudas de cualquier otro detalle de cómo se cobra una instalación, usa "escalate" en vez de inventar.
 - Para todo lo demás (preguntas frecuentes, saludos, consultas generales que sí puedes responder con las FAQs dadas), usa la acción "reply".
@@ -1439,6 +1440,8 @@ async function callBotResponder(env, context, inboundMessage, media) {
   if (isBalanceQuestion(inboundMessage?.text)) return authoritativeBalanceAction(context.customer);
   const courtesy = briefCourtesyReply(inboundMessage?.text);
   if (courtesy) return { action: "reply", text: courtesy };
+  // Un saludo suelto recibía de la IA "¿En qué puedo ayudar hoy?", justo la frase robótica que el propio prompt prohíbe.
+  if (isPureGreeting(inboundMessage?.text)) return { action: "reply", text: "¡Hola! 😊 Cuéntame, ¿qué necesitas?" };
   const externalPayment = externalConnectivityPaymentReply(inboundMessage?.text);
   if (externalPayment) return { action: "reply", text: externalPayment };
   if (cancellationMeansPayment(inboundMessage?.text, context.history)) {
@@ -1617,6 +1620,11 @@ function mentionsTechnicalIssueOrVisit(text) {
 
 async function executeBotAction(env, credentials, phone, action, message) {
   const preferAudio = Boolean(message.preferAudio);
+  const textProblem = action.text ? botTextProblem(action.text) : null;
+  if (textProblem) {
+    console.error("bot_text_blocked", textProblem);
+    action = action.action === "reply" ? { action: "escalate", reason: `bot_text_blocked_${textProblem}` } : { ...action, text: undefined };
+  }
   if (action.action === "reply" && action.text) {
     // Nunca dejar que el bot mencione un monto/descuento cuando el cliente habla de días sin
     // servicio, aunque el modelo lo intente: se reemplaza por la pregunta segura de días sin
@@ -1772,7 +1780,8 @@ async function executeBotAction(env, credentials, phone, action, message) {
   }
   if (action.action === "escalate") {
     await setBotSessionMode(env, phone, "human", action.reason || "bot_escalated");
-    await sendBotReply(env, credentials, phone, action.text || "Ya te comunico con un agente de BPGO, en breve te responde por acá. 🙌", preferAudio);
+    // Siempre el texto fijo: la IA a veces rellena `text` con su nota interna sobre el cliente (tercera persona).
+    await sendBotReply(env, credentials, phone, "Ya te comunico con un agente de BPGO, en breve te responde por acá. 🙌", preferAudio);
     const escalatedName = await getKnownAccountName(env, phone);
     await notifyStaff(env, credentials, "carlos", "Conversación escalada", escalatedName, phone, action.reason || "El bot no pudo resolver la consulta.", { sourceMessageId: message.messageId });
     return;
@@ -1869,6 +1878,48 @@ function isLikelyAutoReply(text) {
   const normalized = cyberNormalize(text);
   if (!normalized) return false;
   return /\b(mensaje automatico|respuesta automatica|este es un mensaje automatico|no responder a este mensaje|descubre las ofertas|que alegria verte por aca|te avisaremos en otra ocasion|ofertas exclusivas para ti|fuera de(l)? horario de atencion|nuestro horario de atencion es|gracias por contactar(nos| a)|hemos recibido tu mensaje|te responderemos a la brevedad|en este momento no (podemos|estamos))\b/.test(normalized);
+}
+
+// Caso real (2026-10-06, 56985843355 y 56987480455): con una visita/comprobante pendiente de nombre, CUALQUIER
+// mensaje del cliente ("Buenas tardes", "Consulta cuánto sale una repetidora", "Podrían revisar qué pasa")
+// recibía de vuelta "Necesito el nombre del titular...", una y otra vez, sin atender lo que preguntaba. Se
+// pide el nombre como máximo 2 veces en 30 minutos; después se suelta el trámite pendiente y lo toma una
+// persona, con lo que el cliente escribió.
+const NAME_REQUEST_TEXT = "Necesito el nombre del titular del servicio, por ejemplo: Juan Pérez.";
+
+async function askForAccountNameOrHandOff(env, credentials, phone, text, message, preferAudio) {
+  const asked = await env.DB.prepare(`SELECT COUNT(*) AS n FROM whatsapp_inbox_messages WHERE phone = ? AND direction = 'outbound'
+    AND message_text = ? AND created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-30 minutes')`).bind(phone, NAME_REQUEST_TEXT).first();
+  if ((asked?.n || 0) < 2) {
+    await sendBotReply(env, credentials, phone, NAME_REQUEST_TEXT, preferAudio);
+    return;
+  }
+  for (const table of ["whatsapp_pending_visits", "whatsapp_pending_payments", "whatsapp_pending_billing"]) {
+    await env.DB.prepare(`DELETE FROM ${table} WHERE phone = ?`).bind(phone).run().catch(() => null);
+  }
+  await sendBotReply(env, credentials, phone, "Para ayudarte mejor, te va a escribir un agente por acá en breve. 🙏", preferAudio);
+  await notifyStaff(env, credentials, "carlos", "Conversación escalada", await getKnownAccountName(env, phone).catch(() => null), phone,
+    `No se logró obtener el nombre del titular tras pedirlo 2 veces; el cliente escribió: "${String(text || "").trim().slice(0, 150)}"`, { sourceMessageId: message.id });
+  await setBotSessionMode(env, phone, "human", "bot_escalated");
+}
+
+// Caso real (2026-10-06): la IA mandó al cliente su nota interna en tercera persona ("El cliente quiere hablar
+// con un ejecutivo y menciona que no recibió respuesta...") y prometió "Un técnico llegará a tu domicilio
+// mañana en la mañana", horario que nadie confirmó. Se bloquea cualquier texto de la IA que hable del cliente
+// en tercera persona o que prometa una hora/día de llegada del técnico.
+function botTextProblem(text) {
+  const value = String(text || "");
+  if (/\b(el|la) cliente\b/i.test(value)) return "internal_note";
+  const normalized = cyberNormalize(value);
+  if (/\b(tecnico|visita)\b.{0,80}\b(manana|hoy|esta tarde|esta noche|en la tarde|a las \d)/.test(normalized)
+    || /\b(manana|hoy|esta tarde|esta noche|a las \d).{0,80}\b(tecnico|visita)\b/.test(normalized)
+    || /\bnos vemos (manana|hoy)\b/.test(normalized)) return "schedule_promise";
+  return null;
+}
+
+function isPureGreeting(text) {
+  const normalized = cyberNormalize(text).replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim();
+  return /^(hola|holi|ola|buenas|buenos dias|buen dia|buenas tardes|buenas noches|hola buenas|hola buenos dias|hola buen dia|hola buenas tardes|hola buenas noches)$/.test(normalized);
 }
 
 async function guardAgainstBotLoop(env, credentials, phone, message) {
@@ -2163,7 +2214,7 @@ async function runBotForInboundMessages(env, changes) {
           }
           const reportedName = extractAccountName(text);
           if (!isPlausibleAccountName(reportedName)) {
-            await sendBotReply(env, credentials, phone, "Necesito el nombre del titular del servicio, por ejemplo: Juan Pérez.", preferAudio);
+            await askForAccountNameOrHandOff(env, credentials, phone, text, message, preferAudio);
             continue;
           }
           const customer = await findCustomerForWhatsApp(env, phone, reportedName);
@@ -2188,7 +2239,7 @@ async function runBotForInboundMessages(env, changes) {
           }
           const reportedName = extractAccountName(text);
           if (!isPlausibleAccountName(reportedName)) {
-            await sendBotReply(env, credentials, phone, "Necesito el nombre del titular del servicio, por ejemplo: Juan Pérez.", preferAudio);
+            await askForAccountNameOrHandOff(env, credentials, phone, text, message, preferAudio);
             continue;
           }
           if (pendingPayment.case_id) {
@@ -2216,7 +2267,7 @@ async function runBotForInboundMessages(env, changes) {
           }
           const reportedName = extractAccountName(text);
           if (!isPlausibleAccountName(reportedName)) {
-            await sendBotReply(env, credentials, phone, "Necesito el nombre del titular del servicio, por ejemplo: Juan Pérez.", preferAudio);
+            await askForAccountNameOrHandOff(env, credentials, phone, text, message, preferAudio);
             continue;
           }
           const customer = await findCustomerForWhatsApp(env, phone, reportedName);
