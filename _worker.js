@@ -563,7 +563,7 @@ const AUTO_REACTIVATE_AFTER_MS = 45 * 60 * 1000;
 // congelados hasta reactivación manual, tal como antes. Se exige además que haya pasado el tiempo
 // mínimo desde la ÚLTIMA actividad real de la conversación (no desde que se activó el modo humano),
 // para no reactivar el bot mientras un humano sigue escribiendo activamente.
-const AUTO_REACTIVATABLE_REASONS = new Set(["manual_reply", "manual_whatsapp_reply", "manual_takeover"]);
+const AUTO_REACTIVATABLE_REASONS = new Set(["manual_reply", "manual_whatsapp_reply", "manual_takeover", "bot_exception"]);
 
 // Caso real (2026-10-06, 56948037190): una conversación quedó "congelada" por un comprobante el 20 de septiembre y
 // 16 días después la clienta escribió "Abra alguna cuenta para pagar mi plan" y el bot calló. Un bloqueo humano
@@ -1229,7 +1229,12 @@ function matchChosenPlan(groupKey, text) {
   }
   const anyNumber = normalizedNoSep.match(/(\d+)/);
   if (!anyNumber) return null;
-  return group.plans.find((p) => parseInt(p.speed, 10) === Number(anyNumber[1])) || null;
+  const bySpeed = group.plans.find((p) => parseInt(p.speed, 10) === Number(anyNumber[1]));
+  if (bySpeed) return bySpeed;
+  // Caso real (2026-10-06, 56962138241): "El de 25" era el plan de $25.000. Un número chico suelto que no es
+  // una velocidad del sector se interpreta como el precio en miles ("el de 25" = $25.000, "el de 18" = $18.000).
+  const thousands = Number(anyNumber[1]) * 1000;
+  return group.plans.find((p) => p.price === thousands) || null;
 }
 
 function planConfirmationMessage(plan) {
@@ -2340,8 +2345,17 @@ async function runBotForInboundMessages(env, changes) {
           customerName: name, messageId: message.id, preferAudio, customerText: text,
           mediaId, mediaType, mediaMime: media?.mimeType || null,
         });
-      } catch {
+      } catch (error) {
+        // Caso real (2026-10-06, 56962138241): "El de 25" dejó la conversación en silencio con un
+        // bot_exception y nadie supo por qué. Ahora el error queda en el log y llega a Carlos con el
+        // detalle; la conversación pasa a humano (como antes) y, al ser un fallo del bot y no una
+        // decisión humana, el bot la retoma sola (ver AUTO_REACTIVATABLE_REASONS y la retoma de 5 min).
+        const detail = String(error?.message || error).replace(/\s+/g, " ").slice(0, 160);
+        console.error("bot_exception", phone, detail);
         await setBotSessionMode(env, phone, "human", "bot_exception").catch(() => null);
+        await notifyStaff(env, credentials, "carlos", "Error del bot", await getKnownAccountName(env, phone).catch(() => null), phone,
+          `El bot falló al responder (${detail}). Se pausó esta conversación; el bot la retoma solo en unos minutos.`,
+          { sourceMessageId: message.id }).catch(() => null);
       }
     }
   }

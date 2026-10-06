@@ -622,3 +622,28 @@ assert.doesNotMatch(worker, /sendBotReply\(env, credentials, phone, action\.text
 assert.match(worker, /NUNCA prometas ni confirmes el día u hora en que llegará un técnico/);
 assert.match(worker, /if \(\(asked\?\.n \|\| 0\) < 2\) \{/);
 assert.equal((worker.match(/askForAccountNameOrHandOff\(env, credentials, phone, text, message, preferAudio\)/g) || []).length, 4); // definición + 3 usos
+
+// Caso real (2026-10-06, 56962138241): el cliente contestó "El de 25" a los planes de $18.000 y $25.000 (30 y 50 Mb/s);
+// no calzaba con ninguna velocidad y la conversación quedó en silencio (además un bot_exception sin explicación).
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`
+    const PLAN_GROUPS = {
+      otros: { plans: [{ speed: "30mb/s", price: 18000 }, { speed: "50mb/s", price: 25000 }] },
+      cayucupil: { plans: [{ speed: "100mb/s", price: 18000 }, { speed: "300mb/s", price: 25000 }, { speed: "500mb/s", price: 30000 }] },
+    };
+    ${functionSource("matchChosenPlan")}
+    this.api = { matchChosenPlan };
+  `, ctx);
+  assert.equal(ctx.api.matchChosenPlan("otros", "El de 25").price, 25000);
+  assert.equal(ctx.api.matchChosenPlan("otros", "el de 18").price, 18000);
+  assert.equal(ctx.api.matchChosenPlan("otros", "el de 50").speed, "50mb/s", "una velocidad real gana sobre el precio en miles");
+  assert.equal(ctx.api.matchChosenPlan("otros", "el de 30").speed, "30mb/s");
+  assert.equal(ctx.api.matchChosenPlan("cayucupil", "el de 25").speed, "300mb/s");
+  assert.equal(ctx.api.matchChosenPlan("cayucupil", "el de 30").speed, "500mb/s");
+  assert.equal(ctx.api.matchChosenPlan("otros", "300mb"), null);
+  assert.equal(ctx.api.matchChosenPlan("otros", "quiero contratar"), null);
+}
+assert.match(worker, /console\.error\("bot_exception", phone, detail\);/);
+assert.match(worker, /"Error del bot"/);
