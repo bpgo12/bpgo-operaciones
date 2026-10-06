@@ -3357,9 +3357,269 @@ async function verifySalesFollowUpOidc(request) {
   return verifyGithubActionsOidc(request, { audience: "bpgo-sales-followup", workflowPath: "sales-lead-followup.yml" });
 }
 
+// ===== Webpay Plus (Transbank) =====
+// Portal público /pagar: el cliente se identifica con su teléfono (la planilla no tiene RUT), ve lo que debe,
+// paga con Webpay Plus y, al aprobarse, el sistema marca el mes como Pagado SOLO si el monto cobrado coincide.
+// Seguridad: el monto lo calcula SIEMPRE el servidor desde la planilla (el navegador solo envía qué meses
+// quiere pagar), el commit se hace una sola vez por transacción, y por defecto se usa el AMBIENTE DE PRUEBAS de
+// Transbank, en el que NUNCA se aplica ningún pago a la planilla (las tarjetas de prueba no cobran dinero real).
+// Producción exige TRANSBANK_ENV=production + TRANSBANK_COMMERCE_CODE + TRANSBANK_API_KEY (secretos de Cloudflare).
+const WEBPAY_INTEGRATION = Object.freeze({
+  base: "https://webpay3gint.transbank.cl",
+  // Credenciales PÚBLICAS de pruebas publicadas por Transbank en su documentación; no son secretos de BPGO.
+  commerceCode: "597055555532",
+  apiKey: "579B532A7440BB0C9079DED94D31EA1615BACEB56610332264630D42D0A36B1C",
+});
+const WEBPAY_PRODUCTION_BASE = "https://webpay3g.transbank.cl";
+const WEBPAY_MAX_AMOUNT = 500000;
+const WEBPAY_LOOKUPS_PER_HOUR = 30;
+const WEBPAY_CREATES_PER_HOUR = 10;
+
+function webpayConfig(env) {
+  const production = String(env.TRANSBANK_ENV || "").trim().toLowerCase() === "production"
+    && Boolean(env.TRANSBANK_COMMERCE_CODE) && Boolean(env.TRANSBANK_API_KEY);
+  return production
+    ? { production: true, base: WEBPAY_PRODUCTION_BASE, commerceCode: String(env.TRANSBANK_COMMERCE_CODE).trim(), apiKey: String(env.TRANSBANK_API_KEY).trim() }
+    : { production: false, ...WEBPAY_INTEGRATION };
+}
+
+async function ensureWebpayTables(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS webpay_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, buy_order TEXT NOT NULL UNIQUE, token TEXT UNIQUE, phone TEXT NOT NULL,
+    customer_name TEXT, record_ids TEXT NOT NULL, amount INTEGER NOT NULL, mode TEXT NOT NULL DEFAULT 'integration',
+    status TEXT NOT NULL DEFAULT 'created', response_code INTEGER, authorization_code TEXT, card_last4 TEXT,
+    transaction_date TEXT, applied INTEGER NOT NULL DEFAULT 0, apply_note TEXT, response_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')), committed_at TEXT
+  )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS webpay_rate_limit (
+    ip TEXT NOT NULL, bucket TEXT NOT NULL, n INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (ip, bucket)
+  )`).run();
+}
+
+async function webpayRateLimited(env, request, kind, limit) {
+  const ip = request.headers.get("cf-connecting-ip") || "unknown";
+  const bucket = `${kind}:${new Date().toISOString().slice(0, 13)}`;
+  await env.DB.prepare("INSERT INTO webpay_rate_limit (ip, bucket, n) VALUES (?, ?, 1) ON CONFLICT(ip, bucket) DO UPDATE SET n = n + 1").bind(ip, bucket).run();
+  const row = await env.DB.prepare("SELECT n FROM webpay_rate_limit WHERE ip = ? AND bucket = ?").bind(ip, bucket).first();
+  return (row?.n || 0) > limit;
+}
+
+async function webpayRequest(env, method, path, body) {
+  const config = webpayConfig(env);
+  const response = await fetch(`${config.base}/rswebpaytransaction/api/webpay/v1.2/transactions${path}`, {
+    method,
+    headers: { "Tbk-Api-Key-Id": config.commerceCode, "Tbk-Api-Key-Secret": config.apiKey, "content-type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(20000),
+  });
+  const data = await response.json().catch(() => ({}));
+  return { ok: response.ok, status: response.status, data };
+}
+
+function webpayMaskName(name) {
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "Cliente BPGO";
+  const capital = (value) => value.charAt(0).toUpperCase() + value.slice(1).toLowerCase();
+  return parts.length === 1 ? capital(parts[0]) : `${capital(parts[0])} ${parts[parts.length - 1].charAt(0).toUpperCase()}.`;
+}
+
+// Deudas pagables de un teléfono: solo registros Pendiente o Suspendido con monto > 0, en orden de mes.
+function webpayDebtsForPhone(state, phone) {
+  const records = Array.isArray(state?.billingRecords) ? state.billingRecords : [];
+  const monthOrder = (record) => SPANISH_MONTH_NAMES.indexOf(String(record.billingMonth || "").toLowerCase());
+  return records
+    .filter((record) => normalizeWhatsAppPhone(record.phone) === phone && (record.status === "Pendiente" || record.status === "Suspendido")
+      && Number(record.amount) > 0 && record.id)
+    .sort((a, b) => monthOrder(a) - monthOrder(b));
+}
+
+async function webpayLookup(env, phoneInput) {
+  const phone = normalizeWhatsAppPhone(phoneInput);
+  if (!/^569\d{8}$/.test(phone)) return { ok: false, error: "Ingresa un teléfono chileno válido, por ejemplo 9 1234 5678." };
+  const row = await env.DB.prepare("SELECT data FROM app_state WHERE id = 'main'").first();
+  const debts = webpayDebtsForPhone(row?.data ? JSON.parse(row.data) : null, phone);
+  if (!debts.length) return { ok: true, found: false, message: "No encontramos mensualidades pendientes para este número. Si crees que es un error, escríbenos por WhatsApp." };
+  return {
+    ok: true, found: true, customer: webpayMaskName(debts[0].customerName), phone,
+    records: debts.map((record) => ({ id: String(record.id), month: record.billingMonth || "", amount: Math.round(Number(record.amount)), status: record.status })),
+  };
+}
+
+async function webpayCreate(env, request, body) {
+  const lookup = await webpayLookup(env, body.phone);
+  if (!lookup.ok || !lookup.found) return { ok: false, error: lookup.error || lookup.message };
+  const wanted = Array.isArray(body.recordIds) ? [...new Set(body.recordIds.map((id) => String(id)))].slice(0, 12) : [];
+  const chosen = lookup.records.filter((record) => wanted.includes(record.id));
+  if (!chosen.length || chosen.length !== wanted.length) return { ok: false, error: "Selecciona al menos una mensualidad pendiente." };
+  const amount = chosen.reduce((sum, record) => sum + record.amount, 0);
+  if (!(amount > 0) || amount > WEBPAY_MAX_AMOUNT) return { ok: false, error: "El monto no es válido. Escríbenos por WhatsApp para ayudarte." };
+  const config = webpayConfig(env);
+  const buyOrder = `BP${Date.now().toString(36)}${crypto.randomUUID().replace(/-/g, "").slice(0, 6)}`.toUpperCase().slice(0, 26);
+  await env.DB.prepare(`INSERT INTO webpay_transactions (buy_order, phone, customer_name, record_ids, amount, mode, status)
+    VALUES (?, ?, ?, ?, ?, ?, 'created')`)
+    .bind(buyOrder, lookup.phone, lookup.customer, JSON.stringify(chosen.map((record) => record.id)), amount, config.production ? "production" : "integration").run();
+  const origin = new URL(request.url).origin;
+  const created = await webpayRequest(env, "POST", "", { buy_order: buyOrder, session_id: lookup.phone, amount, return_url: `${origin}/api/pay/return` }).catch(() => null);
+  if (!created?.ok || !created.data?.token || !created.data?.url) {
+    await env.DB.prepare("UPDATE webpay_transactions SET status = 'create_failed', response_json = ? WHERE buy_order = ?")
+      .bind(JSON.stringify({ status: created?.status || null }), buyOrder).run();
+    return { ok: false, error: "No pudimos iniciar el pago con Webpay. Intenta de nuevo en unos minutos." };
+  }
+  await env.DB.prepare("UPDATE webpay_transactions SET token = ?, status = 'initiated' WHERE buy_order = ?").bind(created.data.token, buyOrder).run();
+  return { ok: true, url: created.data.url, token: created.data.token, amount, test: !config.production };
+}
+
+function webpayEscape(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+}
+
+function webpayResultPage({ ok, title, message, details = [], test = false }) {
+  const rows = details.map(([label, value]) => `<tr><th>${webpayEscape(label)}</th><td>${webpayEscape(value)}</td></tr>`).join("");
+  const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${webpayEscape(title)} | BPGO</title><style>
+body{margin:0;font-family:system-ui,Segoe UI,Roboto,sans-serif;background:#f3f6f4;color:#14231b;display:grid;place-items:center;min-height:100vh;padding:16px}
+main{background:#fff;max-width:460px;width:100%;border-radius:16px;padding:28px;box-shadow:0 8px 30px rgba(0,0,0,.08)}
+h1{font-size:22px;margin:0 0 8px;color:${ok ? "#0a7d4f" : "#b3261e"}}p{line-height:1.5}table{width:100%;border-collapse:collapse;margin:16px 0}
+th{text-align:left;color:#5b6b62;font-weight:500;padding:6px 0}td{text-align:right;padding:6px 0;font-weight:600}
+a.btn{display:block;text-align:center;background:#0a7d4f;color:#fff;text-decoration:none;padding:12px;border-radius:10px;font-weight:600;margin-top:12px}
+.test{background:#fff3cd;color:#664d03;padding:8px 12px;border-radius:8px;font-size:13px;margin-bottom:12px}
+</style></head><body><main>${test ? '<div class="test">MODO DE PRUEBAS: este pago no es real y no se cobró.</div>' : ""}
+<h1>${webpayEscape(title)}</h1><p>${webpayEscape(message)}</p>${rows ? `<table>${rows}</table>` : ""}
+<a class="btn" href="/pagar">${ok ? "Volver al portal" : "Intentar de nuevo"}</a>
+<a class="btn" style="background:#25d366" href="https://wa.me/56996384861">Hablar por WhatsApp</a></main></body></html>`;
+  return new Response(html, { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" } });
+}
+
+// Aplica el pago aprobado a la planilla (solo producción). Solo cambia registros que SIGUEN en Pendiente; un
+// registro Suspendido o ya Pagado no se toca y se deja anotado para que una persona lo revise. Control
+// optimista sobre app_state.updated_at (mismo mecanismo que applyPaymentToBillingRecord).
+async function applyWebpayPayment(env, row, commitData, attempt = 0) {
+  const stateRow = await env.DB.prepare("SELECT data, updated_at FROM app_state WHERE id = 'main'").first();
+  const state = stateRow?.data ? JSON.parse(stateRow.data) : null;
+  if (!state || !Array.isArray(state.billingRecords)) return { applied: 0, note: "No se pudo leer la planilla; registrar manualmente." };
+  const ids = JSON.parse(row.record_ids || "[]");
+  const appliedMonths = [], skipped = [];
+  for (const id of ids) {
+    const record = state.billingRecords.find((item) => String(item.id) === String(id));
+    if (!record) { skipped.push(`${id} no existe`); continue; }
+    if (record.status !== "Pendiente") { skipped.push(`${record.billingMonth || id} estaba ${record.status}`); continue; }
+    record.status = "Pagado";
+    record.followUpStatus = "Pago confirmado";
+    record.notes = `Pago Webpay Plus orden ${row.buy_order}, autorización ${commitData.authorization_code || "s/n"}, ${new Date().toLocaleString("es-CL", { timeZone: "America/Santiago" })}.`;
+    record.lastMessageAt = new Date().toISOString();
+    appliedMonths.push(record.billingMonth || id);
+  }
+  if (appliedMonths.length) {
+    const written = await env.DB.prepare("UPDATE app_state SET data = ?, updated_at = datetime('now') WHERE id = 'main' AND updated_at IS ?")
+      .bind(JSON.stringify(state), stateRow.updated_at ?? null).run();
+    if (!written.meta?.changes) {
+      if (attempt >= 2) return { applied: 0, note: "Conflicto al guardar la planilla; registrar manualmente." };
+      return applyWebpayPayment(env, row, commitData, attempt + 1);
+    }
+  }
+  const note = [appliedMonths.length ? `Aplicado a: ${appliedMonths.join(", ")}` : "No se aplicó a ningún mes", skipped.length ? `Revisar: ${skipped.join("; ")}` : null].filter(Boolean).join(". ");
+  return { applied: appliedMonths.length, note };
+}
+
+async function handleWebpayReturn(request, env, ctx) {
+  await ensureWebpayTables(env);
+  const url = new URL(request.url);
+  const form = request.method === "POST" ? await request.formData().catch(() => null) : null;
+  const field = (name) => url.searchParams.get(name) || (form ? form.get(name) : null) || null;
+  const token = field("token_ws");
+  if (!token) {
+    // El cliente anuló el pago o venció el tiempo en Webpay (llegan TBK_TOKEN / TBK_ORDEN_COMPRA, sin token_ws).
+    const abortedToken = field("TBK_TOKEN");
+    const order = field("TBK_ORDEN_COMPRA");
+    if (abortedToken || order) {
+      await env.DB.prepare("UPDATE webpay_transactions SET status = 'aborted', committed_at = datetime('now') WHERE (token = ? OR buy_order = ?) AND committed_at IS NULL")
+        .bind(abortedToken || "", order || "").run().catch(() => null);
+    }
+    return webpayResultPage({ ok: false, title: "Pago cancelado", message: "El pago no se realizó y no se hizo ningún cobro. Si quieres, puedes intentarlo nuevamente." });
+  }
+  const row = await env.DB.prepare("SELECT * FROM webpay_transactions WHERE token = ?").bind(token).first();
+  if (!row) return webpayResultPage({ ok: false, title: "No encontramos el pago", message: "No pudimos asociar esta operación. Si te cobraron, escríbenos por WhatsApp con tu comprobante." });
+  const test = row.mode !== "production";
+  const describe = (current) => {
+    const approved = current.status === "authorized";
+    const unconfirmed = current.status === "commit_error" || current.status === "amount_mismatch" || current.status === "committing";
+    return webpayResultPage({
+      ok: approved, test,
+      title: approved ? "¡Pago recibido!" : unconfirmed ? "Estamos confirmando tu pago" : "El pago no fue aprobado",
+      message: approved ? "Gracias, recibimos tu pago. Guarda esta pantalla como comprobante."
+        : unconfirmed ? "No pudimos confirmar el resultado de tu pago todavía. Si Webpay te cobró, escríbenos por WhatsApp con tu comprobante y lo regularizamos."
+        : "Webpay no aprobó la transacción, por lo que no se hizo ningún cobro. Puedes intentar con otro medio de pago.",
+      details: approved ? [["Monto", `$${Number(current.amount).toLocaleString("es-CL")}`], ["Orden de compra", current.buy_order], ["Código de autorización", current.authorization_code || "-"],
+        ["Tarjeta", current.card_last4 ? `**** ${current.card_last4}` : "-"], ["Fecha", current.transaction_date ? String(current.transaction_date).slice(0, 10) : "-"]] : [["Orden de compra", current.buy_order]],
+    });
+  };
+  // Un solo commit por transacción: si el cliente recarga la página de retorno se muestra el resultado ya guardado.
+  const claim = await env.DB.prepare("UPDATE webpay_transactions SET status = 'committing', committed_at = datetime('now') WHERE token = ? AND committed_at IS NULL").bind(token).run();
+  if (!claim.meta?.changes) return describe(row);
+  const commit = await webpayRequest(env, "PUT", `/${encodeURIComponent(token)}`).catch(() => null);
+  const data = commit?.data || {};
+  const authorized = Boolean(commit?.ok) && data.status === "AUTHORIZED" && Number(data.response_code) === 0 && Number(data.amount) === Number(row.amount);
+  const finalStatus = !commit?.ok ? "commit_error" : authorized ? "authorized" : data.status === "AUTHORIZED" ? "amount_mismatch" : "rejected";
+  await env.DB.prepare(`UPDATE webpay_transactions SET status = ?, response_code = ?, authorization_code = ?, card_last4 = ?, transaction_date = ?, response_json = ? WHERE token = ?`)
+    .bind(finalStatus, Number.isFinite(Number(data.response_code)) ? Number(data.response_code) : null, data.authorization_code || null,
+      String(data.card_detail?.card_number || "").slice(-4) || null, data.transaction_date || null,
+      JSON.stringify({ status: data.status, response_code: data.response_code, payment_type_code: data.payment_type_code, installments_number: data.installments_number }), token).run();
+  const fresh = await env.DB.prepare("SELECT * FROM webpay_transactions WHERE token = ?").bind(token).first();
+  const afterPayment = (async () => {
+    const credentials = await getWhatsAppCredentials(env);
+    const money = `$${Number(row.amount).toLocaleString("es-CL")}`;
+    if (finalStatus === "authorized" && row.mode === "production") {
+      const result = await applyWebpayPayment(env, row, data);
+      await env.DB.prepare("UPDATE webpay_transactions SET applied = ?, apply_note = ? WHERE token = ?").bind(result.applied ? 1 : 0, result.note, token).run();
+      await sendWhatsAppText(env, credentials, row.phone, `¡Hola! Recibimos tu pago de ${money} por Webpay. 🎉 Gracias por pagar tu servicio BP GO. Si tienes alguna duda, escríbenos por acá. 😊`).catch(() => null);
+      await notifyStaff(env, credentials, "carlos", "Pago Webpay", row.customer_name, row.phone,
+        `Pago Webpay aprobado ${money}, orden ${row.buy_order}. ${result.note}`, { sourceMessageId: `webpay-${row.buy_order}` });
+    } else if (finalStatus === "authorized") {
+      await env.DB.prepare("UPDATE webpay_transactions SET apply_note = ? WHERE token = ?").bind("Modo de pruebas: no se aplicó a la planilla.", token).run();
+    } else if (finalStatus === "amount_mismatch" || finalStatus === "commit_error") {
+      await notifyStaff(env, credentials, "carlos", "Pago Webpay", row.customer_name, row.phone,
+        `ATENCIÓN: Webpay orden ${row.buy_order} quedó en estado ${finalStatus} (${money}). Verificar en el portal de Transbank antes de registrar.`, { sourceMessageId: `webpay-${row.buy_order}` });
+    }
+  })().catch((error) => console.error("webpay_after_payment_failed", String(error?.message || error)));
+  if (ctx?.waitUntil) ctx.waitUntil(afterPayment); else await afterPayment;
+  return describe(fresh);
+}
+
+async function handleWebpayApi(request, env, ctx, url) {
+  await ensureWebpayTables(env);
+  const config = webpayConfig(env);
+  if (url.pathname === "/api/pay/config" && request.method === "GET") {
+    return Response.json({ ok: true, production: config.production }, { headers: { "cache-control": "no-store" } });
+  }
+  if (url.pathname === "/api/pay/return" && (request.method === "GET" || request.method === "POST")) {
+    return handleWebpayReturn(request, env, ctx);
+  }
+  if (url.pathname === "/api/pay/lookup" && request.method === "POST") {
+    if (await webpayRateLimited(env, request, "lookup", WEBPAY_LOOKUPS_PER_HOUR)) return Response.json({ ok: false, error: "Demasiados intentos. Intenta de nuevo en una hora." }, { status: 429 });
+    const body = await request.json().catch(() => ({}));
+    return Response.json(await webpayLookup(env, body.phone), { headers: { "cache-control": "no-store" } });
+  }
+  if (url.pathname === "/api/pay/create" && request.method === "POST") {
+    if (await webpayRateLimited(env, request, "create", WEBPAY_CREATES_PER_HOUR)) return Response.json({ ok: false, error: "Demasiados intentos. Intenta de nuevo en una hora." }, { status: 429 });
+    const body = await request.json().catch(() => ({}));
+    const result = await webpayCreate(env, request, body).catch((error) => ({ ok: false, error: "No pudimos iniciar el pago. Intenta de nuevo." , detail: String(error?.message || error) }));
+    return Response.json({ ok: result.ok, error: result.error, url: result.url, token: result.token, amount: result.amount, test: result.test }, { status: result.ok ? 200 : 400, headers: { "cache-control": "no-store" } });
+  }
+  if (url.pathname === "/api/pay/transactions" && request.method === "GET") {
+    const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET).catch(() => null);
+    if (!session || session.role !== "super_admin") return Response.json({ ok: false, error: "Sin autorización." }, { status: 403 });
+    const rows = await env.DB.prepare(`SELECT buy_order, phone, customer_name, amount, mode, status, authorization_code, card_last4, applied, apply_note, created_at, committed_at
+      FROM webpay_transactions ORDER BY id DESC LIMIT 100`).all();
+    return Response.json({ ok: true, production: config.production, transactions: rows.results || [] });
+  }
+  return Response.json({ ok: false, error: "No encontrado." }, { status: 404 });
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    if (url.pathname.startsWith("/api/pay/")) return handleWebpayApi(request, env, ctx, url);
 
     if (url.pathname === "/api/whatsapp/cyber-upgrade") {
       const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET).catch(() => null);
