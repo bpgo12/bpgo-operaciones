@@ -29,7 +29,7 @@ function functionSource(name) {
 // 2) el tiempo se cuenta desde la ÚLTIMA actividad real de la conversación, no desde que se activó
 //    el modo humano -- para no reactivar mientras un humano sigue escribiendo activamente.
 assert.doesNotMatch(worker, /setBotSessionMode\(env, phone, "bot", "auto_reactivated_on_reply"\)/);
-assert.match(worker, /const AUTO_REACTIVATABLE_REASONS = new Set\(\["manual_reply", "manual_whatsapp_reply", "manual_takeover"\]\)/);
+assert.match(worker, /const AUTO_REACTIVATABLE_REASONS = new Set\(\["manual_reply", "manual_whatsapp_reply", "manual_takeover", "bot_exception"\]\)/);
 assert.match(worker, /async function shouldAutoReactivate\(env, phone, session, currentMessageId\)/);
 assert.match(worker, /if \(!session \|\| session\.mode !== "human"\) return false;/);
 assert.match(worker, /if \(!AUTO_REACTIVATABLE_REASONS\.has\(session\.escalation_reason\)\) return false;/);
