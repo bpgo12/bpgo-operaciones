@@ -586,6 +586,16 @@ async function shouldAutoReactivate(env, phone, session, currentMessageId) {
   return Number.isFinite(lastActivityMs) && Date.now() - lastActivityMs >= AUTO_REACTIVATE_AFTER_MS;
 }
 
+// Al liberar un bloqueo olvidado de un trámite sensible, el bot vuelve a contestar pero no deja
+// que la IA improvise sobre la revisión de pagos, visitas ni facturación.
+function safeReplyForReactivatedBusinessHandoff(reason) {
+  if (reason === "case_created_payment") return "Tu comprobante sigue en revisión. Apenas esté validado te confirmaremos por este medio.";
+  if (reason === "case_created_visit") return "Tu solicitud de visita sigue en revisión. Un agente te confirmará la coordinación por este medio.";
+  if (reason === "case_created_billing") return "Tu solicitud sobre facturación sigue en revisión. Un agente te confirmará por este medio.";
+  if (reason === "bot_escalated") return "Tu solicitud sigue en revisión. Un agente te responderá por este medio.";
+  return null;
+}
+
 // Caso real (2026-10-05, 56920144998): un cliente en modo humano escribió "Algún ejecutivo para hablar"
 // y durante ~13 minutos nadie respondió ni se enteró: con la conversación en modo humano el bot calla
 // (correcto), pero tampoco se avisaba a Carlos de que el cliente había escrito. Ahora llega UN aviso
@@ -641,7 +651,7 @@ async function takeOverUnansweredHumanChats(env) {
   const newestAllowed = new Date(now - HUMAN_NO_RESPONSE_TAKEOVER_MS).toISOString();
   const oldestAllowed = new Date(now - HUMAN_NO_RESPONSE_MAX_AGE_MS).toISOString();
   const sessionCutoff = newestAllowed.replace("T", " ").slice(0, 19);
-  const rows = await env.DB.prepare(`SELECT s.phone, m.message_id, m.message_text, m.created_at
+  const rows = await env.DB.prepare(`SELECT s.phone, s.escalation_reason, m.message_id, m.message_text, m.created_at
     FROM whatsapp_bot_sessions s JOIN whatsapp_inbox_messages m ON m.phone = s.phone
     WHERE s.mode = 'human' AND s.updated_at <= ? AND m.direction = 'inbound' AND m.message_type = 'text'
       AND COALESCE(TRIM(m.message_text), '') != '' AND m.created_at <= ? AND m.created_at >= ?
@@ -659,7 +669,7 @@ async function takeOverUnansweredHumanChats(env) {
     await setBotSessionMode(env, row.phone, "bot", "auto_reactivated_unanswered");
     taken += 1;
     await runBotForInboundMessages(env, [{ value: { contacts: [{ profile: {} }], messages: [
-      { id: `retake:${row.message_id}`, from: row.phone, type: "text", text: { body: row.message_text } },
+      { id: `retake:${row.message_id}`, from: row.phone, type: "text", text: { body: row.message_text }, reactivatedHandoffReason: row.escalation_reason },
     ] } }]).catch(() => null);
   }
   return { ok: true, taken };
@@ -1925,6 +1935,10 @@ function botTextProblem(text) {
   if (/\b(tecnico|visita)\b.{0,80}\b(manana|hoy|esta tarde|esta noche|en la tarde|a las \d)/.test(normalized)
     || /\b(manana|hoy|esta tarde|esta noche|a las \d).{0,80}\b(tecnico|visita)\b/.test(normalized)
     || /\bnos vemos (manana|hoy)\b/.test(normalized)) return "schedule_promise";
+  // Caso real (2026-10-06): el modelo inventó que no se podían cambiar fechas de pago. Si no
+  // existe una política explícita cargada, se deriva a una persona en vez de afirmarlo al cliente.
+  if (/\b(no se puede(n)?|no esta permitido|no aceptamos|no realizamos|esta prohibido)\b/.test(normalized)
+    && /\b(fecha(s)? de pago|dia(s)? de pago|politica|politicas)\b/.test(normalized)) return "unsupported_policy";
   return null;
 }
 
@@ -2061,6 +2075,11 @@ async function runBotForInboundMessages(env, changes) {
         if (sessionRow?.mode === "human") {
           if (await shouldAutoReactivate(env, phone, sessionRow, message.id)) {
             await setBotSessionMode(env, phone, "bot", "auto_reactivated_after_inactivity");
+            const safeReply = safeReplyForReactivatedBusinessHandoff(sessionRow.escalation_reason);
+            if (safeReply) {
+              await sendBotReply(env, credentials, phone, safeReply, message.type === "audio");
+              continue;
+            }
           } else {
             // El mensaje ya fue guardado en la bandeja. Mientras un humano tenga la conversación
             // (y no se cumplan las condiciones de reactivación automática de arriba), nunca se
@@ -2068,6 +2087,11 @@ async function runBotForInboundMessages(env, changes) {
             await alertStaffCustomerWroteInHumanMode(env, credentials, phone, message).catch(() => null);
             continue;
           }
+        }
+        const recoveredHandoffReply = safeReplyForReactivatedBusinessHandoff(message.reactivatedHandoffReason);
+        if (recoveredHandoffReply) {
+          await sendBotReply(env, credentials, phone, recoveredHandoffReply, message.type === "audio");
+          continue;
         }
         if (!isStaffPhone && await guardAgainstBotLoop(env, credentials, phone, message)) continue;
         const preferAudio = message.type === "audio";

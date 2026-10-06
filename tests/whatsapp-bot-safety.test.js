@@ -51,12 +51,13 @@ vm.runInContext(`
   ${functionSource("extractAccountName")}
   ${functionSource("normalizeWhatsAppPhone")}
   ${functionSource("cyberNormalize")}
+  ${functionSource("botTextProblem")}
   ${functionSource("looksLikeQuestion")}
   const CYBER_INSTALL_CUTOFF = "2026-08-31";
   const CYBER_SPANISH_MONTHS = { enero: "01", febrero: "02", marzo: "03", abril: "04", mayo: "05", junio: "06", julio: "07", agosto: "08", septiembre: "09", setiembre: "09", octubre: "10", noviembre: "11", diciembre: "12" };
   ${functionSource("cyberParseInstallDate")}
   ${functionSource("cyberCandidates")}
-  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment, mentionsServiceOutage, mentionsTechnicalIssueOrVisit, isOptOutMessage, matchPlanGroup, extractAccountName, normalizeWhatsAppPhone, cyberNormalize, cyberParseInstallDate, cyberCandidates, looksLikeQuestion };
+  this.api = { formatCurrency, isBalanceQuestion, authoritativeBalanceAction, classifyInboundMessage, hasStrongReceiptEvidence, isPlausibleAccountName, isPaymentLinkRequest, isAlternativePaymentRequest, briefCourtesyReply, externalConnectivityPaymentReply, cancellationMeansPayment, extractWhatsAppMessageEchoes, isPaidQuickReply, humanizeFilename, inboundMessageText, isLikelyNotAName, classifyInstallationFragment, mentionsServiceOutage, mentionsTechnicalIssueOrVisit, isOptOutMessage, matchPlanGroup, extractAccountName, normalizeWhatsAppPhone, cyberNormalize, cyberParseInstallDate, cyberCandidates, looksLikeQuestion, botTextProblem };
 `, context);
 
 const api = context.api;
@@ -93,6 +94,9 @@ for (const value of ["La cuenta para depositar sigue siendo la misma cierto", "�
   assert.equal(api.isAlternativePaymentRequest(value), true, `${value} must use transfer fallback`);
 }
 assert.equal(api.briefCourtesyReply("Gracias"), "De nada 👍");
+assert.equal(api.botTextProblem("No se pueden cambiar las fechas de pago."), "unsupported_policy");
+assert.equal(api.botTextProblem("No está permitido modificar el día de pago."), "unsupported_policy");
+assert.equal(api.botTextProblem("Tu comprobante está en revisión."), null);
 assert.equal(api.externalConnectivityPaymentReply("a la tarde cancelo esta mala la señal donde trabajo"), "Entendido, puedes realizar el pago más tarde cuando tengas mejor conexión.");
 assert.equal(api.externalConnectivityPaymentReply("en la tarde pago, tengo poca cobertura en la minera"), "Entendido, puedes realizar el pago más tarde cuando tengas mejor conexión.");
 assert.equal(api.externalConnectivityPaymentReply("tengo mala señal de internet BP GO en la casa"), null);
