@@ -62,7 +62,9 @@ vm.runInContext(`
   const STALE_HUMAN_LOCK_MS = 6 * 60 * 60 * 1000;
   ${functionSource("parseSqliteDatetime")}
   async ${functionSource("shouldAutoReactivate")}
+  ${functionSource("safeReplyForReactivatedBusinessHandoff")}
   this.shouldAutoReactivate = shouldAutoReactivate;
+  this.safeReplyForReactivatedBusinessHandoff = safeReplyForReactivatedBusinessHandoff;
 `, context);
 
 function fakeEnv(lastActivityIso) {
@@ -105,6 +107,14 @@ async function main() {
   }
   // Ya en modo bot -> no aplica.
   assert.equal(await context.shouldAutoReactivate(fakeEnv(oldIso), "56900000000", { mode: "bot", escalation_reason: "manual_reply" }, "msg1"), false);
+
+  // Al liberar un bloqueo olvidado de negocio, la primera respuesta no pasa por la IA: evita
+  // confirmar pagos o coordinar horarios de visita con información no validada.
+  assert.match(context.safeReplyForReactivatedBusinessHandoff("case_created_payment"), /comprobante sigue en revisión/i);
+  assert.match(context.safeReplyForReactivatedBusinessHandoff("case_created_visit"), /solicitud de visita sigue en revisión/i);
+  assert.match(context.safeReplyForReactivatedBusinessHandoff("case_created_billing"), /facturación sigue en revisión/i);
+  assert.equal(context.safeReplyForReactivatedBusinessHandoff("manual_reply"), null);
+  assert.match(worker, /const recoveredHandoffReply = safeReplyForReactivatedBusinessHandoff\(message\.reactivatedHandoffReason\);[\s\S]*?await sendBotReply/);
 
   console.log("whatsapp human handoff: ok");
 }
