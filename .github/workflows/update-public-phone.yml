@@ -38,13 +38,13 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages project list --json
+          command: pages project list
 
       - name: Identificar proyecto de bpgo.cl
         env:
-          PROJECTS_JSON: ${{ steps.cloudflare-projects.outputs.command-output }}
+          PROJECTS_LIST: ${{ steps.cloudflare-projects.outputs.command-output }}
         run: |
-          PROJECT_NAME="$(printf '%s' "$PROJECTS_JSON" | jq -r '(.result // .)[] | select((.domains // []) | index("bpgo.cl")) | .name' | head -n 1)"
+          PROJECT_NAME="$(printf '%s\n' "$PROJECTS_LIST" | awk -F '│' '/bpgo\.cl/ { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); print $1; exit }')"
           test -n "$PROJECT_NAME"
           echo "PROJECT_NAME=$PROJECT_NAME" >> "$GITHUB_ENV"
 
