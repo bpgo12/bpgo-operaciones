@@ -58,6 +58,17 @@ jobs:
       - name: Publicar sitio actualizado
         run: npx wrangler@4 pages deploy public-site --project-name="$PROJECT_NAME" --branch="$PRODUCTION_BRANCH"
 
+      - name: Diagnostico de despliegue
+        if: always()
+        run: |
+          API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$PROJECT_NAME"
+          curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$API" > project.json
+          INFO="$(jq -c '.result | {name, domains, production_branch, latest: .latest_deployment.url, env: .latest_deployment.environment}' project.json)"
+          echo "::notice title=Proyecto::$INFO"
+          curl -s -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$API/deployments?per_page=3" > deployments.json
+          LIST="$(jq -c '[.result[] | {url, environment}]' deployments.json)"
+          echo "::notice title=Despliegues::$LIST"
+
       - name: Verificar número en producción
         run: |
           for attempt in 1 2 3 4 5; do
