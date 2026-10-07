@@ -647,3 +647,27 @@ assert.equal((worker.match(/askForAccountNameOrHandOff\(env, credentials, phone,
 }
 assert.match(worker, /console\.error\("bot_exception", phone, detail\);/);
 assert.match(worker, /"Error del bot"/);
+
+// Comprobantes que no avisaban (2026-10-07): (1) un cliente con bloqueo humano viejo mandó su comprobante y el bot
+// contestó "tu comprobante sigue en revisión" sin crear caso ni avisar; (2) quien mandaba el comprobante y no
+// contestaba su nombre nunca generaba aviso; (3) la IA escribió "Tu pago ha sido registrado correctamente".
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`
+    function inboundMessageText(message) { return message.text?.body || ""; }
+    function hasExplicitPaymentIntent(text) { return /pagu|pago|comprobante|transfer/i.test(String(text || "")); }
+    ${functionSource("mentionsBillingTopic")}
+    ${functionSource("reactivationNeedsNormalFlow")}
+    this.api = { reactivationNeedsNormalFlow };
+  `, ctx);
+  assert.equal(ctx.api.reactivationNeedsNormalFlow({ type: "image" }), true);
+  assert.equal(ctx.api.reactivationNeedsNormalFlow({ type: "document" }), true);
+  assert.equal(ctx.api.reactivationNeedsNormalFlow({ type: "text", text: { body: "ya pagué, te envío el comprobante" } }), true);
+  assert.equal(ctx.api.reactivationNeedsNormalFlow({ type: "text", text: { body: "cuanto debo" } }), true);
+  assert.equal(ctx.api.reactivationNeedsNormalFlow({ type: "text", text: { body: "hola, ¿cómo va mi solicitud?" } }), false);
+}
+assert.match(worker, /const safeReply = reactivationNeedsNormalFlow\(message\) \? null : safeReplyForReactivatedBusinessHandoff\(sessionRow\.escalation_reason\);/);
+assert.match(worker, /const recoveredHandoffReply = reactivationNeedsNormalFlow\(message\) \? null : safeReplyForReactivatedBusinessHandoff\(message\.reactivatedHandoffReason\);/);
+assert.doesNotMatch(worker, /sendBotReply\(env, credentials, phone, action\.text \|\| "Recibimos tu comprobante/);
+assert.match(worker, /"Nombre pendiente", phone,\s*\n\s*`Comprobante recibido \(el cliente aún no indica a nombre de quién\)/);

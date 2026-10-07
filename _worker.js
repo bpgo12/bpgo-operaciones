@@ -596,6 +596,12 @@ function safeReplyForReactivatedBusinessHandoff(reason) {
   return null;
 }
 
+function reactivationNeedsNormalFlow(message) {
+  if (message.type === "image" || message.type === "document") return true;
+  const text = inboundMessageText(message);
+  return hasExplicitPaymentIntent(text) || mentionsBillingTopic(text);
+}
+
 // Caso real (2026-10-05, 56920144998): un cliente en modo humano escribió "Algún ejecutivo para hablar"
 // y durante ~13 minutos nadie respondió ni se enteró: con la conversación en modo humano el bot calla
 // (correcto), pero tampoco se avisaba a Carlos de que el cliente había escrito. Ahora llega UN aviso
@@ -1713,7 +1719,9 @@ async function executeBotAction(env, credentials, phone, action, message) {
       if (caseRow && !caseRow.reported_name) {
         await env.DB.prepare("UPDATE whatsapp_automation_cases SET reported_name = ? WHERE id = ?").bind(known, caseRow.id).run();
       }
-      await sendBotReply(env, credentials, phone, action.text || "Recibimos tu comprobante, en breve lo revisamos. ¡Gracias! 🙏", preferAudio);
+      // Texto fijo: la IA llegó a escribir "Tu pago ha sido registrado correctamente", afirmando un registro que
+      // solo una persona puede hacer (2026-10-07).
+      await sendBotReply(env, credentials, phone, "Recibimos tu comprobante, en breve lo revisamos. ¡Gracias! 🙏", preferAudio);
       await notifyStaff(env, credentials, "carlos", "Comprobante de pago", known, phone, `Comprobante recibido. ${receiptCheck}`.trim(), { caseId: caseRow?.id || null, sourceMessageId: message.messageId });
       await setBotSessionMode(env, phone, "human", "case_created_payment");
       return;
@@ -1725,6 +1733,11 @@ async function executeBotAction(env, credentials, phone, action, message) {
         .bind(phone, caseRow.id).run();
     }
     await sendBotReply(env, credentials, phone, "¡Gracias por tu comprobante! Para dejarlo asociado a tu cuenta, ¿a nombre de quién está contratado el servicio?", preferAudio);
+    // Antes el aviso a Carlos solo salía DESPUÉS de que el cliente contestara su nombre: quien mandaba el comprobante
+    // y no contestaba (56948037190, dos veces) nunca generaba aviso. Ahora el aviso sale al recibir el comprobante,
+    // con el nombre pendiente; cuando el cliente responde el nombre, el aviso de ese caso ya existe y no se repite.
+    await notifyStaff(env, credentials, "carlos", "Comprobante de pago", "Nombre pendiente", phone,
+      `Comprobante recibido (el cliente aún no indica a nombre de quién). ${receiptCheck}`.trim(), { caseId: caseRow?.id || null, sourceMessageId: message.messageId });
     return;
   }
   if (action.action === "visit_request") {
@@ -2080,7 +2093,10 @@ async function runBotForInboundMessages(env, changes) {
         if (sessionRow?.mode === "human") {
           if (await shouldAutoReactivate(env, phone, sessionRow, message.id)) {
             await setBotSessionMode(env, phone, "bot", "auto_reactivated_after_inactivity");
-            const safeReply = safeReplyForReactivatedBusinessHandoff(sessionRow.escalation_reason);
+            // La respuesta fija "sigue en revisión" es para quien solo pregunta por su trámite viejo. Un
+            // adjunto (posible comprobante NUEVO) o un texto que habla de un pago debe procesarse normal:
+            // antes se tragaba el comprobante nuevo con "tu comprobante sigue en revisión", sin caso ni aviso.
+            const safeReply = reactivationNeedsNormalFlow(message) ? null : safeReplyForReactivatedBusinessHandoff(sessionRow.escalation_reason);
             if (safeReply) {
               await sendBotReply(env, credentials, phone, safeReply, message.type === "audio");
               continue;
@@ -2093,7 +2109,7 @@ async function runBotForInboundMessages(env, changes) {
             continue;
           }
         }
-        const recoveredHandoffReply = safeReplyForReactivatedBusinessHandoff(message.reactivatedHandoffReason);
+        const recoveredHandoffReply = reactivationNeedsNormalFlow(message) ? null : safeReplyForReactivatedBusinessHandoff(message.reactivatedHandoffReason);
         if (recoveredHandoffReply) {
           await sendBotReply(env, credentials, phone, recoveredHandoffReply, message.type === "audio");
           continue;
@@ -2392,7 +2408,11 @@ async function saveInboundWhatsAppMessages(env, changes) {
         .run();
       // En handoff humano el webhook conserva el mensaje en la bandeja, pero no lo clasifica ni
       // crea automatizaciones. El operador debe reactivar el bot explícitamente desde Operaciones.
-      if (await getBotSessionMode(env, message.from) !== "human") {
+      // Excepción (2026-10-07): una imagen o un documento puede ser un COMPROBANTE DE PAGO. Un cliente con un
+      // bloqueo humano viejo mandó su comprobante y no quedó ni caso en el panel ni aviso a Carlos (56992708041).
+      // Los adjuntos siempre generan su caso, también en modo humano.
+      const isAttachment = message.type === "image" || message.type === "document";
+      if (isAttachment || await getBotSessionMode(env, message.from) !== "human") {
         if (cyberButtonAction(message)) { saved += 1; continue; }
         await createAutomationCase(env, {
           messageId: message.id,

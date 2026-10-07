@@ -36,7 +36,8 @@ assert.match(worker, /if \(!AUTO_REACTIVATABLE_REASONS\.has\(session\.escalation
 assert.match(worker, /const STALE_HUMAN_LOCK_MS = 6 \* 60 \* 60 \* 1000;/);
 assert.match(worker, /WHERE phone = \? AND message_id != \? ORDER BY created_at DESC LIMIT 1/);
 assert.match(worker, /if \(sessionRow\?\.mode === "human"\) \{[\s\S]*?shouldAutoReactivate[\s\S]*?continue;[\s\S]*?\}/);
-assert.match(worker, /if \(await getBotSessionMode\(env, message\.from\) !== "human"\) \{[\s\S]*?createAutomationCase/);
+// Los textos en modo humano no crean caso, pero los ADJUNTOS (posibles comprobantes) sí (2026-10-07).
+assert.match(worker, /const isAttachment = message\.type === "image" \|\| message\.type === "document";\s*\n\s*if \(isAttachment \|\| await getBotSessionMode\(env, message\.from\) !== "human"\) \{[\s\S]*?createAutomationCase/);
 assert.match(worker, /whatsapp_bot_session_events/);
 assert.match(worker, /setBotSessionMode\(env, phone, mode, mode === "human" \? "manual_takeover" : "manual_reactivated", session\)/);
 assert.match(worker, /setBotSessionMode\(env, phone, "human", "manual_reply", session\)/);
@@ -114,7 +115,7 @@ async function main() {
   assert.match(context.safeReplyForReactivatedBusinessHandoff("case_created_visit"), /solicitud de visita sigue en revisión/i);
   assert.match(context.safeReplyForReactivatedBusinessHandoff("case_created_billing"), /facturación sigue en revisión/i);
   assert.equal(context.safeReplyForReactivatedBusinessHandoff("manual_reply"), null);
-  assert.match(worker, /const recoveredHandoffReply = safeReplyForReactivatedBusinessHandoff\(message\.reactivatedHandoffReason\);[\s\S]*?await sendBotReply/);
+  assert.match(worker, /const recoveredHandoffReply = reactivationNeedsNormalFlow\(message\) \? null : safeReplyForReactivatedBusinessHandoff\(message\.reactivatedHandoffReason\);[\s\S]*?await sendBotReply/);
 
   console.log("whatsapp human handoff: ok");
 }
