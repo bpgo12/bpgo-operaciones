@@ -611,21 +611,32 @@ const HUMAN_MODE_ALERT_COOLDOWN_MIN = 60;
 const HUMAN_MODE_RECENT_REPLY_MIN = 30;
 
 async function alertStaffCustomerWroteInHumanMode(env, credentials, phone, message) {
-  const recentAlert = await env.DB.prepare(
-    `SELECT 1 AS found FROM staff_notifications_log WHERE customer_phone = ? AND case_type = 'Cliente en atención humana'
-     AND created_at > datetime('now', ?) LIMIT 1`
-  ).bind(phone, `-${HUMAN_MODE_ALERT_COOLDOWN_MIN} minutes`).first();
-  if (recentAlert) return false;
-  const lastOutbound = await env.DB.prepare(
-    "SELECT created_at FROM whatsapp_inbox_messages WHERE phone = ? AND direction = 'outbound' ORDER BY created_at DESC LIMIT 1"
-  ).bind(phone).first();
-  const lastOutboundMs = lastOutbound?.created_at ? parseSqliteDatetime(lastOutbound.created_at) : NaN;
-  if (Number.isFinite(lastOutboundMs) && Date.now() - lastOutboundMs < HUMAN_MODE_RECENT_REPLY_MIN * 60 * 1000) return false;
+  // Un adjunto puede ser un comprobante de pago: se avisa SIEMPRE (sin enfriamiento ni "ya le respondieron"),
+  // porque es lo único que no se puede perder. Audios, ubicaciones, stickers y videos saltan solo la regla de
+  // "ya le respondieron hace poco" (el equipo no los ve igual que un texto).
+  const receiptCandidate = message.type === "image" || message.type === "document";
+  const nonText = receiptCandidate || ["audio", "video", "sticker", "location"].includes(message.type);
+  if (!receiptCandidate) {
+    const recentAlert = await env.DB.prepare(
+      `SELECT 1 AS found FROM staff_notifications_log WHERE customer_phone = ? AND case_type = 'Cliente en atención humana'
+       AND created_at > datetime('now', ?) LIMIT 1`
+    ).bind(phone, `-${HUMAN_MODE_ALERT_COOLDOWN_MIN} minutes`).first();
+    if (recentAlert) return false;
+  }
+  if (!nonText) {
+    const lastOutbound = await env.DB.prepare(
+      "SELECT created_at FROM whatsapp_inbox_messages WHERE phone = ? AND direction = 'outbound' ORDER BY created_at DESC LIMIT 1"
+    ).bind(phone).first();
+    const lastOutboundMs = lastOutbound?.created_at ? parseSqliteDatetime(lastOutbound.created_at) : NaN;
+    if (Number.isFinite(lastOutboundMs) && Date.now() - lastOutboundMs < HUMAN_MODE_RECENT_REPLY_MIN * 60 * 1000) return false;
+  }
   const text = String(inboundMessageText(message) || "").trim();
   const name = await getKnownAccountName(env, phone).catch(() => null);
-  await notifyStaff(env, credentials, "carlos", "Cliente en atención humana", name, phone,
-    text ? `Escribió y el bot no responde porque la conversación está en atención humana: "${text.slice(0, 180)}"` : "Escribió (adjunto o mensaje sin texto) y el bot no responde porque la conversación está en atención humana.",
-    { sourceMessageId: message.id });
+  const summary = receiptCandidate
+    ? "Envió una imagen o documento (posible comprobante de pago) y la conversación está en atención humana. Revisa el caso en el panel."
+    : text ? `Escribió y el bot no responde porque la conversación está en atención humana: "${text.slice(0, 180)}"`
+    : `Envió un mensaje (${message.type || "sin texto"}) y el bot no responde porque la conversación está en atención humana.`;
+  await notifyStaff(env, credentials, "carlos", "Cliente en atención humana", name, phone, summary, { sourceMessageId: message.id });
   return true;
 }
 
@@ -992,11 +1003,23 @@ async function deliverStaffNotification(env, credentials, row) {
   const fallback = canFallback ? await sendTemplate("aviso_nuevo_caso") : null;
   const fallbackMessageId = fallback?.body?.messages?.[0]?.id || null;
   const fallbackAccepted = Boolean(fallback?.ok && fallbackMessageId);
+  // Último recurso (2026-10-07): Meta rechazó 8 avisos con 131049 ("healthy ecosystem engagement") y Carlos nunca
+  // supo de esos comprobantes. Un mensaje de texto libre no depende de plantillas y llega si la persona escribió al
+  // número en las últimas 24 h (por ejemplo, tocando un botón de un aviso anterior). Si la ventana está cerrada,
+  // Meta lo rechaza y el aviso queda como fallido igual que antes.
+  let textFallbackId = null;
+  if (!primaryAccepted && !fallbackAccepted) {
+    const textBody = `🔔 ${sanitizeStaffTemplateParam(row.case_type, 120) || "Caso interno"}\nCliente: ${sanitizeStaffTemplateParam(row.customer_name, 160) || "Sin identificar"}\nTeléfono: +${sanitizeStaffTemplateParam(row.customer_phone, 30) || "sin teléfono"}\n\n${sanitizeStaffTemplateParam(row.summary, 300) || "Sin detalle"}`;
+    const textResult = await fetch(endpoint, { method: "POST", headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
+      body: JSON.stringify({ messaging_product: "whatsapp", recipient_type: "individual", to: normalized, type: "text", text: { body: textBody } }),
+    }).then(async (response) => ({ ok: response.ok, body: await response.json().catch(() => null) })).catch(() => ({ ok: false, body: null }));
+    textFallbackId = textResult.ok ? textResult.body?.messages?.[0]?.id || null : null;
+  }
   const finalResult = fallback || primary;
-  const messageId = fallbackAccepted ? fallbackMessageId : primaryMessageId;
-  const accepted = primaryAccepted || fallbackAccepted;
+  const messageId = fallbackAccepted ? fallbackMessageId : textFallbackId || primaryMessageId;
+  const accepted = primaryAccepted || fallbackAccepted || Boolean(textFallbackId);
   const finalError = staffMetaError(finalResult.body);
-  const finalTemplate = fallback ? "aviso_nuevo_caso" : primaryTemplate;
+  const finalTemplate = textFallbackId ? "text_fallback" : fallback ? "aviso_nuevo_caso" : primaryTemplate;
   await env.DB.prepare(`UPDATE staff_notifications_log SET status=?, ok=?, http_status=?, message_id=?, error_code=?, error_subcode=?, fbtrace_id=?,
     error_message=?, error_details=?, response_json=?, attempt_count=COALESCE(attempt_count,0)+?, attempted_template=?,
     final_template=?, fallback_used=?, fallback_message_id=?, original_error_code=?, original_error_message=?,
@@ -1771,7 +1794,8 @@ async function executeBotAction(env, credentials, phone, action, message) {
       const visitRow = await env.DB.prepare(`INSERT INTO whatsapp_visit_requests (phone, customer_id, customer_name, reported_name, preferred_date, reason, status, created_at, transcript)
         VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'), ?) RETURNING id`)
         .bind(phone, customer.id, customer.name, known, action.preferred_date || null, action.reason || null, transcript).first();
-      await sendBotReply(env, credentials, phone, action.text || "Registramos tu solicitud de visita técnica, un agente te confirmará el horario. 🙌", preferAudio);
+      // Texto fijo: el de la IA podía prometer día u hora de llegada del técnico.
+      await sendBotReply(env, credentials, phone, "Registramos tu solicitud de visita técnica, un agente te confirmará el horario. 🙌", preferAudio);
       await notifyStaff(env, credentials, "eduardo", "Incidencia técnica", known, phone, action.reason || "Cliente reportó una falla técnica.", { visitRequestId: visitRow?.id, sourceMessageId: message.messageId });
       await setBotSessionMode(env, phone, "human", "case_created_visit");
       return;
@@ -1910,7 +1934,8 @@ async function recentInboundMedia(env, phone) {
 //  1) no se le responde a un mensaje que huele a respuesta automática de una empresa;
 //  2) tope por teléfono: si el bot ya envió BOT_LOOP_MAX_REPLIES textos en BOT_LOOP_WINDOW_MIN minutos, se
 //     deja de responder, la conversación pasa a atención humana y se avisa a Carlos una vez.
-const BOT_LOOP_MAX_REPLIES = 8;
+const BOT_LOOP_MAX_REPLIES = 24;
+const BOT_LOOP_REPEATED_INBOUND = 3;
 const BOT_LOOP_WINDOW_MIN = 10;
 
 function isLikelyAutoReply(text) {
@@ -1968,14 +1993,22 @@ function isPureGreeting(text) {
 async function guardAgainstBotLoop(env, credentials, phone, message) {
   const text = inboundMessageText(message);
   if (isLikelyAutoReply(text)) return true;
+  // Un embudo de venta normal manda 2 mensajes por paso y un cliente rápido puede pasar de 8 en 10 minutos (el
+  // primer umbral cortaba ventas reales a mitad de camino). Un bucle con otro bot se distingue porque el OTRO lado
+  // repite el mismo texto largo una y otra vez: se pausa solo si hay >= BOT_LOOP_REPEATED_INBOUND mensajes
+  // idénticos entrantes en 15 minutos, o si el bot ya envió BOT_LOOP_MAX_REPLIES textos en la ventana.
+  const repeated = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM whatsapp_inbox_messages WHERE phone = ? AND direction = 'inbound' AND message_type = 'text'
+     AND length(message_text) >= 20 AND message_text = ? AND created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-15 minutes')`
+  ).bind(phone, String(text || "")).first();
   const recent = await env.DB.prepare(
     `SELECT COUNT(*) AS n FROM whatsapp_inbox_messages WHERE phone = ? AND direction = 'outbound' AND message_type = 'text'
      AND created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)`
   ).bind(phone, `-${BOT_LOOP_WINDOW_MIN} minutes`).first();
-  if ((recent?.n || 0) < BOT_LOOP_MAX_REPLIES) return false;
+  if ((repeated?.n || 0) < BOT_LOOP_REPEATED_INBOUND && (recent?.n || 0) < BOT_LOOP_MAX_REPLIES) return false;
   await setBotSessionMode(env, phone, "human", "bot_loop_suspected");
   await notifyStaff(env, credentials, "carlos", "Conversación pausada", await getKnownAccountName(env, phone).catch(() => null), phone,
-    `El bot envió ${recent.n} mensajes en ${BOT_LOOP_WINDOW_MIN} minutos a este número; puede ser otro bot o un bucle. Se pausó la conversación.`,
+    `Posible bucle con otro bot (mensajes repetidos o demasiadas respuestas en ${BOT_LOOP_WINDOW_MIN} minutos). Se pausó la conversación.`,
     { sourceMessageId: message.id }).catch(() => null);
   return true;
 }
@@ -2153,7 +2186,9 @@ async function runBotForInboundMessages(env, changes) {
           await sendBotReply(env, credentials, phone, `Al momento de la instalación se paga el costo de instalación ($${INSTALLATION_COST.toLocaleString("es-CL")}) más el mes de servicio por adelantado, proporcional a los días que resten del mes. No se cobra en la boleta. 😊\n\nCualquier otra duda, escríbenos.`, preferAudio);
           continue;
         }
-        if (salesLead) {
+        // Un adjunto (imagen/documento) NUNCA es una respuesta del embudo de venta: puede ser un comprobante de pago.
+        // Antes, con un lead abierto, el embudo lo contestaba con "envíanos tu ubicación" y el comprobante se perdía.
+        if (salesLead && message.type !== "image" && message.type !== "document") {
           if (isOptOutMessage(text)) {
             await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?").bind(salesLead.id).run();
             await sendBotReply(env, credentials, phone, "Entendido, no seguimos con la solicitud. Cualquier cosa, escríbenos. 🙌", preferAudio);
@@ -3558,7 +3593,12 @@ export default {
           if (!Array.isArray(change.value?.messages)) continue;
           change.value.messages = change.value.messages.filter((message) => {
             const forgedPaymentAction = staffPhones.has(normalizeWhatsAppPhone(message.from)) && String(message.button?.payload || "").startsWith("confirm_payment:");
-            if (forgedPaymentAction) console.error("unsigned_webhook_payment_action_dropped", message.id);
+            if (forgedPaymentAction) {
+              console.error("unsigned_webhook_payment_action_dropped", message.id);
+              // No debe ser silencioso: si el secreto falta, el botón real de Carlos también se descartaría.
+              if (ctx?.waitUntil) ctx.waitUntil(getWhatsAppCredentials(env).then((credentials) => sendWhatsAppText(env, credentials, normalizeWhatsAppPhone(message.from),
+                "No pude aplicar el pago porque el webhook de Meta no tiene la firma configurada (META_APP_SECRET). Regístralo desde el panel.")).catch(() => null));
+            }
             return !forgedPaymentAction;
           });
         }
@@ -3729,7 +3769,10 @@ export default {
       // takeOverUnansweredHumanChats). Un fallo aquí no debe tumbar el seguimiento de leads.
       const takeover = await takeOverUnansweredHumanChats(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
       const digest = await alertStaffUnansweredChats(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
-      return Response.json({ ...result, takeover, digest }, { status: result.ok ? 200 : 502 });
+      // Los avisos en cola por el espaciado de 90 s solo se despachaban al llegar otro webhook de Meta; en una
+      // hora tranquila podían quedar horas sin salir. La corrida de 10 minutos también vacía la cola.
+      const flushed = await flushQueuedStaffNotifications(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
+      return Response.json({ ...result, takeover, digest, flushed }, { status: result.ok ? 200 : 502 });
     }
 
     if (url.pathname === "/api/billing/automation" && request.method === "GET") {
