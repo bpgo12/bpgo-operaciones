@@ -44,7 +44,7 @@ jobs:
         env:
           PROJECTS_LIST: ${{ steps.cloudflare-projects.outputs.command-output }}
         run: |
-          PROJECT_NAME="$(printf '%s\n' "$PROJECTS_LIST" | awk -F '│' '/bpgo\.cl/ { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); print $1; exit }')"
+          PROJECT_NAME="$(printf '%s\n' "$PROJECTS_LIST" | awk -F '│' '/bpgo\.cl/ { for (i = 1; i <= NF; i++) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i); if ($i != "") { print $i; exit } } }')"
           test -n "$PROJECT_NAME"
           echo "PROJECT_NAME=$PROJECT_NAME" >> "$GITHUB_ENV"
 
