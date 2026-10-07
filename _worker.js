@@ -1928,6 +1928,27 @@ async function recentInboundMedia(env, phone) {
   return { mediaId: row.media_id, mediaType: row.message_type };
 }
 
+// Estado de conversación que caduca (2026-10-07): había 16 comprobantes "esperando el nombre" desde el 20 de
+// septiembre y 11 solicitudes de venta abiertas desde el 18 de septiembre. Cualquier mensaje futuro de esos
+// clientes se leía como "el nombre" o como respuesta del embudo ("respóndeme con el plan que prefieras") semanas
+// después, aunque preguntaran otra cosa. Un trámite a medias que lleva horas sin avance ya no es ese trámite.
+const PENDING_NAME_TTL_HOURS = 6;
+const SALES_LEAD_TTL_DAYS = 3;
+const SALES_LEAD_FACTIBILIDAD_TTL_DAYS = 14;
+
+async function expireStaleConversationState(env, phone = null) {
+  const filter = phone ? " AND phone = ?" : "";
+  const args = phone ? [phone] : [];
+  for (const table of ["whatsapp_pending_visits", "whatsapp_pending_payments", "whatsapp_pending_billing"]) {
+    await env.DB.prepare(`DELETE FROM ${table} WHERE created_at < datetime('now', '-${PENDING_NAME_TTL_HOURS} hours')${filter}`).bind(...args).run();
+  }
+  await env.DB.prepare(`UPDATE whatsapp_sales_leads SET status = 'cancelled', updated_at = datetime('now')
+    WHERE status IN ('awaiting_sector', 'awaiting_location', 'awaiting_plan', 'awaiting_installation_data', 'awaiting_group_clarification')
+    AND updated_at < datetime('now', '-${SALES_LEAD_TTL_DAYS} days')${filter}`).bind(...args).run();
+  await env.DB.prepare(`UPDATE whatsapp_sales_leads SET status = 'cancelled', updated_at = datetime('now')
+    WHERE status = 'awaiting_factibilidad' AND updated_at < datetime('now', '-${SALES_LEAD_FACTIBILIDAD_TTL_DAYS} days')${filter}`).bind(...args).run();
+}
+
 // Auditoría 2026-10-05: el bot quedó en un bucle de 22+ mensajes con OTRO bot automático (un número que
 // contestaba con ofertas tipo "¡Hola, que alegría verte por acá!... Descubre las ofertas", "Te avisaremos
 // en otra ocasión"), gastando IA y mensajes de Meta sin fin. Dos defensas independientes:
@@ -2168,6 +2189,7 @@ async function runBotForInboundMessages(env, changes) {
           }
         }
         await ensureWhatsAppBotTables(env);
+        await expireStaleConversationState(env, phone).catch(() => null);
         const salesLead = await env.DB.prepare(
           "SELECT * FROM whatsapp_sales_leads WHERE phone = ? AND status NOT IN ('completed','cancelled','no_factibilidad') ORDER BY created_at DESC LIMIT 1"
         ).bind(phone).first();
@@ -3439,11 +3461,19 @@ export default {
       const body = await request.json().catch(() => ({}));
       const email = String(body.email || "").trim().toLowerCase();
       const password = String(body.password || "");
+      // Sin límite de intentos, la contraseña (que hoy se guarda y compara en texto plano) se podía adivinar por
+      // fuerza bruta. Máximo 10 intentos fallidos por IP y correo cada 15 minutos.
+      const ip = request.headers.get("cf-connecting-ip") || "unknown";
+      await env.DB.prepare("CREATE TABLE IF NOT EXISTS auth_attempts (ip TEXT NOT NULL, email TEXT NOT NULL, at TEXT NOT NULL DEFAULT (datetime('now')))").run().catch(() => null);
+      const failed = await env.DB.prepare("SELECT COUNT(*) AS n FROM auth_attempts WHERE ip = ? AND email = ? AND at > datetime('now', '-15 minutes')").bind(ip, email).first().catch(() => null);
+      if ((failed?.n || 0) >= 10) return Response.json({ ok: false, error: "Demasiados intentos. Espera 15 minutos." }, { status: 429 });
       const row = await env.DB.prepare("SELECT data FROM app_state WHERE id = 'main'").first();
       const state = row ? JSON.parse(row.data) : null;
       const user = state && Array.isArray(state.users)
         ? state.users.find((item) => String(item.email || "").trim().toLowerCase() === email && String(item.password || "") === password && item.active !== false)
         : null;
+      if (!user) await env.DB.prepare("INSERT INTO auth_attempts (ip, email) VALUES (?, ?)").bind(ip, email).run().catch(() => null);
+      else await env.DB.prepare("DELETE FROM auth_attempts WHERE ip = ? AND email = ?").bind(ip, email).run().catch(() => null);
       const token = user ? await signSession({ userId: user.id, role: user.role, exp: Date.now() + 12 * 60 * 60 * 1000 }, env.OPERATIONS_ADMIN_SECRET) : null;
       return Response.json(user ? { ok: true, userId: user.id, token } : { ok: false }, { status: user ? 200 : 401 });
     }
@@ -3772,7 +3802,8 @@ export default {
       // Los avisos en cola por el espaciado de 90 s solo se despachaban al llegar otro webhook de Meta; en una
       // hora tranquila podían quedar horas sin salir. La corrida de 10 minutos también vacía la cola.
       const flushed = await flushQueuedStaffNotifications(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
-      return Response.json({ ...result, takeover, digest, flushed }, { status: result.ok ? 200 : 502 });
+      const expired = await expireStaleConversationState(env).then(() => ({ ok: true })).catch((error) => ({ ok: false, error: String(error?.message || error) }));
+      return Response.json({ ...result, takeover, digest, flushed, expired }, { status: result.ok ? 200 : 502 });
     }
 
     if (url.pathname === "/api/billing/automation" && request.method === "GET") {
