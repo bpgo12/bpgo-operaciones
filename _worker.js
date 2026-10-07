@@ -602,40 +602,18 @@ function reactivationNeedsNormalFlow(message) {
   return hasExplicitPaymentIntent(text) || mentionsBillingTopic(text);
 }
 
-// Caso real (2026-10-05, 56920144998): un cliente en modo humano escribió "Algún ejecutivo para hablar"
-// y durante ~13 minutos nadie respondió ni se enteró: con la conversación en modo humano el bot calla
-// (correcto), pero tampoco se avisaba a Carlos de que el cliente había escrito. Ahora llega UN aviso
-// por cliente cada hora como máximo, y ninguno si ya se le respondió hace menos de 30 minutos (es
-// decir, si un humano está atendiendo la conversación en este momento).
+// Decisión de Carlos (2026-10-07): lo único que le interesa recibir de una conversación en atención humana es
+// cuando el cliente envía un posible comprobante de pago (imagen o documento). Stickers, audios, videos,
+// ubicaciones y texto NO generan aviso (los textos sin respuesta los retoma el bot a los 5 minutos).
+// Un adjunto se avisa SIEMPRE (sin enfriamiento), porque es lo único que no se puede perder.
 const HUMAN_MODE_ALERT_COOLDOWN_MIN = 60;
 const HUMAN_MODE_RECENT_REPLY_MIN = 30;
 
 async function alertStaffCustomerWroteInHumanMode(env, credentials, phone, message) {
-  // Un adjunto puede ser un comprobante de pago: se avisa SIEMPRE (sin enfriamiento ni "ya le respondieron"),
-  // porque es lo único que no se puede perder. Audios, ubicaciones, stickers y videos saltan solo la regla de
-  // "ya le respondieron hace poco" (el equipo no los ve igual que un texto).
   const receiptCandidate = message.type === "image" || message.type === "document";
-  const nonText = receiptCandidate || ["audio", "video", "sticker", "location"].includes(message.type);
-  if (!receiptCandidate) {
-    const recentAlert = await env.DB.prepare(
-      `SELECT 1 AS found FROM staff_notifications_log WHERE customer_phone = ? AND case_type = 'Cliente en atención humana'
-       AND created_at > datetime('now', ?) LIMIT 1`
-    ).bind(phone, `-${HUMAN_MODE_ALERT_COOLDOWN_MIN} minutes`).first();
-    if (recentAlert) return false;
-  }
-  if (!nonText) {
-    const lastOutbound = await env.DB.prepare(
-      "SELECT created_at FROM whatsapp_inbox_messages WHERE phone = ? AND direction = 'outbound' ORDER BY created_at DESC LIMIT 1"
-    ).bind(phone).first();
-    const lastOutboundMs = lastOutbound?.created_at ? parseSqliteDatetime(lastOutbound.created_at) : NaN;
-    if (Number.isFinite(lastOutboundMs) && Date.now() - lastOutboundMs < HUMAN_MODE_RECENT_REPLY_MIN * 60 * 1000) return false;
-  }
-  const text = String(inboundMessageText(message) || "").trim();
+  if (!receiptCandidate) return false;
   const name = await getKnownAccountName(env, phone).catch(() => null);
-  const summary = receiptCandidate
-    ? "Envió una imagen o documento (posible comprobante de pago) y la conversación está en atención humana. Revisa el caso en el panel."
-    : text ? `Escribió y el bot no responde porque la conversación está en atención humana: "${text.slice(0, 180)}"`
-    : `Envió un mensaje (${message.type || "sin texto"}) y el bot no responde porque la conversación está en atención humana.`;
+  const summary = "Envió una imagen o documento (posible comprobante de pago) y la conversación está en atención humana. Revisa el caso en el panel.";
   await notifyStaff(env, credentials, "carlos", "Cliente en atención humana", name, phone, summary, { sourceMessageId: message.id });
   return true;
 }
@@ -711,7 +689,7 @@ async function alertStaffUnansweredChats(env) {
   if (recent) return { ok: true, sent: false, reason: "cooldown" };
   const rows = await env.DB.prepare(`SELECT m.phone, m.created_at AS last_at, m.message_type, m.message_text
     FROM whatsapp_inbox_messages m
-    WHERE m.direction = 'inbound' AND m.message_type IN ('text', 'audio', 'image', 'document')
+    WHERE m.direction = 'inbound' AND m.message_type IN ('image', 'document')
       AND m.created_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) AND m.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
       AND m.created_at = (SELECT MAX(created_at) FROM whatsapp_inbox_messages WHERE phone = m.phone)
     ORDER BY m.created_at ASC LIMIT 40`)
@@ -724,7 +702,7 @@ async function alertStaffUnansweredChats(env) {
   const list = waiting.slice(0, 6).map((row) => `+${row.phone}`).join(", ");
   const credentials = await getWhatsAppCredentials(env);
   const result = await notifyStaff(env, credentials, "carlos", "Chats sin responder", "Varios clientes", "interno",
-    `${waiting.length} cliente(s) esperan respuesta hace más de ${UNANSWERED_DIGEST_AFTER_MIN} min: ${list}${waiting.length > 6 ? " y más" : ""}. Revisa la bandeja de WhatsApp.`,
+    `${waiting.length} cliente(s) enviaron un comprobante o archivo y esperan respuesta hace más de ${UNANSWERED_DIGEST_AFTER_MIN} min: ${list}${waiting.length > 6 ? " y más" : ""}. Revisa la bandeja de WhatsApp.`,
     { sourceMessageId: `digest-${new Date().toISOString().slice(0, 13)}` });
   return { ok: true, sent: true, waiting: waiting.length, result };
 }

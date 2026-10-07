@@ -436,7 +436,10 @@ assert.match(worker, /await sendWhatsAppText\(env, credentials, message\.from, a
 // -> aviso a Carlos con cooldown; (2) en una prueba desde un número personal el bot repetía sin parar la lista
 // de planes y "no olvidaba" la conversación -> tope tras un recordatorio + comando para empezar de nuevo.
 assert.match(worker, /await alertStaffCustomerWroteInHumanMode\(env, credentials, phone, message\)\.catch\(\(\) => null\);\s*\n\s*continue;/);
-assert.match(worker, /case_type = 'Cliente en atención humana'/);
+// 2026-10-07: Carlos solo quiere aviso de comprobantes (imagen/documento); stickers, audios y texto no avisan.
+assert.match(worker, /const receiptCandidate = message\.type === "image" \|\| message\.type === "document";\s*\n\s*if \(!receiptCandidate\) return false;/);
+assert.doesNotMatch(worker, /Envió un mensaje \(\$\{message\.type/);
+assert.match(worker, /m\.message_type IN \('image', 'document'\)\s*\n\s*AND m\.created_at <=/);
 assert.match(worker, /const HUMAN_MODE_ALERT_COOLDOWN_MIN = 60;/);
 assert.match(worker, /if \(\(planReminders\?\.n \|\| 0\) >= 1\) \{[\s\S]{0,300}te va a escribir un agente[\s\S]{0,600}setBotSessionMode\(env, phone, "human", "case_created_new_customer"\)/);
 assert.match(worker, /Ese plan no está disponible en tu sector\./);
