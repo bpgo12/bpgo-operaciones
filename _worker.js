@@ -1285,6 +1285,8 @@ function isLikelyNotAName(raw) {
   if (/\?/.test(text)) return true;
   const normalized = text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
   if (/\b(verdad|cierto|no es asi)\b/.test(normalized)) return true;
+  // Un saludo no es un nombre: "Hola muy buenas tardes" quedaba guardado como nombre del titular de la instalación.
+  if (/^(hola|holi|buenas|buenos|buen dia|saludos)\b/.test(normalized)) return true;
   return /^(gracias|listo|ok|okay|dale|ya|ahi estan|ahi esta|eso es todo|eso seria todo|son esos|esos son|los datos)\b/.test(normalized);
 }
 
@@ -1934,7 +1936,7 @@ async function recentInboundMedia(env, phone) {
 // después, aunque preguntaran otra cosa. Un trámite a medias que lleva horas sin avance ya no es ese trámite.
 const PENDING_NAME_TTL_HOURS = 6;
 const SALES_LEAD_TTL_DAYS = 3;
-const SALES_LEAD_FACTIBILIDAD_TTL_DAYS = 14;
+const SALES_LEAD_FACTIBILIDAD_TTL_DAYS = 7;
 
 async function expireStaleConversationState(env, phone = null) {
   const filter = phone ? " AND phone = ?" : "";
@@ -2004,6 +2006,27 @@ function botTextProblem(text) {
   if (/\b(no se puede(n)?|no esta permitido|no aceptamos|no realizamos|esta prohibido)\b/.test(normalized)
     && /\b(fecha(s)? de pago|dia(s)? de pago|politica|politicas)\b/.test(normalized)) return "unsupported_policy";
   return null;
+}
+
+// "Quiero hablar con alguien / un ejecutivo / una persona": frases explícitas (no basta la palabra "agente" o "persona").
+function isHumanRequest(text) {
+  const normalized = cyberNormalize(text);
+  return /\b(hablar|conversar|comunicar(me)?|contactar(me)?|comunicarse) con (alguien|una persona|un ejecutivo|una ejecutiva|ejecutivo|ejecutiva|un agente|agente|un humano|humano|un representante|el encargado|la encargada|un asesor|una asesora|asesor|asesora)\b/.test(normalized)
+    || /\b(quiero|necesito|requiero|prefiero|pido) (un|una|el|la) (ejecutivo|ejecutiva|agente|asesor|asesora|persona|humano)\b/.test(normalized)
+    || /\batencion (humana|personalizada|con una persona)\b/.test(normalized);
+}
+
+// Un sector es un lugar: corto, sin signos de pregunta ni palabras de pagos/saludos/cortesía. Antes todo texto era "sector".
+function isPlausibleSector(text) {
+  const raw = String(text || "").trim();
+  if (!raw || raw.length > 60 || /[?¿]/.test(raw) || /\d{5,}/.test(raw) || /https?:/.test(raw)) return false;
+  const normalized = cyberNormalize(raw).replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+  const words = normalized.split(" ").filter(Boolean);
+  if (!words.length || words.length > 7) return false;
+  if (isPureGreeting(raw) || isClosingPleasantry(raw) || isHumanRequest(raw)) return false;
+  if (/^(hola|buenas|buenos|buen)\b/.test(normalized)) return false;
+  if (/\b(pago|pagar|pague|deuda|boleta|comprobante|saldo|internet|instalar|instalan|instalacion|plan|precio|valor|factibilidad|se podria|gracias|favor|quiero|necesito|cuando|cuanto|como)\b/.test(normalized)) return false;
+  return true;
 }
 
 function isPureGreeting(text) {
@@ -2203,20 +2226,47 @@ async function runBotForInboundMessages(env, changes) {
         // IA ni por el embudo (que la leería como dato de instalación). Dentro del embudo, un "¿y eso se
         // paga en la boleta?" sin mencionar la palabra instalación también es esta misma duda.
         const salesLeadPaying = salesLead && ["awaiting_plan", "awaiting_installation_data"].includes(salesLead.status)
-          && looksLikeQuestion(text) && /\b(boleta|pago|pagar|paga|pagan|cobran|cobro)\b/.test(cyberNormalize(text));
+          && (looksLikeQuestion(text) || /\b(forma de pago|formas de pago|como (se )?(pago|paga|pagar)|donde (se )?(pago|paga|pagar))\b/.test(cyberNormalize(text)))
+          && /\b(boleta|pago|pagar|paga|pagan|cobran|cobro)\b/.test(cyberNormalize(text)) && !hasExplicitPaymentIntent(text);
+        // Pedido explícito de hablar con una persona: se atiende por código en CUALQUIER estado (antes, dentro del
+        // embudo de venta, "quiero hablar con alguien" recibía otra vez "respóndeme con el plan que prefieras").
+        if (!isStaffPhone && String(text || "").trim() && isHumanRequest(text) && !isOptOutMessage(text)) {
+          await setBotSessionMode(env, phone, "human", "bot_escalated");
+          await sendBotReply(env, credentials, phone, "Ya te comunico con un agente de BPGO, en breve te responde por acá. 🙌", preferAudio);
+          await notifyStaff(env, credentials, "carlos", "Conversación escalada", await getKnownAccountName(env, phone).catch(() => null), phone,
+            `El cliente pidió hablar con una persona: "${String(text).trim().slice(0, 150)}"`, { sourceMessageId: message.id }).catch(() => null);
+          continue;
+        }
         if (String(text || "").trim() && !isOptOutMessage(text) && (isInstallationPaymentQuestion(text) || salesLeadPaying)) {
           await sendBotReply(env, credentials, phone, `Al momento de la instalación se paga el costo de instalación ($${INSTALLATION_COST.toLocaleString("es-CL")}) más el mes de servicio por adelantado, proporcional a los días que resten del mes. No se cobra en la boleta. 😊\n\nCualquier otra duda, escríbenos.`, preferAudio);
           continue;
         }
         // Un adjunto (imagen/documento) NUNCA es una respuesta del embudo de venta: puede ser un comprobante de pago.
         // Antes, con un lead abierto, el embudo lo contestaba con "envíanos tu ubicación" y el comprobante se perdía.
-        if (salesLead && message.type !== "image" && message.type !== "document") {
+        // Caso real (2026-10-07, 56927872347): un cliente que preguntó "¿se podría?" el 1-oct quedó con la solicitud en
+        // "esperando factibilidad"; ya instalado, escribió "Necesito ayuda con la forma de pago" y el bot le repitió
+        // "Seguimos revisando la factibilidad en tu sector". Mientras el embudo espera sector, ubicación o la
+        // decisión de Carlos, un mensaje sobre pagos o una falla técnica NO es respuesta del embudo: sigue el flujo normal.
+        const funnelYields = Boolean(salesLead) && (
+          (["awaiting_sector", "awaiting_location", "awaiting_factibilidad", "awaiting_group_clarification"].includes(salesLead.status)
+            && (mentionsBillingTopic(text) || hasExplicitPaymentIntent(text) || mentionsTechnicalIssueOrVisit(text)))
+          // Con el plan ya elegido o pidiendo datos, solo un pago YA hecho o una falla técnica sacan al cliente del embudo
+          // (una duda de "cómo pago" se responde con la política de la instalación, ver más arriba).
+          || (["awaiting_plan", "awaiting_installation_data"].includes(salesLead.status)
+            && (hasExplicitPaymentIntent(text) || /\b(pague|pagamos|pagado|pagada|transferi|transferimos|deposite|comprobante)\b/.test(cyberNormalize(text)) || mentionsTechnicalIssueOrVisit(text))));
+        if (salesLead && !funnelYields && message.type !== "image" && message.type !== "document") {
           if (isOptOutMessage(text)) {
             await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?").bind(salesLead.id).run();
             await sendBotReply(env, credentials, phone, "Entendido, no seguimos con la solicitud. Cualquier cosa, escríbenos. 🙌", preferAudio);
             continue;
           }
           if (salesLead.status === "awaiting_sector" && String(text || "").trim()) {
+            // Cualquier texto se guardaba como "sector": "Hola muy buenas tardes", "¿se podría?", "ok gracias" y hasta
+            // el nombre de un PDF de Webpay quedaron como sector en producción. Solo se acepta algo que parezca un lugar.
+            if (!isPlausibleSector(text)) {
+              await sendBotReply(env, credentials, phone, "Para revisar la disponibilidad necesito saber de qué sector nos escribes, por ejemplo: Lanalhue, Peleco o Cayucupil. 📍", preferAudio);
+              continue;
+            }
             const sector = String(text).trim().slice(0, 200);
             await env.DB.prepare("UPDATE whatsapp_sales_leads SET sector = ?, status = 'awaiting_location', updated_at = datetime('now') WHERE id = ?").bind(sector, salesLead.id).run();
             await sendBotReply(env, credentials, phone, "Perfecto, ahora por favor envíanos tu ubicación desde WhatsApp (ícono 📎 > Ubicación) para revisar la factibilidad exacta. 📍", preferAudio);
@@ -2253,7 +2303,14 @@ async function runBotForInboundMessages(env, changes) {
             // Se dice una sola vez: si ya fue lo último que se le escribió, no se repite igual.
             const FACTIBILIDAD_WAIT = "Seguimos revisando la factibilidad en tu sector, en breve te contactamos. 🙏";
             const lastOut = await env.DB.prepare("SELECT message_text FROM whatsapp_inbox_messages WHERE phone = ? AND direction = 'outbound' ORDER BY created_at DESC LIMIT 1").bind(phone).first();
-            if (lastOut?.message_text !== FACTIBILIDAD_WAIT) await sendBotReply(env, credentials, phone, FACTIBILIDAD_WAIT, preferAudio);
+            if (lastOut?.message_text !== FACTIBILIDAD_WAIT) {
+              await sendBotReply(env, credentials, phone, FACTIBILIDAD_WAIT, preferAudio);
+            } else {
+              // No repetir el mismo texto, pero tampoco dejar al cliente en silencio: antes quedaba sin respuesta Y
+              // sin aviso a nadie (la repetición simplemente se omitía).
+              await notifyStaff(env, credentials, "carlos", "Cliente esperando factibilidad", salesLead.customer_name, phone,
+                `Escribió otra vez mientras espera la revisión de factibilidad (sector: ${salesLead.sector || "no indicado"}): "${String(text || "").trim().slice(0, 150)}"`, { sourceMessageId: message.id }).catch(() => null);
+            }
             continue;
           }
           if (salesLead.status === "awaiting_plan" && String(text || "").trim()) {
@@ -2297,6 +2354,15 @@ async function runBotForInboundMessages(env, changes) {
             const fragment = classifyInstallationFragment(text, {
               name: salesLead.installation_name, address: salesLead.installation_address,
             });
+            // Una pregunta que no aporta ningún dato ("¿cuándo me instalan?") la contesta una persona, igual que en
+            // la etapa de elegir plan; antes recibía "Para avanzar necesito..." como si no la hubiera escrito.
+            if (!fragment && looksLikeQuestion(text)) {
+              await sendBotReply(env, credentials, phone, "Voy a dejar esta consulta para que te la responda un agente en breve. 🙏", preferAudio);
+              await notifyStaff(env, credentials, "carlos", "Consulta de venta", salesLead.customer_name, phone,
+                `Cliente con plan elegido (${salesLead.chosen_plan || "sin plan"}) y datos pendientes preguntó: "${String(text).trim().slice(0, 150)}"`, { sourceMessageId: message.id }).catch(() => null);
+              await setBotSessionMode(env, phone, "human", "case_created_new_customer");
+              continue;
+            }
             if (fragment) {
               const setClauses = Object.keys(fragment).map((field) => `installation_${field} = ?`).join(", ");
               await env.DB.prepare(`UPDATE whatsapp_sales_leads SET ${setClauses}, updated_at = datetime('now') WHERE id = ?`)
@@ -2311,7 +2377,8 @@ async function runBotForInboundMessages(env, changes) {
                 `Sector: ${salesLead.sector || "no indicado"}. Plan: ${salesLead.chosen_plan}. RUT: ${updatedLead.installation_rut}. Tel: ${updatedLead.installation_phone}. Correo: ${updatedLead.installation_email}. Dirección: ${updatedLead.installation_address}. Coordinar instalación.`, { leadId: salesLead.id, sourceMessageId: message.id });
               await setBotSessionMode(env, phone, "human", "case_created_new_customer");
             } else {
-              await sendBotReply(env, credentials, phone, `Anotado ✅ Todavía me falta: ${missing.join(", ")}.`, preferAudio);
+              // "Anotado ✅" solo si de verdad se anotó algo; ante una pregunta o un "ok gracias" no se finge.
+              await sendBotReply(env, credentials, phone, fragment ? `Anotado ✅ Todavía me falta: ${missing.join(", ")}.` : `Para avanzar con tu instalación todavía necesito: ${missing.join(", ")}.`, preferAudio);
             }
             continue;
           }

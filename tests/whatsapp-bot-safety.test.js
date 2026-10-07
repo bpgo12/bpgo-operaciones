@@ -676,7 +676,7 @@ assert.doesNotMatch(worker, /sendBotReply\(env, credentials, phone, action\.text
 assert.match(worker, /"Nombre pendiente", phone,\s*\n\s*`Comprobante recibido \(el cliente aún no indica a nombre de quién\)/);
 
 // Revisión de punta a punta (2026-10-07) con 3.300 escenarios simulados contra el Worker real:
-assert.match(worker, /if \(salesLead && message\.type !== "image" && message\.type !== "document"\) \{/, "un adjunto nunca es respuesta del embudo de venta");
+assert.match(worker, /if \(salesLead && !funnelYields && message\.type !== "image" && message\.type !== "document"\) \{/, "un adjunto nunca es respuesta del embudo de venta");
 assert.match(worker, /const receiptCandidate = message\.type === "image" \|\| message\.type === "document";/);
 assert.match(worker, /await sendBotReply\(env, credentials, phone, "Registramos tu solicitud de visita técnica, un agente te confirmará el horario\. 🙌", preferAudio\);/);
 assert.doesNotMatch(worker, /action\.text \|\| "Registramos tu solicitud de visita/);
@@ -693,3 +693,28 @@ assert.match(worker, /const expired = await expireStaleConversationState\(env\)/
 
 // Límite de intentos de inicio de sesión (la contraseña se compara en texto plano contra la planilla).
 assert.match(worker, /\(failed\?\.n \|\| 0\) >= 10\) return Response\.json\(\{ ok: false, error: "Demasiados intentos\. Espera 15 minutos\." \}, \{ status: 429 \}\)/);
+
+// Embudo que secuestraba mensajes (2026-10-07, 56927872347 y revisión por estados): sector = cualquier texto,
+// "quiero hablar con alguien" ignorado, saludo guardado como nombre, preguntas contestadas con "Anotado ✅".
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`
+    ${functionSource("cyberNormalize")}
+    ${functionSource("isPureGreeting")}
+    ${functionSource("isClosingPleasantry")}
+    ${functionSource("isHumanRequest")}
+    ${functionSource("isPlausibleSector")}
+    this.api = { isHumanRequest, isPlausibleSector };
+  `, ctx);
+  for (const yes of ["quiero hablar con alguien", "necesito un ejecutivo", "Quiero hablar con una persona por favor", "comunicarme con un agente", "atención humana"]) assert.equal(ctx.api.isHumanRequest(yes), true, yes);
+  for (const no of ["el agente me dijo que pagara", "no tengo internet", "hola", "es una persona mayor"]) assert.equal(ctx.api.isHumanRequest(no), false, no);
+  for (const yes of ["Lanalhue", "Peleco", "sector Cayucupil", "Los Aromos, Cañete", "Trangilboro", "Cañete"]) assert.equal(ctx.api.isPlausibleSector(yes), true, yes);
+  for (const no of ["Hola muy buenas tardes", "ok gracias", "¿se podría?", "Necesito ayuda con la forma de pago", "quiero contratar internet", "webpaycl comprobante Pago 1b6fu", "hola", "buenas tardes, quisiera saber si llega internet a mi casa por favor"]) assert.equal(ctx.api.isPlausibleSector(no), false, no);
+}
+assert.match(worker, /if \(!isPlausibleSector\(text\)\) \{/);
+assert.match(worker, /if \(!isStaffPhone && String\(text \|\| ""\)\.trim\(\) && isHumanRequest\(text\) && !isOptOutMessage\(text\)\) \{/);
+assert.match(worker, /fragment \? `Anotado ✅ Todavía me falta/);
+assert.match(worker, /if \(!fragment && looksLikeQuestion\(text\)\) \{/);
+assert.match(worker, /"Cliente esperando factibilidad"/);
+assert.match(worker, /const SALES_LEAD_FACTIBILIDAD_TTL_DAYS = 7;/);
