@@ -32,10 +32,19 @@ jobs:
           fi
           grep -R -E '56941985967|\+56 9 4198 5967' public-site
 
+      - name: Consultar proyectos Cloudflare
+        id: cloudflare-projects
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages project list --json
+
       - name: Identificar proyecto de bpgo.cl
+        env:
+          PROJECTS_JSON: ${{ steps.cloudflare-projects.outputs.command-output }}
         run: |
-          npx wrangler@4 pages project list --json > projects.json
-          PROJECT_NAME="$(jq -r '(.result // .)[] | select((.domains // []) | index("bpgo.cl")) | .name' projects.json | head -n 1)"
+          PROJECT_NAME="$(printf '%s' "$PROJECTS_JSON" | jq -r '(.result // .)[] | select((.domains // []) | index("bpgo.cl")) | .name' | head -n 1)"
           test -n "$PROJECT_NAME"
           echo "PROJECT_NAME=$PROJECT_NAME" >> "$GITHUB_ENV"
 
