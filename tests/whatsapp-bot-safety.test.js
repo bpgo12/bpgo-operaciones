@@ -683,3 +683,13 @@ assert.doesNotMatch(worker, /action\.text \|\| "Registramos tu solicitud de visi
 assert.match(worker, /final_template|"text_fallback"/);
 assert.match(worker, /const textFallbackId = null|let textFallbackId = null;/);
 assert.match(worker, /const flushed = await flushQueuedStaffNotifications\(env\)/);
+
+// Estado pendiente que caduca (2026-10-07): 16 "esperando nombre" desde el 20-sep y 11 leads abiertos desde el 18-sep
+// secuestraban los mensajes futuros de esos clientes.
+assert.match(worker, /const PENDING_NAME_TTL_HOURS = 6;/);
+assert.match(worker, /const SALES_LEAD_TTL_DAYS = 3;/);
+assert.match(worker, /await expireStaleConversationState\(env, phone\)\.catch\(\(\) => null\);\s*\n\s*const salesLead = await env\.DB\.prepare\(/);
+assert.match(worker, /const expired = await expireStaleConversationState\(env\)/);
+
+// Límite de intentos de inicio de sesión (la contraseña se compara en texto plano contra la planilla).
+assert.match(worker, /\(failed\?\.n \|\| 0\) >= 10\) return Response\.json\(\{ ok: false, error: "Demasiados intentos\. Espera 15 minutos\." \}, \{ status: 429 \}\)/);
