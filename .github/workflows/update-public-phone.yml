@@ -34,10 +34,8 @@ jobs:
 
       - name: Identificar proyecto de bpgo.cl
         run: |
-          curl -fsS \
-            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects" > projects.json
-          PROJECT_NAME="$(jq -r '.result[] | select(.domains | index("bpgo.cl")) | .name' projects.json | head -n 1)"
+          npx wrangler@4 pages project list --json > projects.json
+          PROJECT_NAME="$(jq -r '(.result // .)[] | select((.domains // []) | index("bpgo.cl")) | .name' projects.json | head -n 1)"
           test -n "$PROJECT_NAME"
           echo "PROJECT_NAME=$PROJECT_NAME" >> "$GITHUB_ENV"
 
