@@ -7,6 +7,16 @@
     return document.getElementById("work-detail-panel");
   }
 
+  function installTechnicianMode() {
+    const profile = document.querySelector(".sidebar .profile");
+    if (!profile || !document.body) return;
+    const role = String(profile.textContent || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase();
+    document.body.classList.toggle("mobile-technician", role.includes("tecnico"));
+  }
+
   function ensureBackButton() {
     const panel = detailPanel();
     if (!panel || panel.querySelector(".mobile-back-to-list")) return;
@@ -62,9 +72,13 @@
   });
 
   const observer = new MutationObserver(function () {
+    installTechnicianMode();
     if (mobileQuery.matches && document.body && document.body.classList.contains("mobile-detail-open")) ensureBackButton();
     installBillingSearch();
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
-  document.addEventListener("DOMContentLoaded", installBillingSearch);
+  document.addEventListener("DOMContentLoaded", function () {
+    installTechnicianMode();
+    installBillingSearch();
+  });
 })();

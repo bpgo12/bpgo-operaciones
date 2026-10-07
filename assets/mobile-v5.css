@@ -928,4 +928,192 @@ body {
   .login-visual {
     display: none;
   }
+
+  /* Vista de terreno: prioriza lectura y acciones esenciales para técnicos. */
+  body.mobile-technician {
+    color: #10201c;
+    background: #eef4f2;
+  }
+
+  body.mobile-technician .content {
+    padding: 10px 10px calc(92px + env(safe-area-inset-bottom));
+  }
+
+  body.mobile-technician .breadcrumbs,
+  body.mobile-technician .global-search {
+    display: none;
+  }
+
+  body.mobile-technician .topbar {
+    margin-bottom: 10px;
+    padding: 4px 2px;
+  }
+
+  body.mobile-technician .topbar h1 {
+    font-size: 24px;
+    line-height: 1.12;
+  }
+
+  body.mobile-technician .topbar .toolbar {
+    margin-top: 2px;
+  }
+
+  body.mobile-technician .stats {
+    grid-auto-columns: minmax(132px, 40vw);
+    margin-bottom: 10px;
+  }
+
+  body.mobile-technician .stat {
+    min-height: 78px;
+    padding: 11px;
+  }
+
+  body.mobile-technician .stat strong {
+    font-size: 24px;
+  }
+
+  body.mobile-technician .work-control-panel {
+    position: sticky;
+    z-index: 12;
+    top: env(safe-area-inset-top);
+    margin-bottom: 10px;
+    padding: 10px;
+    box-shadow: 0 6px 18px #10242014;
+  }
+
+  body.mobile-technician .work-group-head {
+    top: calc(70px + env(safe-area-inset-top));
+    padding: 7px 3px;
+  }
+
+  body.mobile-technician .work-group-head h2 {
+    font-size: 15px;
+  }
+
+  body.mobile-technician .workspace > .work-list,
+  body.mobile-technician .work-group {
+    gap: 8px;
+  }
+
+  body.mobile-technician .work-card-compact {
+    padding: 13px 12px;
+    border-width: 1px 1px 1px 5px;
+    box-shadow: 0 3px 12px #1024200d;
+  }
+
+  body.mobile-technician .work-card-compact .work-head {
+    gap: 6px;
+  }
+
+  body.mobile-technician .work-card-compact .work-head h3 {
+    font-size: 17px;
+    line-height: 1.25;
+  }
+
+  body.mobile-technician .work-card-compact .client-line {
+    color: #075c55;
+    margin: 4px 0 0;
+    font-size: 12px;
+    line-height: 1.35;
+  }
+
+  body.mobile-technician .work-card-compact .compact-description {
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    color: #263934;
+    margin: 8px 0 0;
+    padding: 8px 9px;
+    border-left: 3px solid #0b766d;
+    background: #f1f7f5;
+    font-size: 14px;
+    font-weight: 720;
+    line-height: 1.4;
+    display: -webkit-box;
+    overflow: hidden;
+  }
+
+  body.mobile-technician .work-card-compact .meta {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  body.mobile-technician .work-card-compact .meta .pill {
+    justify-content: flex-start;
+    border-radius: 8px;
+    padding: 6px 8px;
+    font-size: 11px;
+  }
+
+  body.mobile-technician .work-card-compact::after {
+    content: "Abrir actividad";
+    min-height: 42px;
+    margin: 10px 0 0;
+    border-radius: 10px;
+    color: #fff;
+    background: #0b766d;
+    place-items: center;
+    font-size: 14px;
+    display: grid;
+  }
+
+  body.mobile-technician #work-detail-panel {
+    padding: 0;
+  }
+
+  body.mobile-technician #work-detail-panel .panel,
+  body.mobile-technician #work-detail-panel > article,
+  body.mobile-technician #work-detail-panel > section {
+    padding: 13px;
+    border-radius: 12px;
+  }
+
+  body.mobile-technician #work-detail-panel .detail-section {
+    gap: 10px;
+  }
+
+  body.mobile-technician #work-detail-panel h2 {
+    font-size: 21px;
+    line-height: 1.2;
+  }
+
+  body.mobile-technician #work-detail-panel h3 {
+    font-size: 16px;
+  }
+
+  body.mobile-technician #work-detail-panel p,
+  body.mobile-technician #work-detail-panel .timeline-item {
+    font-size: 14px;
+    line-height: 1.45;
+  }
+
+  body.mobile-technician #work-detail-panel .actions {
+    gap: 8px;
+  }
+
+  body.mobile-technician #work-detail-panel .btn,
+  body.mobile-technician #work-detail-panel button,
+  body.mobile-technician #work-detail-panel select,
+  body.mobile-technician #work-detail-panel input {
+    min-height: 48px;
+  }
+
+  body.mobile-technician .mobile-back-to-list {
+    min-height: 48px;
+    color: #075c55;
+    border: 2px solid #0b766d;
+    font-weight: 900;
+  }
+
+  body.mobile-technician .mobile-nav {
+    grid-auto-columns: minmax(82px, 1fr);
+    padding-top: 5px;
+    background: #fffffff7;
+  }
+
+  body.mobile-technician .mobile-nav button {
+    min-height: 62px;
+    font-size: 10px;
+  }
 }
