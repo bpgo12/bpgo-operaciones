@@ -508,7 +508,10 @@ assert.match(worker, /const takeover = await takeOverUnansweredHumanChats\(env\)
     assert.equal(ctx.api.isLikelyAutoReply(no), false, no);
   }
 }
-assert.match(worker, /const BOT_LOOP_MAX_REPLIES = 8;/);
+assert.match(worker, /const BOT_LOOP_MAX_REPLIES = 24;/);
+// Un embudo de venta normal envía 8+ mensajes en 10 minutos: el freno debe basarse en mensajes ENTRANTES repetidos.
+assert.match(worker, /const BOT_LOOP_REPEATED_INBOUND = 3;/);
+assert.match(worker, /\(repeated\?\.n \|\| 0\) < BOT_LOOP_REPEATED_INBOUND && \(recent\?\.n \|\| 0\) < BOT_LOOP_MAX_REPLIES/);
 assert.match(worker, /if \(!isStaffPhone && await guardAgainstBotLoop\(env, credentials, phone, message\)\) continue;/);
 assert.match(worker, /setBotSessionMode\(env, phone, "human", "bot_loop_suspected"\)/);
 // (2) Chats sin responder: resumen a Carlos + ventana de retoma hasta 23 h (límite de WhatsApp).
@@ -671,3 +674,12 @@ assert.match(worker, /const safeReply = reactivationNeedsNormalFlow\(message\) \
 assert.match(worker, /const recoveredHandoffReply = reactivationNeedsNormalFlow\(message\) \? null : safeReplyForReactivatedBusinessHandoff\(message\.reactivatedHandoffReason\);/);
 assert.doesNotMatch(worker, /sendBotReply\(env, credentials, phone, action\.text \|\| "Recibimos tu comprobante/);
 assert.match(worker, /"Nombre pendiente", phone,\s*\n\s*`Comprobante recibido \(el cliente aún no indica a nombre de quién\)/);
+
+// Revisión de punta a punta (2026-10-07) con 3.300 escenarios simulados contra el Worker real:
+assert.match(worker, /if \(salesLead && message\.type !== "image" && message\.type !== "document"\) \{/, "un adjunto nunca es respuesta del embudo de venta");
+assert.match(worker, /const receiptCandidate = message\.type === "image" \|\| message\.type === "document";/);
+assert.match(worker, /await sendBotReply\(env, credentials, phone, "Registramos tu solicitud de visita técnica, un agente te confirmará el horario\. 🙌", preferAudio\);/);
+assert.doesNotMatch(worker, /action\.text \|\| "Registramos tu solicitud de visita/);
+assert.match(worker, /final_template|"text_fallback"/);
+assert.match(worker, /const textFallbackId = null|let textFallbackId = null;/);
+assert.match(worker, /const flushed = await flushQueuedStaffNotifications\(env\)/);
