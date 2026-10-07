@@ -49,4 +49,4 @@ jobs:
           echo "PROJECT_NAME=$PROJECT_NAME" >> "$GITHUB_ENV"
 
       - name: Publicar sitio actualizado
-        run: npx wrangler@4 pages deploy public-site --project-name="$PROJECT_NAME" --branch=main
+        run: npx wrangler@4 pages deploy public-site --project-name="$PROJECT_NAME"
