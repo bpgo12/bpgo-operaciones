@@ -1,0 +1,45 @@
+name: Actualizar teléfono web BPGO
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/update-public-phone.yml
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Descargar sitio público actual
+        run: |
+          wget --mirror --page-requisites --convert-links --adjust-extension \
+            --no-host-directories --directory-prefix=public-site \
+            --domains=bpgo.cl,www.bpgo.cl https://bpgo.cl/
+
+      - name: Reemplazar teléfono oficial
+        run: |
+          find public-site -type f \( -name '*.html' -o -name '*.js' -o -name '*.json' \) -print0 |
+            xargs -0 sed -i \
+              -e 's/56996384861/56941985967/g' \
+              -e 's/+56 9 9638 4861/+56 9 4198 5967/g'
+          if grep -R -E '56996384861|\+56 9 9638 4861' public-site; then
+            echo 'El número anterior continúa presente.' >&2
+            exit 1
+          fi
+          grep -R -E '56941985967|\+56 9 4198 5967' public-site
+
+      - name: Identificar proyecto de bpgo.cl
+        run: |
+          curl -fsS \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects" > projects.json
+          PROJECT_NAME="$(jq -r '.result[] | select(.domains | index("bpgo.cl")) | .name' projects.json | head -n 1)"
+          test -n "$PROJECT_NAME"
+          echo "PROJECT_NAME=$PROJECT_NAME" >> "$GITHUB_ENV"
+
+      - name: Publicar sitio actualizado
+        run: npx wrangler@4 pages deploy public-site --project-name="$PROJECT_NAME" --branch=main
