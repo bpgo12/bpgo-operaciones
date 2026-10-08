@@ -1676,7 +1676,10 @@ const DIAGNOSTIC_STEPS = {
 
 async function pendingDiagnosticQuestion(env, phone, customerText) {
   const normalizedNow = cyberNormalize(customerText);
-  if (/\b(visita|tecnico|que vengan|agendar|mandar a alguien|venir)\b/.test(normalizedNow)) return null;
+  if (/\b(visita|tecnico|que vengan|agendar|agenden|agendemos|mandar a alguien|venir)\b/.test(normalizedNow)) return null;
+  // Instalación / coordinación de fecha NO es una falla: no se interroga por el router (caso 56948797079,
+  // 2026-10-08: "programemos para mañana o el sábado la instalación de la fibra" recibió "¿qué luces ves?").
+  if (/\b(instal\w*|program\w*|coordin\w*|fecha|horario|manana|sabado|domingo|lunes|martes|miercoles|jueves|viernes|despues de las?)\b/.test(normalizedNow)) return null;
   await ensureWhatsAppInboxTable(env);
   const rows = await env.DB.prepare(
     `SELECT direction, message_text FROM whatsapp_inbox_messages WHERE phone = ? AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-6 hours')
@@ -1685,6 +1688,8 @@ async function pendingDiagnosticQuestion(env, phone, customerText) {
   const history = rows.results || [];
   const outbound = history.filter((row) => row.direction === "outbound").map((row) => cyberNormalize(row.message_text)).join(" | ");
   const inbound = history.filter((row) => row.direction !== "outbound").map((row) => cyberNormalize(row.message_text)).concat(normalizedNow).join(" | ");
+  // Solo se indaga cuando el cliente de verdad reportó una falla; cualquier otro tema pasa tal cual.
+  if (!/lent[oa]|sin internet|sin servicio|sin conexion|no tengo internet|no hay internet|no funciona|falla|se cae|se corta|intermitente|no carga|no navega|sin senal/.test(inbound)) return null;
   const slow = /\blent[oa]\b|\bdemora|\bse cae\b|\bcorta\b/.test(inbound);
   const order = slow ? ["devices", "cable", "restart", "lights", "since"] : ["lights", "restart", "devices", "since"];
   const askedBefore = order.filter((step) => DIAGNOSTIC_STEPS[step].asked.test(outbound)).length;
