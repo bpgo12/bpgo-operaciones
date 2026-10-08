@@ -750,3 +750,6 @@ assert.doesNotMatch(worker, /Sigue así hasta que el cliente confirme que afecta
   assert.equal(ctx.api.isAlternativePaymentRequest("hola buenas tardes"), false);
 }
 assert.match(worker, /NUNCA digas que "no se puede realizar transferencia"/);
+
+// 2026-10-08: modelo por defecto subido de gpt-4o-mini (2024) a gpt-4.1-mini (mismos parámetros, costo bajo).
+assert.match(worker, /model: String\(env\.OPENAI_MODEL \|\| "gpt-4\.1-mini"\)/);
