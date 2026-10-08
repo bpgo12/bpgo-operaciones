@@ -753,3 +753,10 @@ assert.match(worker, /NUNCA digas que "no se puede realizar transferencia"/);
 
 // 2026-10-08: modelo por defecto subido de gpt-4o-mini (2024) a gpt-4.1-mini (mismos parámetros, costo bajo).
 assert.match(worker, /model: String\(env\.OPENAI_MODEL \|\| "gpt-4\.1-mini"\)/);
+
+// 2026-10-08 (56946301061): foto de comprobante CajaVecina sin texto fue contestada con "BPGO solo ofrece internet,
+// no televisión". Un adjunto sin texto nunca recibe una respuesta de conversación, y BPGO sí ofrece TV cable.
+assert.match(worker, /const attachmentOnly = \(message\.inboundType === "image" \|\| message\.inboundType === "document"\) && !String\(message\.customerText \|\| ""\)\.trim\(\);\s*\n\s*if \(attachmentOnly && action\.action === "reply"\)/);
+assert.match(worker, /inboundType: message\.type \|\| null,/);
+assert.match(worker, /const attachmentOnlyNote = /);
+assert.match(worker, /BPGO ofrece internet Y TV cable\. NUNCA digas que BPGO no ofrece televisión/);

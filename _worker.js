@@ -1363,6 +1363,7 @@ Reglas duras, nunca las rompas:
 - NUNCA prometas ni confirmes el día u hora en que llegará un técnico ("mañana", "hoy", "en la mañana", etc.): solo di que la solicitud quedó registrada y que un agente confirmará el horario. NUNCA inventes políticas, plazos o reglas de la empresa (por ejemplo "no se pueden cambiar las fechas de pago", cupos o promociones): si algo no está en las FAQs ni en los datos del cliente, usa "escalate". El campo "text" es siempre el mensaje DIRIGIDO al cliente, nunca una nota sobre él ("el cliente quiere...").
 - NUNCA menciones saldo, deuda, monto pendiente, estado de pago ni vencimiento si en el mensaje ACTUAL el cliente no preguntó por pagos o cobranza. Si el cliente reporta una falla de internet o responde una pregunta de identificación (por ejemplo solo su nombre), continúa con SU problema: confirma lo que dijo y sigue el flujo técnico o de visita; no cambies de tema a su cuenta.
 - Política de pago de la INSTALACIÓN (única versión válida, nunca la contradigas ni la inventes distinta): el costo de instalación ($25.000) más el mes de servicio por adelantado, calculado proporcional a los días que resten del mes, se pagan AL MOMENTO DE LA INSTALACIÓN. NUNCA se cobran en la boleta ni se difieren al primer mes de servicio. Si el cliente pregunta si la instalación o su costo "se paga en la boleta", responde claramente que NO. Si dudas de cualquier otro detalle de cómo se cobra una instalación, usa "escalate" en vez de inventar.
+- BPGO ofrece internet Y TV cable. NUNCA digas que BPGO no ofrece televisión ni recomiendes Netflix/HBO u otros proveedores. Si el cliente reporta un problema con la tele ("qué pasa con la tv", "no se ve la tele"), trátalo como una falla del servicio: haz el diagnóstico (luces del equipo, reinicio) o usa "escalate"; jamás inventes que no es un servicio de BPGO.
 - BPGO SÍ recibe pagos por transferencia bancaria y CajaVecina además del portal. NUNCA digas que "no se puede realizar transferencia" ni que el único medio es el portal. Si el cliente tiene dificultad para pagar (no puede usar la página, es adulto mayor, no entiende el portal), no insistas con el mismo link: usa "escalate" para que una persona le entregue los datos y lo guíe. Con clientes mayores o que escriben con dificultad, usa frases muy simples y paso a paso.
 - Para todo lo demás (preguntas frecuentes, saludos, consultas generales que sí puedes responder con las FAQs dadas), usa la acción "reply".
 
@@ -1536,9 +1537,14 @@ async function callBotResponder(env, context, inboundMessage, media) {
   } else if (media) {
     mediaNote = "\n\n(El cliente adjuntó un documento que no se puede visualizar aquí. NO asumas que es comprobante; solo trátalo como pago si el texto/caption lo indica explícitamente.)";
   }
+  // Caso real (2026-10-08, 56946301061): un cliente envió la foto de un comprobante de CajaVecina sin texto y el
+  // modelo, mirando el historial ("q pasa con la tv"), contestó sobre TV en vez de revisar el adjunto.
+  const attachmentOnlyNote = (inboundMessage.type === "image" || inboundMessage.type === "document") && !String(inboundMessage.text || "").trim()
+    ? "\n\nEl mensaje actual es SOLO un adjunto, sin texto. Analiza el adjunto y responde únicamente sobre él: si es un comprobante de pago (incluye CajaVecina, transferencias, depósitos, Webpay) usa payment_ack con receipt_evidence. NO respondas temas anteriores del historial."
+    : "";
   const textPart = {
     type: "text",
-    text: `FAQs de BPGO:\n${context.faq}\n\n${customerLine}\n\nÚltimos mensajes de la conversación:\n${historyLines || "(sin historial previo)"}\n\nNuevo mensaje del cliente (${inboundMessage.type}): ${inboundMessage.text || "(sin texto, ver adjunto)"}${mediaNote}`,
+    text: `FAQs de BPGO:\n${context.faq}\n\n${customerLine}\n\nÚltimos mensajes de la conversación:\n${historyLines || "(sin historial previo)"}\n\nNuevo mensaje del cliente (${inboundMessage.type}): ${inboundMessage.text || "(sin texto, ver adjunto)"}${mediaNote}${attachmentOnlyNote}`,
   };
   const pdfFallbackNote = "\n\n(El cliente adjuntó un documento que no se puede visualizar aquí. NO asumas que es comprobante; solo trátalo como pago si el texto/caption lo indica explícitamente.)";
   userContent.push(textPart);
@@ -1667,7 +1673,7 @@ function mentionsServiceOutage(text) {
 }
 
 function mentionsTechnicalIssueOrVisit(text) {
-  return /\b(sin internet|sin conexi[oó]n|no tengo internet|no funciona|falla|corte|fibra|router|luz roja|intermitente|lento|visita|t[eé]cnico|revisi[oó]n)\b/i.test(text || "");
+  return /\b(sin internet|sin conexi[oó]n|no tengo internet|no funciona|falla|corte|fibra|router|luz roja|intermitente|lento|visita|t[eé]cnico|revisi[oó]n|tv|tele|televisi[oó]n|canales|cable cortado|cortado)\b/i.test(text || "");
 }
 
 // Diagnóstico mínimo antes de registrar una visita técnica por falla. Cada tema cuenta como cubierto si el bot
@@ -1695,7 +1701,7 @@ async function pendingDiagnosticQuestion(env, phone, customerText) {
   const outbound = history.filter((row) => row.direction === "outbound").map((row) => cyberNormalize(row.message_text)).join(" | ");
   const inbound = history.filter((row) => row.direction !== "outbound").map((row) => cyberNormalize(row.message_text)).concat(normalizedNow).join(" | ");
   // Solo se indaga cuando el cliente de verdad reportó una falla; cualquier otro tema pasa tal cual.
-  if (!/lent[oa]|sin internet|sin servicio|sin conexion|no tengo internet|no hay internet|no funciona|falla|se cae|se corta|intermitente|no carga|no navega|sin senal/.test(inbound)) return null;
+  if (!/lent[oa]|\btv\b|\btele\b|television|canales|no se ve|sin internet|sin servicio|sin conexion|no tengo internet|no hay internet|no funciona|falla|se cae|se corta|intermitente|no carga|no navega|sin senal/.test(inbound)) return null;
   const slow = /\blent[oa]\b|\bdemora|\bse cae\b|\bcorta\b/.test(inbound);
   const order = slow ? ["devices", "cable", "restart", "lights", "since"] : ["lights", "restart", "devices", "since"];
   const askedBefore = order.filter((step) => DIAGNOSTIC_STEPS[step].asked.test(outbound)).length;
@@ -1709,6 +1715,13 @@ async function pendingDiagnosticQuestion(env, phone, customerText) {
 
 async function executeBotAction(env, credentials, phone, action, message) {
   const preferAudio = Boolean(message.preferAudio);
+  // Un adjunto sin texto (foto/PDF) nunca se contesta con una "respuesta" de conversación: el modelo, guiado por el
+  // historial, contestaba otra cosa (2026-10-08: comprobante de CajaVecina respondido con "BPGO solo ofrece
+  // internet, no televisión"). Solo payment_ack (con evidencia) o escalar son válidos; el resto es acuse fijo.
+  const attachmentOnly = (message.inboundType === "image" || message.inboundType === "document") && !String(message.customerText || "").trim();
+  if (attachmentOnly && action.action === "reply") {
+    action = { action: "reply", text: "Recibí tu imagen o archivo. Si es un comprobante de pago, el equipo lo revisará. Si es otra cosa, cuéntame por escrito qué necesitas. 🙏" };
+  }
   const textProblem = action.text ? botTextProblem(action.text) : null;
   if (textProblem) {
     console.error("bot_text_blocked", textProblem);
@@ -2522,7 +2535,7 @@ async function runBotForInboundMessages(env, changes) {
         if (!(await isStillLatestMessage(env, phone, message.id, 0))) continue;
         await executeBotAction(env, credentials, phone, action, {
           customerName: name, messageId: message.id, preferAudio, customerText: text,
-          mediaId, mediaType, mediaMime: media?.mimeType || null,
+          mediaId, mediaType, mediaMime: media?.mimeType || null, inboundType: message.type || null,
         });
       } catch (error) {
         // Caso real (2026-10-06, 56962138241): "El de 25" dejó la conversación en silencio con un
