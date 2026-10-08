@@ -1363,6 +1363,7 @@ Reglas duras, nunca las rompas:
 - NUNCA prometas ni confirmes el día u hora en que llegará un técnico ("mañana", "hoy", "en la mañana", etc.): solo di que la solicitud quedó registrada y que un agente confirmará el horario. NUNCA inventes políticas, plazos o reglas de la empresa (por ejemplo "no se pueden cambiar las fechas de pago", cupos o promociones): si algo no está en las FAQs ni en los datos del cliente, usa "escalate". El campo "text" es siempre el mensaje DIRIGIDO al cliente, nunca una nota sobre él ("el cliente quiere...").
 - NUNCA menciones saldo, deuda, monto pendiente, estado de pago ni vencimiento si en el mensaje ACTUAL el cliente no preguntó por pagos o cobranza. Si el cliente reporta una falla de internet o responde una pregunta de identificación (por ejemplo solo su nombre), continúa con SU problema: confirma lo que dijo y sigue el flujo técnico o de visita; no cambies de tema a su cuenta.
 - Política de pago de la INSTALACIÓN (única versión válida, nunca la contradigas ni la inventes distinta): el costo de instalación ($25.000) más el mes de servicio por adelantado, calculado proporcional a los días que resten del mes, se pagan AL MOMENTO DE LA INSTALACIÓN. NUNCA se cobran en la boleta ni se difieren al primer mes de servicio. Si el cliente pregunta si la instalación o su costo "se paga en la boleta", responde claramente que NO. Si dudas de cualquier otro detalle de cómo se cobra una instalación, usa "escalate" en vez de inventar.
+- BPGO SÍ recibe pagos por transferencia bancaria y CajaVecina además del portal. NUNCA digas que "no se puede realizar transferencia" ni que el único medio es el portal. Si el cliente tiene dificultad para pagar (no puede usar la página, es adulto mayor, no entiende el portal), no insistas con el mismo link: usa "escalate" para que una persona le entregue los datos y lo guíe. Con clientes mayores o que escriben con dificultad, usa frases muy simples y paso a paso.
 - Para todo lo demás (preguntas frecuentes, saludos, consultas generales que sí puedes responder con las FAQs dadas), usa la acción "reply".
 
 Debes responder SIEMPRE llamando a la herramienta bpgo_bot_action con una única acción.`;
@@ -1416,7 +1417,12 @@ function isAlternativePaymentRequest(value) {
   const linkProblem = /\b(link|enlace|pagina|portal)\b/.test(text) && /\b(no funciona|no me funciona|no puedo|no carga|error|problema|complica|complicado)\b/.test(text);
   const asksAlternative = /\b(otra forma|otra opcion|alternativa)\b.{0,30}\b(pago|pagar)\b/.test(text)
     || /\b(transferencia|transferir|caja ?vecina|datos bancarios|datos para pagar|numero de cuenta|cuenta bancaria|cuenta para depositar|depositar|deposito)\b/.test(text)
-    || /\b(cuenta|datos)\b.{0,35}\b(depositar|transferir|pagar)\b/.test(text)
+    || /\b(cuenta|datos)\b.{0,35}\b(depositar|transferir|pagar|pago|pagos)\b/.test(text)
+    // Caso real (2026-10-08, 56987635934, adulto mayor): "datos De cuenta y nombre para hacer pago" y "no puedo pagar
+    // podría trasferir a la cuenta" (sin la n de "transferir") no se reconocieron y el bot inventó que no se puede.
+    || /\btra(n)?sfer(ir|ncia|encia|encias|ible)\b/.test(text)
+    || /\bdatos\b.{0,25}\b(cuenta|pago|pagar|transferencia)\b/.test(text)
+    || /\bno (puedo|logro|me deja|me resulta)\b.{0,20}\b(pagar|pago|hacer el pago)\b/.test(text)
     // cubre ambos órdenes naturales en español: "cuenta sigue siendo la misma" y "tiene la misma cuenta".
     || /\b(cuenta|datos)\b.{0,45}\b(sigue|siguen|misma|mismos)\b/.test(text)
     || /\b(sigue|siguen|misma|mismos)\b.{0,45}\b(cuenta|datos)\b/.test(text);

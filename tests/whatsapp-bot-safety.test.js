@@ -737,3 +737,16 @@ assert.match(worker, /const nextDiagnosticQuestion = await pendingDiagnosticQues
 assert.match(worker, /async function pendingDiagnosticQuestion\(env, phone, customerText\)/);
 assert.match(worker, /que el cliente confirme|NO uses "visit_request" mientras falte reinicio del router/);
 assert.doesNotMatch(worker, /Sigue así hasta que el cliente confirme que afecta a todos los dispositivos/);
+
+// 2026-10-08 (56987635934, adulto mayor): "datos De cuenta ... para hacer pago" y "trasferir" (sin n) deben dar los
+// datos de transferencia; el bot nunca debe afirmar que no se puede transferir.
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`${functionSource("isAlternativePaymentRequest")}; this.api = { isAlternativePaymentRequest };`, ctx);
+  assert.equal(ctx.api.isAlternativePaymentRequest("Podrían enviar los datos De cuenta y nombre para hacer pago se me borraron"), true);
+  assert.equal(ctx.api.isAlternativePaymentRequest("Hola no puedo pagar podría trasferir a la cuenta"), true);
+  assert.equal(ctx.api.isAlternativePaymentRequest("no puedo pagar por la pagina"), true);
+  assert.equal(ctx.api.isAlternativePaymentRequest("hola buenas tardes"), false);
+}
+assert.match(worker, /NUNCA digas que "no se puede realizar transferencia"/);
