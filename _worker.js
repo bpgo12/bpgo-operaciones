@@ -1553,7 +1553,7 @@ async function callBotResponder(env, context, inboundMessage, media) {
     // respuesta; con timeout cae a "bot_api_error" (escalar a un humano), igual que cualquier otro fallo.
     signal: AbortSignal.timeout(25000),
     body: JSON.stringify({
-      model: String(env.OPENAI_MODEL || "gpt-4o-mini"),
+      model: String(env.OPENAI_MODEL || "gpt-4.1-mini"),
       max_tokens: 600,
       messages: [
         { role: "system", content: BOT_SYSTEM_PROMPT },
