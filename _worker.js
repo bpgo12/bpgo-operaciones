@@ -596,10 +596,21 @@ function safeReplyForReactivatedBusinessHandoff(reason) {
   return null;
 }
 
+// La respuesta fija "sigue en revisión" solo corresponde cuando el cliente pregunta por el estado de su trámite
+// anterior. Caso real (2026-10-07, 56964431328): tras liberar una toma humana por un comprobante, el cliente
+// escribió "en Cayucupil hay un cable cortado de ustedes" y recibió "Tu comprobante sigue en revisión".
+// Cualquier otro tema (falla, reporte, consulta nueva) sigue el flujo normal del bot.
+function isCaseStatusQuestion(text) {
+  const normalized = cyberNormalize(text).replace(/[^a-z0-9? ]/g, " ").replace(/\s+/g, " ").trim();
+  if (!normalized) return false;
+  return /\b(revis\w*|valid\w*|confirm\w*|estado|novedad\w*|respuesta|avance|cuando|todavia|aun|sigue|solicitud|tramite|como va|ya (esta|quedo|se))\b/.test(normalized)
+    || normalized.split(" ").length <= 3;
+}
+
 function reactivationNeedsNormalFlow(message) {
   if (message.type === "image" || message.type === "document") return true;
   const text = inboundMessageText(message);
-  return hasExplicitPaymentIntent(text) || mentionsBillingTopic(text);
+  return hasExplicitPaymentIntent(text) || mentionsBillingTopic(text) || mentionsTechnicalIssueOrVisit(text) || !isCaseStatusQuestion(text);
 }
 
 // Decisión de Carlos (2026-10-07): lo único que le interesa recibir de una conversación en atención humana es

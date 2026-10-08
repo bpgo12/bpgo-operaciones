@@ -664,9 +664,18 @@ assert.match(worker, /"Error del bot"/);
     function inboundMessageText(message) { return message.text?.body || ""; }
     function hasExplicitPaymentIntent(text) { return /pagu|pago|comprobante|transfer/i.test(String(text || "")); }
     ${functionSource("mentionsBillingTopic")}
+    function cyberNormalize(value) { return String(value || "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase(); }
+    ${functionSource("mentionsTechnicalIssueOrVisit")}
+    ${functionSource("isCaseStatusQuestion")}
     ${functionSource("reactivationNeedsNormalFlow")}
     this.api = { reactivationNeedsNormalFlow };
   `, ctx);
+  // 2026-10-07 (56964431328): un reporte de falla no es una pregunta por el trámite viejo.
+  assert.equal(ctx.api.reactivationNeedsNormalFlow({ type: "text", text: { body: "Buenas tardes en Cayucupil hay un cable cortado de ustedes" } }), true);
+  assert.equal(ctx.api.reactivationNeedsNormalFlow({ type: "text", text: { body: "sigue sin internet" } }), true);
+  assert.equal(ctx.api.reactivationNeedsNormalFlow({ type: "text", text: { body: "quiero cambiar mi plan a uno más rápido" } }), true);
+  assert.equal(ctx.api.reactivationNeedsNormalFlow({ type: "text", text: { body: "¿ya revisaron mi comprobante?" } }), true);
+  assert.equal(ctx.api.reactivationNeedsNormalFlow({ type: "text", text: { body: "¿y mi solicitud?" } }), false);
   assert.equal(ctx.api.reactivationNeedsNormalFlow({ type: "image" }), true);
   assert.equal(ctx.api.reactivationNeedsNormalFlow({ type: "document" }), true);
   assert.equal(ctx.api.reactivationNeedsNormalFlow({ type: "text", text: { body: "ya pagué, te envío el comprobante" } }), true);
