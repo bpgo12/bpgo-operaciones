@@ -3498,7 +3498,9 @@ async function signSession(payload, secret) {
 }
 
 async function readSession(request, secret) {
-  const token = String(request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
+  const authorization = String(request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
+  const cookie = String(request.headers.get("cookie") || "").split(/;\s*/).find((item) => item.startsWith("bpgo_session="));
+  const token = authorization || decodeURIComponent(cookie?.slice("bpgo_session=".length) || "");
   const parts = token.split(".");
   if (parts.length !== 2) return null;
   const expected = await signSession(JSON.parse(atob(parts[0].replace(/-/g, "+").replace(/_/g, "/"))), secret).catch(() => "");
@@ -3574,8 +3576,16 @@ export default {
         : null;
       if (!user) await env.DB.prepare("INSERT INTO auth_attempts (ip, email) VALUES (?, ?)").bind(ip, email).run().catch(() => null);
       else await env.DB.prepare("DELETE FROM auth_attempts WHERE ip = ? AND email = ?").bind(ip, email).run().catch(() => null);
-      const token = user ? await signSession({ userId: user.id, role: user.role, exp: Date.now() + 12 * 60 * 60 * 1000 }, env.OPERATIONS_ADMIN_SECRET) : null;
-      return Response.json(user ? { ok: true, userId: user.id, token } : { ok: false }, { status: user ? 200 : 401 });
+      const token = user ? await signSession({ userId: user.id, role: user.role, exp: Date.now() + 7 * 24 * 60 * 60 * 1000 }, env.OPERATIONS_ADMIN_SECRET) : null;
+      const response = Response.json(user ? { ok: true, userId: user.id, token } : { ok: false }, { status: user ? 200 : 401 });
+      if (token) response.headers.set("Set-Cookie", `bpgo_session=${encodeURIComponent(token)}; Path=/; Max-Age=604800; HttpOnly; Secure; SameSite=Lax`);
+      return response;
+    }
+
+    if (url.pathname === "/api/logout" && request.method === "POST") {
+      const response = Response.json({ ok: true });
+      response.headers.set("Set-Cookie", "bpgo_session=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax");
+      return response;
     }
 
     if (url.pathname === "/api/user-password" && request.method === "PUT") {
@@ -3657,20 +3667,21 @@ export default {
         });
       }
       if (!incoming) return Response.json({ ok: false }, { status: 400 });
-      await env.DB.prepare("UPDATE app_state SET data = ?, updated_at = datetime('now') WHERE id = 'main'")
-        .bind(JSON.stringify(incoming)).run();
-      return Response.json({ ok: true });
+      const updatedAt = new Date().toISOString();
+      await env.DB.prepare("UPDATE app_state SET data = ?, updated_at = ? WHERE id = 'main'")
+        .bind(JSON.stringify(incoming), updatedAt).run();
+      return Response.json({ ok: true, updatedAt });
     }
 
     if (url.pathname === "/api/state" && request.method === "GET") {
       const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
       if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
-      const row = await env.DB.prepare("SELECT data FROM app_state WHERE id = 'main'").first();
+      const row = await env.DB.prepare("SELECT data, updated_at FROM app_state WHERE id = 'main'").first();
       const state = row ? JSON.parse(row.data) : null;
       if (state && Array.isArray(state.users)) {
         state.users = state.users.map((user) => ({ ...user, password: MASKED_PASSWORD }));
       }
-      return Response.json({ data: state });
+      return Response.json({ data: state, updatedAt: row?.updated_at || null });
     }
 
     if (url.pathname === "/api/billing/cortados" && request.method === "GET") {

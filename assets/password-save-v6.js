@@ -32,10 +32,6 @@
     }), { status: failed === records.length ? 422 : 200, headers: { "content-type": "application/json; charset=utf-8" } });
   }
 
-  if (localStorage.getItem("bpgo-operaciones-session") && !sessionStorage.getItem(TOKEN_KEY)) {
-    localStorage.removeItem("bpgo-operaciones-session");
-  }
-
   window.fetch = function protectedFetch(input, init) {
     const url = typeof input === "string" ? input : input && input.url;
     const method = String((init && init.method) || (input && input.method) || "GET").toUpperCase();
@@ -56,7 +52,7 @@
       const headers = new Headers(init && init.headers || {});
       const token = sessionStorage.getItem(TOKEN_KEY);
       if (token) headers.set("authorization", "Bearer " + token);
-      init = Object.assign({}, init, { headers: headers });
+      init = Object.assign({}, init, { headers: headers, credentials: "same-origin" });
       if (url.includes("/api/whatsapp/send-billing") && method === "POST") {
         const payload = JSON.parse(String(init.body || "{}"));
         const records = Array.isArray(payload.records) ? payload.records : [];
@@ -74,6 +70,7 @@
     const data = new FormData(form);
     const response = await nativeFetch("/api/auth", {
       method: "POST",
+      credentials: "same-origin",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         email: String(data.get("email") || ""),
@@ -88,6 +85,13 @@
       return;
     }
     window.alert("Correo o contrasena incorrectos.");
+  }, true);
+
+  document.addEventListener("click", function (event) {
+    const button = event.target.closest && event.target.closest("button");
+    if (!button || button.textContent.trim() !== "Salir") return;
+    nativeFetch("/api/logout", { method: "POST", credentials: "same-origin", keepalive: true }).catch(function () {});
+    sessionStorage.removeItem(TOKEN_KEY);
   }, true);
 
   document.addEventListener("click", async function (event) {
