@@ -730,3 +730,10 @@ assert.match(worker, /fragment \? `Anotado ✅ Todavía me falta/);
 assert.match(worker, /if \(!fragment && looksLikeQuestion\(text\)\) \{/);
 assert.match(worker, /"Cliente esperando factibilidad"/);
 assert.match(worker, /const SALES_LEAD_FACTIBILIDAD_TTL_DAYS = 7;/);
+
+// 2026-10-08 (56933552792): "muy lento" -> "en todos" -> visita al tiro. El bot debe indagar por código antes de
+// registrar una visita por falla, salvo que el cliente la pida explícitamente.
+assert.match(worker, /const nextDiagnosticQuestion = await pendingDiagnosticQuestion\(env, phone, message\.customerText\);\s*\n\s*if \(nextDiagnosticQuestion\) \{/);
+assert.match(worker, /async function pendingDiagnosticQuestion\(env, phone, customerText\)/);
+assert.match(worker, /que el cliente confirme|NO uses "visit_request" mientras falte reinicio del router/);
+assert.doesNotMatch(worker, /Sigue así hasta que el cliente confirme que afecta a todos los dispositivos/);
