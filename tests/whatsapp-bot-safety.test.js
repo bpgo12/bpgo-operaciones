@@ -767,3 +767,27 @@ assert.match(worker, /const SCHEMA_READY = new Set\(\);/);
 assert.match(worker, /async function ensureWhatsAppInboxTable\(env\) \{\s*\n\s*if \(SCHEMA_READY\.has\("ensureWhatsAppInboxTable"\)\) return;/);
 assert.match(worker, /idx_whatsapp_inbox_created ON whatsapp_inbox_messages\(created_at\)/);
 assert.match(worker, /idx_staff_notifications_role_status ON staff_notifications_log\(role, status, created_at\)/);
+
+// 2026-10-09 (respuestas al recordatorio de cobranza): promesas futuras no son pago hecho, "el link" sin "de pago" se
+// responde con el portal, un saludo no recibe "sigue en revisión" y un texto sin adjunto no es un comprobante.
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`
+    function cyberNormalize(value) { return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase(); }
+    ${functionSource("isPaidQuickReply")}
+    ${functionSource("isPaymentLinkRequest")}
+    ${functionSource("isCaseStatusQuestion")}
+    this.api = { isPaidQuickReply, isPaymentLinkRequest, isCaseStatusQuestion };
+  `, ctx);
+  assert.equal(ctx.api.isPaidQuickReply("Apenas pague le envío el boucher"), false);
+  assert.equal(ctx.api.isPaidQuickReply("mañana le deposito y le mando el baucher"), false);
+  assert.equal(ctx.api.isPaidQuickReply("Pero si pague el 26 de septiembre"), true);
+  assert.equal(ctx.api.isPaidQuickReply("ya pagué"), true);
+  assert.equal(ctx.api.isPaymentLinkRequest("Y cuál es el link me lo puede enviar por favor"), true);
+  assert.equal(ctx.api.isCaseStatusQuestion("Hola"), false);
+  assert.equal(ctx.api.isCaseStatusQuestion("¿y mi solicitud?"), true);
+}
+assert.match(worker, /if \(!message\.mediaId\) \{\s*\n\s*await sendBotReply\(env, credentials, phone, "Gracias por avisar 🙏 Cuando tengas el comprobante/);
+assert.match(worker, /La campaña\/promoción Cyber ya TERMINÓ/);
+assert.match(worker, /El monto a pagar es \$\{formatCurrency\(c\.balance\)\}/);
