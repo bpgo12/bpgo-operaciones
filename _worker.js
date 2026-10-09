@@ -665,8 +665,8 @@ function safeReplyForReactivatedBusinessHandoff(reason) {
 function isCaseStatusQuestion(text) {
   const normalized = cyberNormalize(text).replace(/[^a-z0-9? ]/g, " ").replace(/\s+/g, " ").trim();
   if (!normalized) return false;
-  return /\b(revis\w*|valid\w*|confirm\w*|estado|novedad\w*|respuesta|avance|cuando|todavia|aun|sigue|solicitud|tramite|como va|ya (esta|quedo|se))\b/.test(normalized)
-    || normalized.split(" ").length <= 3;
+  return /\b(revis\w*|valid\w*|confirm\w*|estado|novedad\w*|respuesta|avance|cuando|todavia|aun|sigue|solicitud|tramite|como va|ya (esta|quedo|se))\b/.test(normalized);
+  // (un saludo suelto o un mensaje corto NO es una consulta por el trámite: "Hola" recibía "Tu solicitud sigue en revisión")
 }
 
 function reactivationNeedsNormalFlow(message) {
@@ -1436,6 +1436,8 @@ Reglas duras, nunca las rompas:
 - NUNCA prometas ni confirmes el día u hora en que llegará un técnico ("mañana", "hoy", "en la mañana", etc.): solo di que la solicitud quedó registrada y que un agente confirmará el horario. NUNCA inventes políticas, plazos o reglas de la empresa (por ejemplo "no se pueden cambiar las fechas de pago", cupos o promociones): si algo no está en las FAQs ni en los datos del cliente, usa "escalate". El campo "text" es siempre el mensaje DIRIGIDO al cliente, nunca una nota sobre él ("el cliente quiere...").
 - NUNCA menciones saldo, deuda, monto pendiente, estado de pago ni vencimiento si en el mensaje ACTUAL el cliente no preguntó por pagos o cobranza. Si el cliente reporta una falla de internet o responde una pregunta de identificación (por ejemplo solo su nombre), continúa con SU problema: confirma lo que dijo y sigue el flujo técnico o de visita; no cambies de tema a su cuenta.
 - Política de pago de la INSTALACIÓN (única versión válida, nunca la contradigas ni la inventes distinta): el costo de instalación ($25.000) más el mes de servicio por adelantado, calculado proporcional a los días que resten del mes, se pagan AL MOMENTO DE LA INSTALACIÓN. NUNCA se cobran en la boleta ni se difieren al primer mes de servicio. Si el cliente pregunta si la instalación o su costo "se paga en la boleta", responde claramente que NO. Si dudas de cualquier otro detalle de cómo se cobra una instalación, usa "escalate" en vez de inventar.
+- La campaña/promoción Cyber ya TERMINÓ. NUNCA la menciones, ni ofrezcas agendar un cambio de plan promocional, ni preguntes "para el próximo 15 o prefieres otra fecha para la promoción", aunque aparezca en el historial. Si el cliente pregunta por esa oferta, di que ya no está disponible y usa "escalate" si insiste.
+- Cuando el cliente responde a un recordatorio de pago ("tu pago está pendiente") diciendo que paga el 15, que ya pagó, que aún no tiene pagos pendientes o que no corresponde el cobro, NUNCA le des la razón ni afirmes que "no tiene pagos pendientes": solo el dato de "Cliente identificado" vale. Pide el comprobante si no lo ha enviado, o usa "escalate" para que el equipo lo verifique. No confirmes fechas de vencimiento que no estén en los datos.
 - BPGO ofrece internet Y TV cable. NUNCA digas que BPGO no ofrece televisión ni recomiendes Netflix/HBO u otros proveedores. Si el cliente reporta un problema con la tele ("qué pasa con la tv", "no se ve la tele"), trátalo como una falla del servicio: haz el diagnóstico (luces del equipo, reinicio) o usa "escalate"; jamás inventes que no es un servicio de BPGO.
 - BPGO SÍ recibe pagos por transferencia bancaria y CajaVecina además del portal. NUNCA digas que "no se puede realizar transferencia" ni que el único medio es el portal. Si el cliente tiene dificultad para pagar (no puede usar la página, es adulto mayor, no entiende el portal), no insistas con el mismo link: usa "escalate" para que una persona le entregue los datos y lo guíe. Con clientes mayores o que escriben con dificultad, usa frases muy simples y paso a paso.
 - Para todo lo demás (preguntas frecuentes, saludos, consultas generales que sí puedes responder con las FAQs dadas), usa la acción "reply".
@@ -1505,6 +1507,9 @@ function isAlternativePaymentRequest(value) {
 
 function isPaymentLinkRequest(value) {
   const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
+  // Un mensaje corto que pide "el link" sin decir "de pago" ("Y cuál es el link me lo puede enviar por favor") quedó
+  // sin respuesta del bot y Carlos tuvo que mandarlo a mano (56957126835). El único link que BPGO entrega es el portal.
+  if (/\b(link|enlace)\b/.test(text) && text.split(" ").length <= 14) return true;
   return /\b(link|enlace)\b.{0,40}\b(pago|pagar)\b/.test(text)
     || /\b(donde|como)\s+(?:puedo\s+)?(?:pago|pagar)\b/.test(text)
     || /\bpagar\s+(?:el|mi|la)?\s*(?:plan|mensualidad)\b/.test(text);
@@ -1543,6 +1548,9 @@ function cancellationMeansPayment(value, history) {
 function isPaidQuickReply(value) {
   const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[.,!\u00a1\u00bf?]/g, "").trim();
   if (text === "ya pague") return true;
+  // "Apenas pague le envío el boucher" / "mañana deposito" son promesas futuras, no un pago hecho (56987599608).
+  if (/\b(apenas|cuando|en cuanto|tan pronto|una vez que|despues|luego|manana|mas tarde|voy a|vamos a)\b.{0,25}\b(pague|pagar|pagamos|deposite|transfiera)\b/.test(text)
+    || /\bpagare\b/.test(text)) return false;
   // Declaraciones expl\u00edcitas de pago ya hecho ("pagu\u00e9", "pago ingresado/realizado", "hice el
   // pago"). No incluye "pago" suelto para no confundirlo con preguntas ("cu\u00e1nto pago", "c\u00f3mo pago").
   return /\bpague\b/.test(text)
@@ -1557,7 +1565,13 @@ function isExecutiveQuickReply(value) {
 }
 
 async function callBotResponder(env, context, inboundMessage, media) {
-  if (isAlternativePaymentRequest(inboundMessage?.text)) return { action: "reply", text: PAYMENT_TRANSFER_REPLY };
+  if (isAlternativePaymentRequest(inboundMessage?.text)) {
+    // "¿Cuál es el valor para transferir?" (56957126835): los datos bancarios sin el monto no responden la pregunta.
+    const c = context.customer;
+    const amountLine = c?.id && c.billingAuthoritative && !c.billingAmbiguous && Number.isFinite(c.balance) && c.balance > 0
+      ? `El monto a pagar es ${formatCurrency(c.balance)}.\n\n` : "";
+    return { action: "reply", text: amountLine + PAYMENT_TRANSFER_REPLY };
+  }
   if (isPaymentLinkRequest(inboundMessage?.text)) return { action: "reply", text: PAYMENT_PORTAL_REPLY };
   if (isPaidQuickReply(inboundMessage?.text)) return { action: "reply", text: context.hasPendingReceipt
     ? "Tu comprobante ya está en revisión."
@@ -1818,6 +1832,12 @@ async function executeBotAction(env, credentials, phone, action, message) {
     const caseRow = message.messageId ? await env.DB.prepare(
       "SELECT id, reported_name FROM whatsapp_automation_cases WHERE source_message_id = ?"
     ).bind(message.messageId).first() : null;
+    // Un texto que solo AVISA un pago ("hoy realizamos el pago", "ya pagué") sin ningún adjunto no es un comprobante:
+    // antes se contestaba "Recibimos tu comprobante" (56945234071) y se avisaba a Carlos de un comprobante inexistente.
+    if (!message.mediaId) {
+      await sendBotReply(env, credentials, phone, "Gracias por avisar 🙏 Cuando tengas el comprobante (foto o PDF), envíalo por este chat y lo dejamos en revisión.", preferAudio);
+      return;
+    }
     if (!hasStrongReceiptEvidence(action, message)) {
       if (caseRow) {
         await env.DB.prepare(`UPDATE whatsapp_automation_cases SET case_type='general', confidence=35,
