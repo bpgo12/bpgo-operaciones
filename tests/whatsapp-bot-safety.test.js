@@ -760,3 +760,10 @@ assert.match(worker, /const attachmentOnly = \(message\.inboundType === "image" 
 assert.match(worker, /inboundType: message\.type \|\| null,/);
 assert.match(worker, /const attachmentOnlyNote = /);
 assert.match(worker, /BPGO ofrece internet Y TV cable\. NUNCA digas que BPGO no ofrece televisión/);
+
+// 2026-10-09: D1 free tier "daily row read limit" excedido. El esquema se verifica una vez por instancia y las
+// consultas de listados/avisos usan índices (antes escaneaban tablas completas en cada mensaje y cada sondeo del panel).
+assert.match(worker, /const SCHEMA_READY = new Set\(\);/);
+assert.match(worker, /async function ensureWhatsAppInboxTable\(env\) \{\s*\n\s*if \(SCHEMA_READY\.has\("ensureWhatsAppInboxTable"\)\) return;/);
+assert.match(worker, /idx_whatsapp_inbox_created ON whatsapp_inbox_messages\(created_at\)/);
+assert.match(worker, /idx_staff_notifications_role_status ON staff_notifications_log\(role, status, created_at\)/);

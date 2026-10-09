@@ -2,7 +2,18 @@ const STABLE_BACKEND = "478e127a.bpgo-operaciones.pages.dev";
 const encoder = new TextEncoder();
 const MASKED_PASSWORD = "********";
 
+// Memoria por instancia del Worker: el esquema (tablas, columnas e índices) se verifica UNA vez por instancia en vez de
+// en cada mensaje/consulta. Antes cada llamada ejecutaba decenas de ALTER TABLE fallidos y CREATE INDEX, consumiendo
+// lecturas del límite diario de D1 (2026-10-09: "exceeded D1's free tier daily row read limit").
+const SCHEMA_READY = new Set();
+
 async function ensureWhatsAppOnboardingTable(env) {
+  if (SCHEMA_READY.has("ensureWhatsAppOnboardingTable")) return;
+  await ensureWhatsAppOnboardingTableRun(env);
+  SCHEMA_READY.add("ensureWhatsAppOnboardingTable");
+}
+
+async function ensureWhatsAppOnboardingTableRun(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_onboarding_config (
     id TEXT PRIMARY KEY,
     waba_id TEXT,
@@ -110,6 +121,12 @@ function equalBytes(left, right) {
 }
 
 async function ensureWhatsAppStatusTable(env) {
+  if (SCHEMA_READY.has("ensureWhatsAppStatusTable")) return;
+  await ensureWhatsAppStatusTableRun(env);
+  SCHEMA_READY.add("ensureWhatsAppStatusTable");
+}
+
+async function ensureWhatsAppStatusTableRun(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_message_status (
     message_id TEXT PRIMARY KEY,
     recipient TEXT,
@@ -135,6 +152,12 @@ async function saveWhatsAppStatus(env, item) {
 }
 
 async function ensureWhatsAppCampaignTable(env) {
+  if (SCHEMA_READY.has("ensureWhatsAppCampaignTable")) return;
+  await ensureWhatsAppCampaignTableRun(env);
+  SCHEMA_READY.add("ensureWhatsAppCampaignTable");
+}
+
+async function ensureWhatsAppCampaignTableRun(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_campaign_sends (
     campaign TEXT NOT NULL,
     recipient TEXT NOT NULL,
@@ -145,6 +168,12 @@ async function ensureWhatsAppCampaignTable(env) {
 }
 
 async function ensureManualBillingSendsTable(env) {
+  if (SCHEMA_READY.has("ensureManualBillingSendsTable")) return;
+  await ensureManualBillingSendsTableRun(env);
+  SCHEMA_READY.add("ensureManualBillingSendsTable");
+}
+
+async function ensureManualBillingSendsTableRun(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_manual_billing_sends (
     phone TEXT NOT NULL,
     send_date TEXT NOT NULL,
@@ -155,6 +184,12 @@ async function ensureManualBillingSendsTable(env) {
 }
 
 async function ensureWhatsAppInboxTable(env) {
+  if (SCHEMA_READY.has("ensureWhatsAppInboxTable")) return;
+  await ensureWhatsAppInboxTableRun(env);
+  SCHEMA_READY.add("ensureWhatsAppInboxTable");
+}
+
+async function ensureWhatsAppInboxTableRun(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_inbox_messages (
     message_id TEXT PRIMARY KEY,
     phone TEXT NOT NULL,
@@ -167,9 +202,17 @@ async function ensureWhatsAppInboxTable(env) {
     raw_json TEXT
   )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_inbox_phone_created ON whatsapp_inbox_messages(phone, created_at DESC)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_inbox_created ON whatsapp_inbox_messages(created_at)").run().catch(() => null);
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_inbox_media ON whatsapp_inbox_messages(media_id)").run().catch(() => null);
 }
 
 async function ensureWhatsAppAutomationTable(env) {
+  if (SCHEMA_READY.has("ensureWhatsAppAutomationTable")) return;
+  await ensureWhatsAppAutomationTableRun(env);
+  SCHEMA_READY.add("ensureWhatsAppAutomationTable");
+}
+
+async function ensureWhatsAppAutomationTableRun(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_automation_cases (
     id TEXT PRIMARY KEY,
     source_message_id TEXT NOT NULL UNIQUE,
@@ -191,6 +234,9 @@ async function ensureWhatsAppAutomationTable(env) {
   await env.DB.prepare("ALTER TABLE whatsapp_automation_cases ADD COLUMN reported_name TEXT").run().catch(() => null);
   await env.DB.prepare("ALTER TABLE whatsapp_automation_cases ADD COLUMN receipt_tx TEXT").run().catch(() => null);
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_cases_receipt_tx ON whatsapp_automation_cases(receipt_tx)").run().catch(() => null);
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_cases_created ON whatsapp_automation_cases(created_at)").run().catch(() => null);
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_cases_source_message ON whatsapp_automation_cases(source_message_id)").run().catch(() => null);
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_cases_phone_created ON whatsapp_automation_cases(phone, created_at)").run().catch(() => null);
 }
 
 // Verificación del comprobante para quien lo revisa (2026-10-05): el bot lee el monto y el número de operación
@@ -424,6 +470,12 @@ function describeInstallDate(plannedDate, today) {
 }
 
 async function ensureWhatsAppBotTables(env) {
+  if (SCHEMA_READY.has("ensureWhatsAppBotTables")) return;
+  await ensureWhatsAppBotTablesRun(env);
+  SCHEMA_READY.add("ensureWhatsAppBotTables");
+}
+
+async function ensureWhatsAppBotTablesRun(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_bot_sessions (
     phone TEXT PRIMARY KEY,
     mode TEXT NOT NULL DEFAULT 'bot',
@@ -444,6 +496,10 @@ async function ensureWhatsAppBotTables(env) {
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_bot_events_phone_created ON whatsapp_bot_session_events(phone, created_at DESC)").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_bot_sessions_updated ON whatsapp_bot_sessions(updated_at)").run().catch(() => null);
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_bot_sessions_mode ON whatsapp_bot_sessions(mode)").run().catch(() => null);
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_visit_requests_created ON whatsapp_visit_requests(created_at)").run().catch(() => null);
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_billing_requests_created ON whatsapp_billing_requests(created_at)").run().catch(() => null);
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_visit_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     phone TEXT NOT NULL,
@@ -511,6 +567,12 @@ async function ensureWhatsAppBotTables(env) {
 }
 
 async function ensureWhatsAppBotProcessedTable(env) {
+  if (SCHEMA_READY.has("ensureWhatsAppBotProcessedTable")) return;
+  await ensureWhatsAppBotProcessedTableRun(env);
+  SCHEMA_READY.add("ensureWhatsAppBotProcessedTable");
+}
+
+async function ensureWhatsAppBotProcessedTableRun(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_bot_processed_inbound (
     message_id TEXT PRIMARY KEY,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -862,6 +924,12 @@ async function sendWhatsAppAudio(env, credentials, phone, audioBytes) {
 }
 
 async function ensureStaffNotificationsLogTable(env) {
+  if (SCHEMA_READY.has("ensureStaffNotificationsLogTable")) return;
+  await ensureStaffNotificationsLogTableRun(env);
+  SCHEMA_READY.add("ensureStaffNotificationsLogTable");
+}
+
+async function ensureStaffNotificationsLogTableRun(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS staff_notifications_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     role TEXT, staff_phone TEXT, case_type TEXT, customer_phone TEXT,
@@ -887,6 +955,11 @@ async function ensureStaffNotificationsLogTable(env) {
   }
   await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_notifications_idempotency ON staff_notifications_log(idempotency_key)").run();
   await env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS idx_staff_notifications_message ON staff_notifications_log(message_id) WHERE message_id IS NOT NULL").run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_staff_notifications_created ON staff_notifications_log(created_at)").run().catch(() => null);
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_staff_notifications_role_status ON staff_notifications_log(role, status, created_at)").run().catch(() => null);
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_staff_notifications_attempt ON staff_notifications_log(last_attempt_at)").run().catch(() => null);
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_staff_notifications_case_created ON staff_notifications_log(case_type, created_at)").run().catch(() => null);
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_staff_notifications_phone_created ON staff_notifications_log(customer_phone, created_at)").run().catch(() => null);
 }
 
 function staffNotificationIdentity(role, caseType, options = {}) {
@@ -1933,6 +2006,12 @@ async function executeBotAction(env, credentials, phone, action, message) {
 }
 
 async function ensureBotDebounceTable(env) {
+  if (SCHEMA_READY.has("ensureBotDebounceTable")) return;
+  await ensureBotDebounceTableRun(env);
+  SCHEMA_READY.add("ensureBotDebounceTable");
+}
+
+async function ensureBotDebounceTableRun(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_bot_debounce (
     phone TEXT PRIMARY KEY,
     message_id TEXT NOT NULL,
@@ -2765,6 +2844,12 @@ function billingEligibilityFromRows(rows, date = new Date(), pendingReceiptPhone
 }
 
 async function ensureBillingAutomationTables(env) {
+  if (SCHEMA_READY.has("ensureBillingAutomationTables")) return;
+  await ensureBillingAutomationTablesRun(env);
+  SCHEMA_READY.add("ensureBillingAutomationTables");
+}
+
+async function ensureBillingAutomationTablesRun(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS billing_automation_sends (
     id INTEGER PRIMARY KEY AUTOINCREMENT, billing_month TEXT NOT NULL, stage TEXT NOT NULL, phone TEXT NOT NULL,
     customer_id TEXT, customer_name TEXT, amount INTEGER, template_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
@@ -3108,6 +3193,12 @@ function cyberButtonAction(message) {
 }
 
 async function ensureCyberTables(env) {
+  if (SCHEMA_READY.has("ensureCyberTables")) return;
+  await ensureCyberTablesRun(env);
+  SCHEMA_READY.add("ensureCyberTables");
+}
+
+async function ensureCyberTablesRun(env) {
   await ensureWhatsAppCampaignTable(env);
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_upgrade_requests (
     campaign TEXT NOT NULL, phone TEXT NOT NULL, customer_name TEXT, response TEXT,
@@ -3326,6 +3417,12 @@ const SALES_LEAD_FOLLOWUP_AFTER_MS = 20 * 60 * 1000;
 const SALES_LEAD_FOLLOWUP_STATUSES = ["awaiting_plan", "awaiting_installation_data"];
 
 async function ensureSalesLeadFollowupColumn(env) {
+  if (SCHEMA_READY.has("ensureSalesLeadFollowupColumn")) return;
+  await ensureSalesLeadFollowupColumnRun(env);
+  SCHEMA_READY.add("ensureSalesLeadFollowupColumn");
+}
+
+async function ensureSalesLeadFollowupColumnRun(env) {
   await env.DB.prepare("ALTER TABLE whatsapp_sales_leads ADD COLUMN followup_sent_at TEXT").run().catch(() => null);
 }
 
