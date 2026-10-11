@@ -473,7 +473,7 @@ assert.match(worker, /claimInboundMessageForBot\(env, `retake-claim:\$\{row\.mes
 assert.doesNotMatch(worker, /claimInboundMessageForBot\(env, `retake:/);
 assert.match(worker, /id: `retake:\$\{row\.message_id\}`, from: row\.phone/);
 assert.match(worker, /setBotSessionMode\(env, row\.phone, "bot", "auto_reactivated_unanswered"\)/);
-assert.match(worker, /const takeoverTask = takeOverUnansweredHumanChats\(env\)\.catch\(\(\) => null\);/);
+assert.match(worker, /const takeoverTask = takeOverUnansweredHumanChats\(env\)\.then\(\(\) => resumeAfterHoursChats\(env\)\)\.catch\(\(\) => null\);/);
 assert.match(worker, /const takeover = await takeOverUnansweredHumanChats\(env\)/);
 {
   const ctx = {};
@@ -800,3 +800,25 @@ assert.match(worker, /await buildIncidentSummary\(env, phone, action\.reason, cu
 assert.match(worker, /await buildIncidentSummary\(env, phone, pendingVisit\.reason, customer\.address\)/);
 assert.match(worker, /pendingDiagnosticQuestion\(env, phone, message\.customerText, matchedCustomer\.address\)/);
 assert.match(worker, /sanitizeStaffTemplateParam\(summary, 700\)/);
+
+// 2026-10-10: horario del bot (opción 1 de Carlos): fuera de horario el bot avisa una vez y al reabrir retoma el último
+// mensaje pendiente; adjuntos y personal pasan a cualquier hora. Configurable con BOT_HOURS / BOT_DAYS.
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`
+    ${worker.slice(worker.indexOf("const BOT_HOURS_DEFAULT"), worker.indexOf("function offHoursNoticeText"))}
+    this.api = { isBotOpenNow, botScheduleConfig };
+  `, ctx);
+  const env = { BOT_HOURS: "09:00-21:00", BOT_DAYS: "1-7" };
+  // 2026-10-12 (lunes) 12:00 hora de Chile (UTC-3 en octubre) = 15:00Z; 23:30 Chile = 02:30Z del día siguiente.
+  assert.equal(ctx.api.isBotOpenNow(env, new Date("2026-10-12T15:00:00Z")), true);
+  assert.equal(ctx.api.isBotOpenNow(env, new Date("2026-10-13T02:30:00Z")), false);
+  assert.equal(ctx.api.isBotOpenNow(env, new Date("2026-10-12T11:00:00Z")), false);
+  assert.equal(ctx.api.isBotOpenNow({ BOT_HOURS: "09:00-21:00", BOT_DAYS: "1-5" }, new Date("2026-10-10T15:00:00Z")), false); // sábado
+  assert.equal(ctx.api.isBotOpenNow({ BOT_HOURS: "09:00-21:00", BOT_DAYS: "1-5" }, new Date("2026-10-12T15:00:00Z")), true);
+  assert.equal(ctx.api.isBotOpenNow({}, new Date("2026-10-12T15:00:00Z")), true);
+}
+assert.match(worker, /if \(!isStaffPhone && !isBotOpenNow\(env\) && message\.type !== "image" && message\.type !== "document"\)/);
+assert.match(worker, /if \(!isBotOpenNow\(env\)\) return \{ ok: true, taken: 0, reason: "closed" \};/);
+assert.match(worker, /takeOverUnansweredHumanChats\(env\)\.then\(\(\) => resumeAfterHoursChats\(env\)\)/);
