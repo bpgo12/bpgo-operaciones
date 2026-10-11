@@ -711,7 +711,100 @@ function isClosingPleasantry(text) {
   return normalized.length <= 40 && /^((ya|ok|okey|okay|listo|perfecto|vale|dale|bueno|bien|excelente|genial|super|muy bien|muchas|mil|gracias|de nada|saludos|chao|adios|hasta luego|un abrazo)( |$))+$/.test(normalized);
 }
 
+// Horario del bot (2026-10-10, pedido de Carlos, "opción 1"): el bot solo conversa dentro del horario de atención (hora de
+// Chile). Fuera de horario avisa UNA vez por conversación y, al reabrir, retoma el último mensaje que quedó sin responder.
+// Los adjuntos (posibles comprobantes) se procesan a cualquier hora porque son deterministas y no se pueden perder.
+// Se ajusta con las variables BOT_HOURS ("09:00-21:00") y BOT_DAYS ("1-7", lunes=1 ... domingo=7, o "1,2,3,4,5,6").
+const BOT_HOURS_DEFAULT = "09:00-21:00";
+const BOT_DAYS_DEFAULT = "1-7";
+const OFF_HOURS_MARKER = "fuera de nuestro horario de atención";
+const OFF_HOURS_NOTICE_COOLDOWN_HOURS = 10;
+const OFF_HOURS_RESUME_MAX_AGE_HOURS = 16;
+const OFF_HOURS_RESUME_BATCH = 5;
+
+function botScheduleConfig(env) {
+  const hoursMatch = String(env?.BOT_HOURS || BOT_HOURS_DEFAULT).match(/^\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*$/) || BOT_HOURS_DEFAULT.match(/^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/);
+  const startMinutes = Number(hoursMatch[1]) * 60 + Number(hoursMatch[2]);
+  const endMinutes = Number(hoursMatch[3]) * 60 + Number(hoursMatch[4]);
+  const days = new Set();
+  for (const part of String(env?.BOT_DAYS || BOT_DAYS_DEFAULT).split(",")) {
+    const range = part.trim().match(/^(\d)(?:-(\d))?$/);
+    if (!range) continue;
+    const from = Number(range[1]);
+    const to = range[2] ? Number(range[2]) : from;
+    for (let day = from; day <= to; day += 1) if (day >= 1 && day <= 7) days.add(day);
+  }
+  if (!days.size) for (let day = 1; day <= 7; day += 1) days.add(day);
+  const pad = (value) => String(value).padStart(2, "0");
+  const label = `${pad(Math.floor(startMinutes / 60))}:${pad(startMinutes % 60)} a ${pad(Math.floor(endMinutes / 60))}:${pad(endMinutes % 60)}`;
+  return { startMinutes, endMinutes, days, label, allDays: days.size === 7 };
+}
+
+function chileClock(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: "America/Santiago", weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
+    .formatToParts(date).reduce((result, part) => ({ ...result, [part.type]: part.value }), {});
+  const weekday = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 }[parts.weekday] || 1;
+  return { weekday, minutes: Number(parts.hour) * 60 + Number(parts.minute) };
+}
+
+function isBotOpenNow(env, date = new Date()) {
+  const schedule = botScheduleConfig(env);
+  const clock = chileClock(date);
+  return schedule.days.has(clock.weekday) && clock.minutes >= schedule.startMinutes && clock.minutes < schedule.endMinutes;
+}
+
+function offHoursNoticeText(env) {
+  const schedule = botScheduleConfig(env);
+  const days = schedule.allDays ? "todos los días" : "en nuestros días de atención";
+  return `Hola 👋 Ahora estamos ${OFF_HOURS_MARKER} (${days}, de ${schedule.label}). Tu mensaje quedó registrado y te respondemos apenas retomemos la atención. Si es un pago, puedes enviarnos el comprobante por aquí y lo revisamos. 🙏`;
+}
+
+async function sendOffHoursNoticeOnce(env, credentials, phone) {
+  await ensureWhatsAppInboxTable(env);
+  const recent = await env.DB.prepare(
+    `SELECT 1 AS found FROM whatsapp_inbox_messages WHERE phone = ? AND direction = 'outbound' AND message_text LIKE ?
+     AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) LIMIT 1`
+  ).bind(phone, `%${OFF_HOURS_MARKER}%`, `-${OFF_HOURS_NOTICE_COOLDOWN_HOURS} hours`).first();
+  if (recent) return false;
+  await sendBotReply(env, credentials, phone, offHoursNoticeText(env), false);
+  return true;
+}
+
+// Al reabrir el horario: los clientes a quienes se avisó "fuera de horario" y nadie respondió (ni el bot ni una persona)
+// reciben ahora la respuesta a su último mensaje de texto.
+async function resumeAfterHoursChats(env) {
+  if (String(env.WHATSAPP_BOT_ENABLED || "").toLowerCase() !== "true") return { ok: true, resumed: 0 };
+  if (!isBotOpenNow(env)) return { ok: true, resumed: 0, reason: "closed" };
+  await ensureWhatsAppBotTables(env);
+  await ensureWhatsAppInboxTable(env);
+  const notices = await env.DB.prepare(
+    `SELECT o.phone, o.created_at FROM whatsapp_inbox_messages o
+     WHERE o.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) AND o.direction = 'outbound' AND o.message_text LIKE ?
+       AND NOT EXISTS (SELECT 1 FROM whatsapp_inbox_messages x WHERE x.phone = o.phone AND x.direction = 'outbound' AND x.created_at > o.created_at)
+     ORDER BY o.created_at ASC LIMIT ?`
+  ).bind(`-${OFF_HOURS_RESUME_MAX_AGE_HOURS} hours`, `%${OFF_HOURS_MARKER}%`, OFF_HOURS_RESUME_BATCH).all();
+  const staffPhones = new Set([env.STAFF_PHONE_CARLOS, env.STAFF_PHONE_EDUARDO].map((value) => normalizeWhatsAppPhone(value)).filter(Boolean));
+  let resumed = 0;
+  for (const notice of notices.results || []) {
+    if (staffPhones.has(notice.phone)) continue;
+    const last = await env.DB.prepare(
+      `SELECT message_id, message_text FROM whatsapp_inbox_messages WHERE phone = ? AND direction = 'inbound' AND message_type = 'text'
+       AND COALESCE(TRIM(message_text), '') != '' AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) ORDER BY created_at DESC LIMIT 1`
+    ).bind(notice.phone, `-${OFF_HOURS_RESUME_MAX_AGE_HOURS} hours`).first();
+    if (!last) continue;
+    const session = await getBotSessionRow(env, notice.phone);
+    if (session?.mode === "human") continue;
+    if (!(await claimInboundMessageForBot(env, `morning-claim:${last.message_id}`))) continue;
+    resumed += 1;
+    await runBotForInboundMessages(env, [{ value: { contacts: [{ profile: {} }], messages: [
+      { id: `morning:${last.message_id}`, from: notice.phone, type: "text", text: { body: last.message_text }, afterHoursResume: true },
+    ] } }]).catch(() => null);
+  }
+  return { ok: true, resumed };
+}
+
 async function takeOverUnansweredHumanChats(env) {
+  if (!isBotOpenNow(env)) return { ok: true, taken: 0, reason: "closed" };
   if (String(env.WHATSAPP_BOT_ENABLED || "").toLowerCase() !== "true") return { ok: true, taken: 0 };
   await ensureWhatsAppBotTables(env);
   await ensureWhatsAppInboxTable(env);
@@ -2399,6 +2492,11 @@ async function runBotForInboundMessages(env, changes) {
           await sendBotReply(env, credentials, phone, recoveredHandoffReply, message.type === "audio");
           continue;
         }
+        // Fuera del horario de atención el bot no conversa (ver BOT_HOURS). Los adjuntos y el personal pasan igual.
+        if (!isStaffPhone && !isBotOpenNow(env) && message.type !== "image" && message.type !== "document") {
+          if (!isClosingPleasantry(inboundMessageText(message))) await sendOffHoursNoticeOnce(env, credentials, phone).catch(() => null);
+          continue;
+        }
         if (!isStaffPhone && await guardAgainstBotLoop(env, credentials, phone, message)) continue;
         const preferAudio = message.type === "audio";
         let text = inboundMessageText(message);
@@ -3962,7 +4060,7 @@ export default {
       const messagesSaved = await saveInboundWhatsAppMessages(env, inboundChanges).catch(() => 0);
       const botTask = runBotForInboundMessages(env, inboundChanges).catch(() => null);
       const flushTask = flushQueuedStaffNotifications(env).catch(() => null);
-      const takeoverTask = takeOverUnansweredHumanChats(env).catch(() => null);
+      const takeoverTask = takeOverUnansweredHumanChats(env).then(() => resumeAfterHoursChats(env)).catch(() => null);
       if (ctx?.waitUntil) { ctx.waitUntil(botTask); ctx.waitUntil(flushTask); ctx.waitUntil(takeoverTask); } else { await botTask; await flushTask; await takeoverTask; }
       return Response.json({ ok: true, received: statuses.length, messagesSaved, manualEchoesSaved });
     }
@@ -4104,11 +4202,12 @@ export default {
       const takeover = await takeOverUnansweredHumanChats(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
       // El resumen "Chats sin responder" se desactivó a pedido de Carlos (2026-10-10): llegaba a cada rato y no lo necesita.
       const digest = { ok: true, sent: false, reason: "disabled" };
+      const morning = await resumeAfterHoursChats(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
       // Los avisos en cola por el espaciado de 90 s solo se despachaban al llegar otro webhook de Meta; en una
       // hora tranquila podían quedar horas sin salir. La corrida de 10 minutos también vacía la cola.
       const flushed = await flushQueuedStaffNotifications(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
       const expired = await expireStaleConversationState(env).then(() => ({ ok: true })).catch((error) => ({ ok: false, error: String(error?.message || error) }));
-      return Response.json({ ...result, takeover, digest, flushed, expired }, { status: result.ok ? 200 : 502 });
+      return Response.json({ ...result, takeover, digest, morning, flushed, expired }, { status: result.ok ? 200 : 502 });
     }
 
     if (url.pathname === "/api/billing/automation" && request.method === "GET") {
