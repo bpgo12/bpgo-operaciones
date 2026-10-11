@@ -1042,7 +1042,7 @@ async function deliverStaffNotification(env, credentials, row) {
       { type: "text", text: sanitizeStaffTemplateParam(row.case_type, 120) || "Caso interno" },
       { type: "text", text: sanitizeStaffTemplateParam(row.customer_name, 160) || "Sin identificar" },
       { type: "text", text: sanitizeStaffTemplateParam(row.customer_phone, 30) || "Sin teléfono" },
-      { type: "text", text: sanitizeStaffTemplateParam(row.summary, 300) || "Sin detalle" },
+      { type: "text", text: sanitizeStaffTemplateParam(row.summary, 700) || "Sin detalle" },
     ] }];
     if (templateName === "aviso_nuevo_pago" && row.entity_type === "case" && row.entity_id) {
       components.push({ type: "button", sub_type: "quick_reply", index: 0, parameters: [{ type: "payload", payload: `confirm_payment:${row.entity_id}` }] });
@@ -1071,7 +1071,7 @@ async function deliverStaffNotification(env, credentials, row) {
   // Meta lo rechaza y el aviso queda como fallido igual que antes.
   let textFallbackId = null;
   if (!primaryAccepted && !fallbackAccepted) {
-    const textBody = `🔔 ${sanitizeStaffTemplateParam(row.case_type, 120) || "Caso interno"}\nCliente: ${sanitizeStaffTemplateParam(row.customer_name, 160) || "Sin identificar"}\nTeléfono: +${sanitizeStaffTemplateParam(row.customer_phone, 30) || "sin teléfono"}\n\n${sanitizeStaffTemplateParam(row.summary, 300) || "Sin detalle"}`;
+    const textBody = `🔔 ${sanitizeStaffTemplateParam(row.case_type, 120) || "Caso interno"}\nCliente: ${sanitizeStaffTemplateParam(row.customer_name, 160) || "Sin identificar"}\nTeléfono: +${sanitizeStaffTemplateParam(row.customer_phone, 30) || "sin teléfono"}\n\n${sanitizeStaffTemplateParam(row.summary, 700) || "Sin detalle"}`;
     const textResult = await fetch(endpoint, { method: "POST", headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
       body: JSON.stringify({ messaging_product: "whatsapp", recipient_type: "individual", to: normalized, type: "text", text: { body: textBody } }),
     }).then(async (response) => ({ ok: response.ok, body: await response.json().catch(() => null) })).catch(() => ({ ok: false, body: null }));
@@ -1134,7 +1134,7 @@ async function notifyStaff(env, credentials, role, caseType, customerName, custo
       VALUES (?,?,?,?,?,?,?,?,?,?,?,'es_CL','pending',0,0,datetime('now'),datetime('now'))`)
       .bind(identity.key, role, normalized || null, sanitizeStaffTemplateParam(caseType, 120), sanitizeStaffTemplateParam(customerName, 160) || null,
         normalizeWhatsAppPhone(customerPhone) || null, identity.type, identity.id, options.sourceMessageId || null,
-        sanitizeStaffTemplateParam(summary, 300), templateName).run();
+        sanitizeStaffTemplateParam(summary, 700), templateName).run();
     const row = await env.DB.prepare("SELECT * FROM staff_notifications_log WHERE idempotency_key=?").bind(identity.key).first();
     if (!insert.meta?.changes) return { ok: row?.status !== "failed", duplicate: true, status: row?.status };
     const lastAttemptMs = await lastStaffNotificationAttemptMs(env, role);
@@ -1773,31 +1773,88 @@ const DIAGNOSTIC_STEPS = {
   since: { ask: "¿Desde cuándo notas el problema?", asked: /desde cu[aá]ndo|hace cu[aá]nto/, said: /desde (ayer|hoy|hace|el|la|anoche|la semana)|hace (un|una|\d+|unos|dos|tres)/ },
 };
 
-async function pendingDiagnosticQuestion(env, phone, customerText) {
+// Datos que el técnico necesita además del diagnóstico (2026-10-10, pedido de Carlos): dónde es y cuándo hay alguien en casa.
+const INCIDENT_EXTRA_STEPS = {
+  address: { ask: "¿Cuál es tu dirección o sector, para ubicar bien la conexión? 📍", asked: /direccion o sector|tu direccion|donde (queda|esta) (la|tu) (casa|conexion)/, said: /calle|pasaje|camino|sector|parcela|\bkm\b|villa|poblacion|numero \d|n° ?\d|casa \d|lote/ },
+  availability: { ask: "¿En qué horario hay alguien en casa para recibir al técnico? 🕐", asked: /horario hay alguien|alguien en casa|recibir al tecnico/, said: /horario|despues de las|desde las|hasta las|en la (manana|tarde|noche)|todo el dia|cualquier hora|fin de semana|\bsabado\b|\bdomingo\b/ },
+};
+
+const FAULT_WORDS_RE = /lent[oa]|\btv\b|\btele\b|television|canales|no se ve|sin internet|sin servicio|sin conexion|no tengo internet|no hay internet|no funciona|falla|se cae|se corta|intermitente|no carga|no navega|sin senal|cortad[oa]|cable/;
+
+async function pendingDiagnosticQuestion(env, phone, customerText, knownAddress) {
   const normalizedNow = cyberNormalize(customerText);
-  if (/\b(visita|tecnico|que vengan|agendar|agenden|agendemos|mandar a alguien|venir)\b/.test(normalizedNow)) return null;
+  const explicitVisit = /\b(visita|tecnico|que vengan|agendar|agenden|agendemos|mandar a alguien|venir)\b/.test(normalizedNow);
   // Instalación / coordinación de fecha NO es una falla: no se interroga por el router (caso 56948797079,
   // 2026-10-08: "programemos para mañana o el sábado la instalación de la fibra" recibió "¿qué luces ves?").
   if (/\b(instal\w*|program\w*|coordin\w*|fecha|horario|manana|sabado|domingo|lunes|martes|miercoles|jueves|viernes|despues de las?)\b/.test(normalizedNow)) return null;
   await ensureWhatsAppInboxTable(env);
   const rows = await env.DB.prepare(
     `SELECT direction, message_text FROM whatsapp_inbox_messages WHERE phone = ? AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-6 hours')
-     AND COALESCE(message_text, '') != '' ORDER BY created_at DESC LIMIT 14`
+     AND COALESCE(message_text, '') != '' ORDER BY created_at DESC LIMIT 20`
   ).bind(phone).all();
   const history = rows.results || [];
   const outbound = history.filter((row) => row.direction === "outbound").map((row) => cyberNormalize(row.message_text)).join(" | ");
   const inbound = history.filter((row) => row.direction !== "outbound").map((row) => cyberNormalize(row.message_text)).concat(normalizedNow).join(" | ");
-  // Solo se indaga cuando el cliente de verdad reportó una falla; cualquier otro tema pasa tal cual.
-  if (!/lent[oa]|\btv\b|\btele\b|television|canales|no se ve|sin internet|sin servicio|sin conexion|no tengo internet|no hay internet|no funciona|falla|se cae|se corta|intermitente|no carga|no navega|sin senal/.test(inbound)) return null;
-  const slow = /\blent[oa]\b|\bdemora|\bse cae\b|\bcorta\b/.test(inbound);
-  const order = slow ? ["devices", "cable", "restart", "lights", "since"] : ["lights", "restart", "devices", "since"];
-  const askedBefore = order.filter((step) => DIAGNOSTIC_STEPS[step].asked.test(outbound)).length;
-  if (askedBefore >= 4) return null;
-  for (const step of order) {
-    const def = DIAGNOSTIC_STEPS[step];
-    if (!def.asked.test(outbound) && !def.said.test(inbound)) return def.ask;
+  // Solo se indaga cuando el cliente de verdad reportó una falla (o pidió un técnico); cualquier otro tema pasa tal cual.
+  if (!explicitVisit && !FAULT_WORDS_RE.test(inbound)) return null;
+  if (!explicitVisit) {
+    const slow = /\blent[oa]\b|\bdemora|\bse cae\b|\bcorta\b/.test(inbound);
+    const order = slow ? ["devices", "cable", "restart", "lights", "since"] : ["lights", "restart", "devices", "since"];
+    const askedBefore = order.filter((step) => DIAGNOSTIC_STEPS[step].asked.test(outbound)).length;
+    if (askedBefore < 4) {
+      for (const step of order) {
+        const def = DIAGNOSTIC_STEPS[step];
+        if (!def.asked.test(outbound) && !def.said.test(inbound)) return def.ask;
+      }
+    }
   }
+  // Datos para el técnico: dirección (si no la tenemos registrada) y horario en que hay alguien en casa.
+  if (!String(knownAddress || "").trim() && !INCIDENT_EXTRA_STEPS.address.asked.test(outbound) && !INCIDENT_EXTRA_STEPS.address.said.test(inbound)) return INCIDENT_EXTRA_STEPS.address.ask;
+  if (!INCIDENT_EXTRA_STEPS.availability.asked.test(outbound) && !INCIDENT_EXTRA_STEPS.availability.said.test(inbound)) return INCIDENT_EXTRA_STEPS.availability.ask;
   return null;
+}
+
+// Resumen para quien atiende la incidencia: empareja cada pregunta de diagnóstico del bot con la respuesta del cliente
+// (luces, reinicio, dispositivos, desde cuándo, dirección, horario) en vez de depender de una frase corta del modelo.
+async function buildIncidentSummary(env, phone, aiReason, address) {
+  await ensureWhatsAppInboxTable(env);
+  const rows = (await env.DB.prepare(
+    `SELECT direction, message_text FROM whatsapp_inbox_messages WHERE phone = ? AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-12 hours')
+     AND COALESCE(message_text, '') != '' ORDER BY created_at ASC LIMIT 40`
+  ).bind(phone).all()).results || [];
+  const questions = {
+    lights: DIAGNOSTIC_STEPS.lights.asked, restart: DIAGNOSTIC_STEPS.restart.asked, devices: DIAGNOSTIC_STEPS.devices.asked,
+    cable: DIAGNOSTIC_STEPS.cable.asked, since: DIAGNOSTIC_STEPS.since.asked,
+    address: INCIDENT_EXTRA_STEPS.address.asked, availability: INCIDENT_EXTRA_STEPS.availability.asked,
+  };
+  const answers = {};
+  let waiting = null;
+  let firstReport = null;
+  for (const row of rows) {
+    const text = String(row.message_text || "").replace(/\s+/g, " ").trim();
+    const normalized = cyberNormalize(text);
+    if (row.direction === "outbound") {
+      waiting = Object.keys(questions).find((key) => questions[key].test(normalized)) || null;
+    } else {
+      if (!firstReport && FAULT_WORDS_RE.test(normalized)) firstReport = text;
+      if (waiting && !answers[waiting]) answers[waiting] = text;
+      waiting = null;
+    }
+  }
+  const cut = (value, max) => String(value || "").slice(0, max);
+  const parts = [];
+  if (address) parts.push(`Dirección: ${cut(address, 90)}`);
+  else if (answers.address) parts.push(`Dirección: ${cut(answers.address, 90)}`);
+  if (firstReport) parts.push(`Reporte: ${cut(firstReport, 150)}`);
+  else if (aiReason) parts.push(`Reporte: ${cut(aiReason, 150)}`);
+  if (answers.lights) parts.push(`Luces: ${cut(answers.lights, 60)}`);
+  if (answers.restart) parts.push(`Reinicio: ${cut(answers.restart, 60)}`);
+  if (answers.devices) parts.push(`Dispositivos: ${cut(answers.devices, 60)}`);
+  if (answers.cable) parts.push(`Por cable: ${cut(answers.cable, 50)}`);
+  if (answers.since) parts.push(`Desde: ${cut(answers.since, 50)}`);
+  if (answers.availability) parts.push(`Horario en casa: ${cut(answers.availability, 70)}`);
+  if (aiReason && firstReport && cyberNormalize(aiReason) !== cyberNormalize(firstReport)) parts.push(`Resumen: ${cut(aiReason, 160)}`);
+  return parts.length ? parts.join(" · ") : (aiReason || "Cliente reportó una falla técnica.");
 }
 
 async function executeBotAction(env, credentials, phone, action, message) {
@@ -1913,17 +1970,17 @@ async function executeBotAction(env, credentials, phone, action, message) {
     }
     // Carlos (2026-10-08, 56933552792: "lento" -> "en todos" -> visita al tiro): el bot debe indagar antes de
     // pedir un técnico. Se impone por código, sin depender de que el modelo recuerde el diagnóstico.
-    const nextDiagnosticQuestion = await pendingDiagnosticQuestion(env, phone, message.customerText);
-    if (nextDiagnosticQuestion) {
-      await sendBotReply(env, credentials, phone, nextDiagnosticQuestion, preferAudio);
-      return;
-    }
     // El nombre del titular SIEMPRE se pide y se captura por código en el próximo mensaje si
     // no lo conocíamos ya (ver whatsapp_pending_visits en runBotForInboundMessages) -- nunca se
     // confía en que el modelo lo haya preguntado o lo recuerde, para que esto sea predecible.
     await ensureWhatsAppBotTables(env);
     const matchedCustomer = await findCustomerForWhatsApp(env, phone, message.customerName);
     const known = await getKnownAccountName(env, phone) || (matchedCustomer.matchedByPhone ? matchedCustomer.name : null);
+    const nextDiagnosticQuestion = await pendingDiagnosticQuestion(env, phone, message.customerText, matchedCustomer.address);
+    if (nextDiagnosticQuestion) {
+      await sendBotReply(env, credentials, phone, nextDiagnosticQuestion, preferAudio);
+      return;
+    }
     if (!known && !matchedCustomer.matchedByPhone) {
       // Un teléfono que no corresponde a ningún cliente registrado pidiendo una "visita técnica"
       // casi siempre es en realidad un prospecto nuevo que el modelo clasificó mal (ej. alguien que
@@ -1943,7 +2000,7 @@ async function executeBotAction(env, credentials, phone, action, message) {
         .bind(phone, customer.id, customer.name, known, action.preferred_date || null, action.reason || null, transcript).first();
       // Texto fijo: el de la IA podía prometer día u hora de llegada del técnico.
       await sendBotReply(env, credentials, phone, "Registramos tu solicitud de visita técnica, un agente te confirmará el horario. 🙌", preferAudio);
-      await notifyStaff(env, credentials, "eduardo", "Incidencia técnica", known, phone, action.reason || "Cliente reportó una falla técnica.", { visitRequestId: visitRow?.id, sourceMessageId: message.messageId });
+      await notifyStaff(env, credentials, "eduardo", "Incidencia técnica", known, phone, await buildIncidentSummary(env, phone, action.reason, customer.address), { visitRequestId: visitRow?.id, sourceMessageId: message.messageId });
       await setBotSessionMode(env, phone, "human", "case_created_visit");
       return;
     }
@@ -2555,7 +2612,7 @@ async function runBotForInboundMessages(env, changes) {
             .bind(phone, customer.id, customer.name, reportedName, pendingVisit.preferred_date, pendingVisit.reason, transcript).first();
           await env.DB.prepare("DELETE FROM whatsapp_pending_visits WHERE phone = ?").bind(phone).run();
           await sendBotReply(env, credentials, phone, `Gracias, registramos la solicitud a nombre de ${reportedName}. Un agente te confirmará el horario. 🙌`, preferAudio);
-          await notifyStaff(env, credentials, "eduardo", "Incidencia técnica", reportedName, phone, pendingVisit.reason || "Cliente reportó una falla técnica.", { visitRequestId: visitRow?.id, sourceMessageId: message.id });
+          await notifyStaff(env, credentials, "eduardo", "Incidencia técnica", reportedName, phone, await buildIncidentSummary(env, phone, pendingVisit.reason, customer.address), { visitRequestId: visitRow?.id, sourceMessageId: message.id });
           await setBotSessionMode(env, phone, "human", "case_created_visit");
           continue;
         }
@@ -4045,7 +4102,8 @@ export default {
       // Misma corrida de 10 minutos: además retoma los chats en modo humano que nadie atendió (ver
       // takeOverUnansweredHumanChats). Un fallo aquí no debe tumbar el seguimiento de leads.
       const takeover = await takeOverUnansweredHumanChats(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
-      const digest = await alertStaffUnansweredChats(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
+      // El resumen "Chats sin responder" se desactivó a pedido de Carlos (2026-10-10): llegaba a cada rato y no lo necesita.
+      const digest = { ok: true, sent: false, reason: "disabled" };
       // Los avisos en cola por el espaciado de 90 s solo se despachaban al llegar otro webhook de Meta; en una
       // hora tranquila podían quedar horas sin salir. La corrida de 10 minutos también vacía la cola.
       const flushed = await flushQueuedStaffNotifications(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));

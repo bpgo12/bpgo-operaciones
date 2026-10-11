@@ -520,7 +520,9 @@ assert.match(worker, /setBotSessionMode\(env, phone, "human", "bot_loop_suspecte
 // (2) Chats sin responder: resumen a Carlos + ventana de retoma hasta 23 h (límite de WhatsApp).
 assert.match(worker, /const HUMAN_NO_RESPONSE_MAX_AGE_MS = 23 \* 60 \* 60 \* 1000;/);
 assert.match(worker, /async function alertStaffUnansweredChats\(env\)/);
-assert.match(worker, /const digest = await alertStaffUnansweredChats\(env\)/);
+// 2026-10-10: Carlos pidió eliminar el resumen "Chats sin responder" (llegaba a cada rato): ya no se llama.
+assert.doesNotMatch(worker, /await alertStaffUnansweredChats\(env\)/);
+assert.match(worker, /const digest = \{ ok: true, sent: false, reason: "disabled" \};/);
 assert.match(worker, /case_type = 'Chats sin responder'/);
 // (3) Avisos fallidos por 131042 se reintentan solos (24 h, 30 min entre intentos).
 assert.match(worker, /status = 'failed' AND error_code = '131042' AND created_at > datetime\('now', '-24 hours'\)/);
@@ -733,8 +735,7 @@ assert.match(worker, /const SALES_LEAD_FACTIBILIDAD_TTL_DAYS = 7;/);
 
 // 2026-10-08 (56933552792): "muy lento" -> "en todos" -> visita al tiro. El bot debe indagar por código antes de
 // registrar una visita por falla, salvo que el cliente la pida explícitamente.
-assert.match(worker, /const nextDiagnosticQuestion = await pendingDiagnosticQuestion\(env, phone, message\.customerText\);\s*\n\s*if \(nextDiagnosticQuestion\) \{/);
-assert.match(worker, /async function pendingDiagnosticQuestion\(env, phone, customerText\)/);
+assert.match(worker, /async function pendingDiagnosticQuestion\(env, phone, customerText, knownAddress\)/);
 assert.match(worker, /que el cliente confirme|NO uses "visit_request" mientras falte reinicio del router/);
 assert.doesNotMatch(worker, /Sigue así hasta que el cliente confirme que afecta a todos los dispositivos/);
 
@@ -791,3 +792,11 @@ assert.match(worker, /idx_staff_notifications_role_status ON staff_notifications
 assert.match(worker, /if \(!message\.mediaId\) \{\s*\n\s*await sendBotReply\(env, credentials, phone, "Gracias por avisar 🙏 Cuando tengas el comprobante/);
 assert.match(worker, /La campaña\/promoción Cyber ya TERMINÓ/);
 assert.match(worker, /El monto a pagar es \$\{formatCurrency\(c\.balance\)\}/);
+
+// 2026-10-10: la incidencia técnica llega con dirección, reporte, luces, reinicio, dispositivos y horario; el bot
+// pregunta dirección (si no está registrada) y horario antes de registrar la visita.
+assert.match(worker, /async function buildIncidentSummary\(env, phone, aiReason, address\)/);
+assert.match(worker, /await buildIncidentSummary\(env, phone, action\.reason, customer\.address\)/);
+assert.match(worker, /await buildIncidentSummary\(env, phone, pendingVisit\.reason, customer\.address\)/);
+assert.match(worker, /pendingDiagnosticQuestion\(env, phone, message\.customerText, matchedCustomer\.address\)/);
+assert.match(worker, /sanitizeStaffTemplateParam\(summary, 700\)/);
