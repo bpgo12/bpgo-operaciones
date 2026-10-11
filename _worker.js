@@ -2491,8 +2491,8 @@ async function runBotForInboundMessages(env, changes) {
           await sendBotReply(env, credentials, phone, recoveredHandoffReply, message.type === "audio");
           continue;
         }
-        // Fuera del horario de atención el bot no conversa (ver BOT_HOURS). Los adjuntos y el personal pasan igual.
-        if (!isStaffPhone && !isBotOpenNow(env) && message.type !== "image" && message.type !== "document") {
+        // Fuera del horario de atención el bot no conversa (ver BOT_HOURS), tampoco con el personal (así se puede probar). Los adjuntos pasan igual; los botones de los avisos se atienden más arriba.
+        if (!isBotOpenNow(env) && message.type !== "image" && message.type !== "document") {
           if (!isClosingPleasantry(inboundMessageText(message))) await sendOffHoursNoticeOnce(env, credentials, phone).catch(() => null);
           continue;
         }
