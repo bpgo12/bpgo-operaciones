@@ -715,9 +715,10 @@ function isClosingPleasantry(text) {
 // Chile). Fuera de horario avisa UNA vez por conversación y, al reabrir, retoma el último mensaje que quedó sin responder.
 // Los adjuntos (posibles comprobantes) se procesan a cualquier hora porque son deterministas y no se pueden perder.
 // Se ajusta con las variables BOT_HOURS ("09:00-21:00") y BOT_DAYS ("1-7", lunes=1 ... domingo=7, o "1,2,3,4,5,6").
-const BOT_HOURS_DEFAULT = "09:00-21:00";
+const BOT_HOURS_DEFAULT = "09:00-19:30";
 const BOT_DAYS_DEFAULT = "1-7";
-const OFF_HOURS_MARKER = "fuera de nuestro horario de atención";
+const OFF_HOURS_MARKER = "Estamos fuera de horario laboral";
+const OFF_HOURS_LEGACY_MARKER = "fuera de nuestro horario de atención";
 const OFF_HOURS_NOTICE_COOLDOWN_HOURS = 10;
 const OFF_HOURS_RESUME_MAX_AGE_HOURS = 16;
 const OFF_HOURS_RESUME_BATCH = 5;
@@ -753,20 +754,18 @@ function isBotOpenNow(env, date = new Date()) {
   return schedule.days.has(clock.weekday) && clock.minutes >= schedule.startMinutes && clock.minutes < schedule.endMinutes;
 }
 
-function offHoursNoticeText(env) {
-  const schedule = botScheduleConfig(env);
-  const days = schedule.allDays ? "todos los días" : "en nuestros días de atención";
-  return `Hola 👋 Ahora estamos ${OFF_HOURS_MARKER} (${days}, de ${schedule.label}). Tu mensaje quedó registrado y te respondemos apenas retomemos la atención. Si es un pago, puedes enviarnos el comprobante por aquí y lo revisamos. 🙏`;
+function offHoursNoticeText() {
+  return "Gracias por tu mensaje. Estamos fuera de horario laboral. ⏰ Te responderemos tan pronto como volvamos. 😊";
 }
 
 async function sendOffHoursNoticeOnce(env, credentials, phone) {
   await ensureWhatsAppInboxTable(env);
   const recent = await env.DB.prepare(
-    `SELECT 1 AS found FROM whatsapp_inbox_messages WHERE phone = ? AND direction = 'outbound' AND message_text LIKE ?
+    `SELECT 1 AS found FROM whatsapp_inbox_messages WHERE phone = ? AND direction = 'outbound' AND (message_text LIKE ? OR message_text LIKE ?)
      AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) LIMIT 1`
-  ).bind(phone, `%${OFF_HOURS_MARKER}%`, `-${OFF_HOURS_NOTICE_COOLDOWN_HOURS} hours`).first();
+  ).bind(phone, `%${OFF_HOURS_MARKER}%`, `%${OFF_HOURS_LEGACY_MARKER}%`, `-${OFF_HOURS_NOTICE_COOLDOWN_HOURS} hours`).first();
   if (recent) return false;
-  await sendBotReply(env, credentials, phone, offHoursNoticeText(env), false);
+  await sendBotReply(env, credentials, phone, offHoursNoticeText(), false);
   return true;
 }
 
@@ -779,10 +778,10 @@ async function resumeAfterHoursChats(env) {
   await ensureWhatsAppInboxTable(env);
   const notices = await env.DB.prepare(
     `SELECT o.phone, o.created_at FROM whatsapp_inbox_messages o
-     WHERE o.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) AND o.direction = 'outbound' AND o.message_text LIKE ?
+     WHERE o.created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) AND o.direction = 'outbound' AND (o.message_text LIKE ? OR o.message_text LIKE ?)
        AND NOT EXISTS (SELECT 1 FROM whatsapp_inbox_messages x WHERE x.phone = o.phone AND x.direction = 'outbound' AND x.created_at > o.created_at)
      ORDER BY o.created_at ASC LIMIT ?`
-  ).bind(`-${OFF_HOURS_RESUME_MAX_AGE_HOURS} hours`, `%${OFF_HOURS_MARKER}%`, OFF_HOURS_RESUME_BATCH).all();
+  ).bind(`-${OFF_HOURS_RESUME_MAX_AGE_HOURS} hours`, `%${OFF_HOURS_MARKER}%`, `%${OFF_HOURS_LEGACY_MARKER}%`, OFF_HOURS_RESUME_BATCH).all();
   const staffPhones = new Set([env.STAFF_PHONE_CARLOS, env.STAFF_PHONE_EDUARDO].map((value) => normalizeWhatsAppPhone(value)).filter(Boolean));
   let resumed = 0;
   for (const notice of notices.results || []) {

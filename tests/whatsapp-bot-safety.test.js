@@ -822,3 +822,15 @@ assert.match(worker, /sanitizeStaffTemplateParam\(summary, 700\)/);
 assert.match(worker, /if \(!isStaffPhone && !isBotOpenNow\(env\) && message\.type !== "image" && message\.type !== "document"\)/);
 assert.match(worker, /if \(!isBotOpenNow\(env\)\) return \{ ok: true, taken: 0, reason: "closed" \};/);
 assert.match(worker, /takeOverUnansweredHumanChats\(env\)\.then\(\(\) => resumeAfterHoursChats\(env\)\)/);
+
+// 2026-10-10: horario definido por Carlos: 09:00 a 19:30 y mensaje fijo fuera de horario.
+assert.match(worker, /const BOT_HOURS_DEFAULT = "09:00-19:30";/);
+assert.match(worker, /return "Gracias por tu mensaje\. Estamos fuera de horario laboral\. ⏰ Te responderemos tan pronto como volvamos\. 😊";/);
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`${worker.slice(worker.indexOf("const BOT_HOURS_DEFAULT"), worker.indexOf("function offHoursNoticeText"))} this.api = { isBotOpenNow };`, ctx);
+  assert.equal(ctx.api.isBotOpenNow({}, new Date("2026-10-12T22:15:00Z")), true);  // 19:15 Chile
+  assert.equal(ctx.api.isBotOpenNow({}, new Date("2026-10-12T22:45:00Z")), false); // 19:45 Chile
+  assert.equal(ctx.api.isBotOpenNow({}, new Date("2026-10-12T12:00:00Z")), true);  // 09:00 Chile
+}
