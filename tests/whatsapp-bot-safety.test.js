@@ -819,7 +819,7 @@ assert.match(worker, /sanitizeStaffTemplateParam\(summary, 700\)/);
   assert.equal(ctx.api.isBotOpenNow({ BOT_HOURS: "09:00-21:00", BOT_DAYS: "1-5" }, new Date("2026-10-12T15:00:00Z")), true);
   assert.equal(ctx.api.isBotOpenNow({}, new Date("2026-10-12T15:00:00Z")), true);
 }
-assert.match(worker, /if \(!isStaffPhone && !isBotOpenNow\(env\) && message\.type !== "image" && message\.type !== "document"\)/);
+assert.match(worker, /if \(!isBotOpenNow\(env\) && message\.type !== "image" && message\.type !== "document"\)/);
 assert.match(worker, /if \(!isBotOpenNow\(env\)\) return \{ ok: true, taken: 0, reason: "closed" \};/);
 assert.match(worker, /takeOverUnansweredHumanChats\(env\)\.then\(\(\) => resumeAfterHoursChats\(env\)\)/);
 
