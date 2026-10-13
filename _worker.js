@@ -2172,13 +2172,9 @@ async function executeBotAction(env, credentials, phone, action, message) {
         `¡Hola! 😊 Tu instalación ya está programada para ${describeInstallDate(install.plannedDate, install.today)}. El técnico se pondrá en contacto contigo durante el día. Si necesitas cambiar algo, escríbenos por acá. 🙌`, preferAudio);
       return;
     }
-    if (install?.knownCustomer) {
-      await setBotSessionMode(env, phone, "human", "bot_escalated");
-      await sendBotReply(env, credentials, phone, "Ya te comunico con un agente de BPGO, en breve te responde por acá. 🙌", preferAudio);
-      await notifyStaff(env, credentials, "carlos", "Conversación escalada", await getKnownAccountName(env, phone), phone,
-        `Cliente ya registrado consulta por contratación/visita: "${String(message.customerText || "").slice(0, 150)}"`, { sourceMessageId: message.messageId });
-      return;
-    }
+    // Caso real (2026-10-13, 56912000015): "Necesito contratar" / "Para cuándo tienen disponibilidad" de un número que figura
+    // en la planilla de clientes terminaba en "Ya te comunico con un agente" y la conversación quedaba muerta. Un cliente
+    // registrado que quiere contratar (otro punto, otra dirección, reactivar) sigue el mismo embudo de contratación.
     // Caso real (2026-10-13, 56912000021): el cliente ya había dicho su sector ("Llenquehue S/N carretera p500") en el mensaje
     // que disparó esta acción y el bot se lo volvió a preguntar. Si el mensaje actual ya parece un sector, se guarda y se pasa
     // directo a pedir la ubicación.

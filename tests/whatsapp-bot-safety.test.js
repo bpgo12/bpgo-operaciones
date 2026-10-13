@@ -843,3 +843,6 @@ assert.match(worker, /VALUES \(\?, \?, \?, \?, 'awaiting_location', datetime\('n
 assert.match(worker, /async function expireLeadsSupersededByHuman\(env, phone, sessionUpdatedAt, reason, message\)/);
 assert.match(worker, /await expireLeadsSupersededByHuman\(env, phone, sessionRow\.updated_at, sessionRow\.escalation_reason, message\)/);
 assert.match(worker, /await expireLeadsSupersededByHuman\(env, row\.phone, row\.session_updated_at, row\.escalation_reason, null\)/);
+
+// 2026-10-13 (56912000015): un cliente registrado que quiere contratar sigue el embudo, no se escala en seco.
+assert.doesNotMatch(worker, /Cliente ya registrado consulta por contratación\/visita/);
