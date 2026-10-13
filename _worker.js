@@ -2163,10 +2163,21 @@ async function executeBotAction(env, credentials, phone, action, message) {
         `Cliente ya registrado consulta por contratación/visita: "${String(message.customerText || "").slice(0, 150)}"`, { sourceMessageId: message.messageId });
       return;
     }
+    // Caso real (2026-10-13, 56912000021): el cliente ya había dicho su sector ("Llenquehue S/N carretera p500") en el mensaje
+    // que disparó esta acción y el bot se lo volvió a preguntar. Si el mensaje actual ya parece un sector, se guarda y se pasa
+    // directo a pedir la ubicación.
+    const givenSector = String(message.customerText || "").trim();
+    if (givenSector && isPlausibleSector(givenSector)) {
+      await env.DB.prepare(`INSERT INTO whatsapp_sales_leads (id, phone, customer_name, sector, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'awaiting_location', datetime('now'), datetime('now'))`)
+        .bind(crypto.randomUUID(), phone, message.customerName || null, givenSector.slice(0, 200)).run();
+      await sendBotReply(env, credentials, phone, "Perfecto, ahora por favor envíanos tu ubicación desde WhatsApp (ícono 📎 > Ubicación) para revisar la factibilidad exacta. 📍", preferAudio);
+      return;
+    }
     await env.DB.prepare(`INSERT INTO whatsapp_sales_leads (id, phone, customer_name, status, created_at, updated_at)
       VALUES (?, ?, ?, 'awaiting_sector', datetime('now'), datetime('now'))`)
       .bind(crypto.randomUUID(), phone, message.customerName || null).run();
-    await sendBotReply(env, credentials, phone, "¡Hola! Para revisar disponibilidad, cuéntanos ¿de qué sector nos escribes?", preferAudio);
+    await sendBotReply(env, credentials, phone, "Para revisar disponibilidad, cuéntanos ¿de qué sector nos escribes? 📍", preferAudio);
     return;
   }
   // Acción desconocida o el modelo no devolvió texto en "reply": nunca dejar al cliente sin respuesta.

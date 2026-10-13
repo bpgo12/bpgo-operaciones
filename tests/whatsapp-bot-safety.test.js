@@ -834,3 +834,7 @@ assert.match(worker, /return "Gracias por tu mensaje\. Estamos fuera de horario 
   assert.equal(ctx.api.isBotOpenNow({}, new Date("2026-10-12T22:45:00Z")), false); // 19:45 Chile
   assert.equal(ctx.api.isBotOpenNow({}, new Date("2026-10-12T12:00:00Z")), true);  // 09:00 Chile
 }
+
+// 2026-10-13 (56912000021): si el mensaje que dispara new_customer_request ya trae el sector, no se vuelve a preguntar.
+assert.match(worker, /const givenSector = String\(message\.customerText \|\| ""\)\.trim\(\);\s*\n\s*if \(givenSector && isPlausibleSector\(givenSector\)\) \{/);
+assert.match(worker, /VALUES \(\?, \?, \?, \?, 'awaiting_location', datetime\('now'\), datetime\('now'\)\)/);
