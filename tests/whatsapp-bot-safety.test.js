@@ -838,3 +838,8 @@ assert.match(worker, /return "Gracias por tu mensaje\. Estamos fuera de horario 
 // 2026-10-13 (56912000021): si el mensaje que dispara new_customer_request ya trae el sector, no se vuelve a preguntar.
 assert.match(worker, /const givenSector = String\(message\.customerText \|\| ""\)\.trim\(\);\s*\n\s*if \(givenSector && isPlausibleSector\(givenSector\)\) \{/);
 assert.match(worker, /VALUES \(\?, \?, \?, \?, 'awaiting_location', datetime\('now'\), datetime\('now'\)\)/);
+
+// 2026-10-13 (56912000016): una solicitud del embudo anterior a una intervención humana manual se cancela al volver el bot.
+assert.match(worker, /async function expireLeadsSupersededByHuman\(env, phone, sessionUpdatedAt, reason, message\)/);
+assert.match(worker, /await expireLeadsSupersededByHuman\(env, phone, sessionRow\.updated_at, sessionRow\.escalation_reason, message\)/);
+assert.match(worker, /await expireLeadsSupersededByHuman\(env, row\.phone, row\.session_updated_at, row\.escalation_reason, null\)/);
