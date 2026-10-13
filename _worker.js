@@ -633,6 +633,21 @@ const AUTO_REACTIVATABLE_REASONS = new Set(["manual_reply", "manual_whatsapp_rep
 // bloqueo olvidado. Con cualquier motivo, si pasaron STALE_HUMAN_LOCK_MS sin actividad, el bot retoma al tiro.
 const STALE_HUMAN_LOCK_MS = 6 * 60 * 60 * 1000;
 
+// Caso real (2026-10-13, 56957080200): Carlos atendió a mano a un cliente (reinstalación, cambio de domicilio) que tenía una
+// solicitud de factibilidad abierta del bot ("envíanos tu ubicación"). Al volver el bot a los 45 minutos, retomó ese embudo
+// viejo y le pidió la ubicación (que el cliente ya había mandado mientras atendía el humano) y avisó "factibilidad sin
+// ubicación". Una solicitud del embudo que quedó atrás de una intervención humana manual ya no vale: se cancela.
+async function expireLeadsSupersededByHuman(env, phone, sessionUpdatedAt, reason, message) {
+  if (reason !== "manual_whatsapp_reply" || !sessionUpdatedAt) return;
+  const lead = await env.DB.prepare("SELECT status FROM whatsapp_sales_leads WHERE phone = ? AND status NOT IN ('completed','cancelled','no_factibilidad') AND updated_at < ? ORDER BY created_at DESC LIMIT 1")
+    .bind(phone, sessionUpdatedAt).first();
+  if (!lead) return;
+  // Si el cliente justo manda la ubicación que el embudo estaba esperando, el embudo continúa.
+  if (lead.status === "awaiting_location" && message?.location?.latitude) return;
+  await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'cancelled', updated_at = datetime('now') WHERE phone = ? AND status NOT IN ('completed','cancelled','no_factibilidad') AND updated_at < ?")
+    .bind(phone, sessionUpdatedAt).run();
+}
+
 async function shouldAutoReactivate(env, phone, session, currentMessageId) {
   if (!session || session.mode !== "human") return false;
   const lastMessage = await env.DB.prepare(
@@ -811,7 +826,7 @@ async function takeOverUnansweredHumanChats(env) {
   const newestAllowed = new Date(now - HUMAN_NO_RESPONSE_TAKEOVER_MS).toISOString();
   const oldestAllowed = new Date(now - HUMAN_NO_RESPONSE_MAX_AGE_MS).toISOString();
   const sessionCutoff = newestAllowed.replace("T", " ").slice(0, 19);
-  const rows = await env.DB.prepare(`SELECT s.phone, s.escalation_reason, m.message_id, m.message_text, m.created_at
+  const rows = await env.DB.prepare(`SELECT s.phone, s.escalation_reason, s.updated_at AS session_updated_at, m.message_id, m.message_text, m.created_at
     FROM whatsapp_bot_sessions s JOIN whatsapp_inbox_messages m ON m.phone = s.phone
     WHERE s.mode = 'human' AND s.updated_at <= ? AND m.direction = 'inbound' AND m.message_type = 'text'
       AND COALESCE(TRIM(m.message_text), '') != '' AND m.created_at <= ? AND m.created_at >= ?
@@ -826,6 +841,7 @@ async function takeOverUnansweredHumanChats(env) {
     // volvía a modo bot pero NUNCA se respondía (bug real 2026-10-05, 56945234071). Por eso esta marca usa
     // otra clave: solo impide que dos corridas retomen el mismo mensaje a la vez.
     if (!(await claimInboundMessageForBot(env, `retake-claim:${row.message_id}`))) continue;
+    await expireLeadsSupersededByHuman(env, row.phone, row.session_updated_at, row.escalation_reason, null).catch(() => null);
     await setBotSessionMode(env, row.phone, "bot", "auto_reactivated_unanswered");
     taken += 1;
     await runBotForInboundMessages(env, [{ value: { contacts: [{ profile: {} }], messages: [
@@ -2480,6 +2496,7 @@ async function runBotForInboundMessages(env, changes) {
         const sessionRow = await getBotSessionRow(env, phone);
         if (sessionRow?.mode === "human") {
           if (await shouldAutoReactivate(env, phone, sessionRow, message.id)) {
+            await expireLeadsSupersededByHuman(env, phone, sessionRow.updated_at, sessionRow.escalation_reason, message).catch(() => null);
             await setBotSessionMode(env, phone, "bot", "auto_reactivated_after_inactivity");
             // La respuesta fija "sigue en revisión" es para quien solo pregunta por su trámite viejo. Un
             // adjunto (posible comprobante NUEVO) o un texto que habla de un pago debe procesarse normal:
