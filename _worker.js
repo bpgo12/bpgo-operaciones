@@ -4705,6 +4705,14 @@ export default {
       });
     }
 
+    // Las planillas de Google (clientes, direcciones, teléfonos, RUT, pagos) solo para sesiones de Operaciones.
+    // El frontend envía la cookie bpgo_session automáticamente; la cobranza automática lee STABLE_BACKEND
+    // directo desde el servidor (fetchFreshBillingSource), así que no pasa por aquí.
+    if (url.pathname === "/api/billing/sheets-sync" || url.pathname === "/api/business/sheets-workbook") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+    }
+
     if (url.pathname.startsWith("/api/")) {
       url.protocol = "https:";
       url.hostname = STABLE_BACKEND;
