@@ -849,7 +849,10 @@ assert.doesNotMatch(worker, /Cliente ya registrado consulta por contratación\/v
 
 // Las planillas de Google (con RUT, direcciones y teléfonos) exigen sesión antes del proxy a STABLE_BACKEND.
 {
-  const guard = worker.indexOf('url.pathname === "/api/billing/sheets-sync" || url.pathname === "/api/business/sheets-workbook"');
+  const guard = worker.indexOf('if (url.pathname === "/api/billing/sheets-sync" || url.pathname.startsWith("/api/business/")');
+  for (const route of ['"/api/backups"', '"/api/evidence"', '"/api/evidence-file"']) {
+    assert.ok(worker.slice(guard, guard + 600).includes(route), "ruta sin sesión: " + route);
+  }
   const proxy = worker.indexOf('if (url.pathname.startsWith("/api/")) {');
   assert.ok(guard > 0 && guard < proxy, "sheets-sync y sheets-workbook deben validar sesión antes del proxy genérico");
 }

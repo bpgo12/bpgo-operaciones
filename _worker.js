@@ -4708,7 +4708,12 @@ export default {
     // Las planillas de Google (clientes, direcciones, teléfonos, RUT, pagos) solo para sesiones de Operaciones.
     // El frontend envía la cookie bpgo_session automáticamente; la cobranza automática lee STABLE_BACKEND
     // directo desde el servidor (fetchFreshBillingSource), así que no pasa por aquí.
-    if (url.pathname === "/api/billing/sheets-sync" || url.pathname === "/api/business/sheets-workbook") {
+    // Lo mismo para las rutas heredadas de STABLE_BACKEND con datos internos: respaldos (GET lista clientes,
+    // POST restaura y reemplaza el estado completo), evidencias de instalación y acciones sobre la planilla.
+    // Quedan públicas solo /api/schedule (agenda pública), /api/health, /api/telegram/* y /api/broadcast.
+    if (url.pathname === "/api/billing/sheets-sync" || url.pathname.startsWith("/api/business/")
+      || url.pathname === "/api/backups" || url.pathname.startsWith("/api/backups/")
+      || url.pathname === "/api/evidence" || url.pathname === "/api/evidence-file") {
       const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
       if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
     }
