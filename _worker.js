@@ -3605,7 +3605,7 @@ async function handleCyberReply(env, credentials, message) {
 
 // Un cliente con factibilidad YA confirmada (esperando elegir plan, o esperando mandar sus datos
 // de instalación) es el lead más valioso del embudo de venta -- si Carlos no nota que quedó sin
-// responder, se puede "escapar" sin que nadie se entere. Corre cada 30 minutos (ver
+// responder, se puede "escapar" sin que nadie se entere. Corre cada 10 minutos (ver
 // sales-lead-followup.yml) y manda UN recordatorio al cliente + un aviso a Carlos, una sola vez
 // por lead (nunca repetido, para no ser invasivo) cuando pasan 20 minutos sin ningún mensaje
 // entrante de ese teléfono. Se compara contra el último mensaje ENTRANTE real (no contra
