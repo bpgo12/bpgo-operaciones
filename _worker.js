@@ -3071,7 +3071,7 @@ async function ensureBillingAutomationTablesRun(env) {
 }
 
 async function fetchFreshBillingSource(env) {
-  const endpoint = String(env.BILLING_SHEETS_SYNC_URL || `https://${STABLE_BACKEND}/api/billing/sheets-sync`).trim();
+  const endpoint = String(env.BILLING_SHEETS_SYNC_URL || sheetsScriptUrl(env) || `https://${STABLE_BACKEND}/api/billing/sheets-sync`).trim();
   const response = await fetch(endpoint, { headers: { "cache-control": "no-cache" }, cache: "no-store" }).catch(() => null);
   const payload = response ? await response.json().catch(() => null) : null;
   if (!response?.ok || !payload?.ok || !Array.isArray(payload.rows)) throw new Error("No se pudo leer Google Sheets; lote abortado sin envíos.");
@@ -3364,12 +3364,37 @@ function cyberCandidates(state, cortadosPhones) {
 // Mismo origen que /api/billing/cortados (ver más abajo), reutilizado acá para no mandar la
 // campaña a alguien que el negocio ya cortó por no pago. Si la planilla no responde, se devuelve
 // null (no una lista vacía) para no confundir "sin cortados" con "no se pudo verificar".
-// Auditoría 2026-10-05: el token de la planilla estaba escrito en el código (y por tanto en el repositorio).
-// Ahora se lee de la variable CORTADOS_SYNC_URL si existe; el valor anterior queda solo como respaldo para
-// no cortar el servicio hasta que se configure la variable y se rote el token en Google Apps Script.
-const CORTADOS_SYNC_URL_FALLBACK = "https://script.google.com/macros/s/AKfycbxQWG6fkP1_V8quAUCGN0q2kDtHq5nT4kmOXjTtqdkP9kBaEx_KoE0KAwnG39QhxJvd/exec?cortados=1&token=TOKEN_ELIMINADO_ROTAR";
+// Apps Script de la planilla "Registro de Pagos" (Google). URL base y token viven SOLO en secretos de Pages:
+//   SHEETS_SCRIPT_URL   = https://script.google.com/macros/s/<id>/exec   (sin parámetros)
+//   SHEETS_SCRIPT_TOKEN = token que valida el script (doGet/doPost)
+// 2026-10-14: antes el token estaba escrito aquí (repositorio público) y la lectura/escritura pasaba por
+// STABLE_BACKEND sin sesión. Rotar el token = cambiarlo en Apps Script + `wrangler pages secret put SHEETS_SCRIPT_TOKEN`.
+function sheetsScriptUrl(env, params = {}) {
+  const base = String(env?.SHEETS_SCRIPT_URL || "").trim();
+  const token = String(env?.SHEETS_SCRIPT_TOKEN || "").trim();
+  if (!base || !token) return null;
+  const target = new URL(base);
+  target.search = "";
+  target.searchParams.set("token", token);
+  for (const [key, value] of Object.entries(params)) target.searchParams.set(key, value);
+  return target.toString();
+}
+
+// Acciones de escritura que acepta el doPost del Apps Script (lista cerrada).
+const SHEETS_SCRIPT_ACTIONS = new Set(["appendFuelEntry", "recalculateFuelOil", "repairFuelWorkbook", "appendPayableEntry",
+  "updatePayableStatus", "deletePayableEntry", "repairPayableLayout", "normalizePayablesSheet", "updatePaymentStatus"]);
+
+async function sheetsScriptJson(target, init = {}) {
+  const upstream = await fetch(target, { cache: "no-store", redirect: "follow", ...init }).catch(() => null);
+  const payload = upstream ? await upstream.json().catch(() => null) : null;
+  if (!upstream?.ok || !payload) return { ok: false, error: "No se pudo comunicar con Google Sheets." };
+  // spreadsheetId/sheetGid no se exponen al navegador (igual que la versión anterior).
+  const { spreadsheetId, sheetGid, ...rest } = payload;
+  return rest;
+}
+
 function cortadosSyncUrl(env) {
-  return String(env?.CORTADOS_SYNC_URL || CORTADOS_SYNC_URL_FALLBACK).trim();
+  return String(env?.CORTADOS_SYNC_URL || sheetsScriptUrl(env, { cortados: "1" }) || "").trim();
 }
 
 async function cortadosPhoneSet(env) {
@@ -4716,6 +4741,29 @@ export default {
       || url.pathname === "/api/evidence" || url.pathname === "/api/evidence-file") {
       const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
       if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+    }
+
+    // Planilla de Google directo desde el Apps Script (ya con sesión validada arriba). Si los secretos
+    // SHEETS_SCRIPT_* no están configurados, sigue el proxy a STABLE_BACKEND como antes.
+    if (sheetsScriptUrl(env)) {
+      if (url.pathname === "/api/billing/sheets-sync" && request.method === "GET") {
+        const payload = await sheetsScriptJson(sheetsScriptUrl(env));
+        return Response.json(payload, { status: payload.ok ? 200 : 502, headers: { "cache-control": "no-store" } });
+      }
+      if (url.pathname === "/api/business/sheets-workbook" && request.method === "GET") {
+        const payload = await sheetsScriptJson(sheetsScriptUrl(env, { scope: "workbook" }));
+        return Response.json(payload, { status: payload.ok ? 200 : 502, headers: { "cache-control": "no-store" } });
+      }
+      if (url.pathname === "/api/business/sheets-action" && request.method === "POST") {
+        const body = await request.json().catch(() => null);
+        if (!body || !SHEETS_SCRIPT_ACTIONS.has(String(body.action || ""))) {
+          return Response.json({ ok: false, error: "Accion no soportada." }, { status: 400 });
+        }
+        const payload = await sheetsScriptJson(sheetsScriptUrl(env), {
+          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+        });
+        return Response.json(payload, { status: payload.ok ? 200 : 502, headers: { "cache-control": "no-store" } });
+      }
     }
 
     if (url.pathname.startsWith("/api/")) {
