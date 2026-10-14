@@ -846,3 +846,10 @@ assert.match(worker, /await expireLeadsSupersededByHuman\(env, row\.phone, row\.
 
 // 2026-10-13 (56912000015): un cliente registrado que quiere contratar sigue el embudo, no se escala en seco.
 assert.doesNotMatch(worker, /Cliente ya registrado consulta por contratación\/visita/);
+
+// Las planillas de Google (con RUT, direcciones y teléfonos) exigen sesión antes del proxy a STABLE_BACKEND.
+{
+  const guard = worker.indexOf('url.pathname === "/api/billing/sheets-sync" || url.pathname === "/api/business/sheets-workbook"');
+  const proxy = worker.indexOf('if (url.pathname.startsWith("/api/")) {');
+  assert.ok(guard > 0 && guard < proxy, "sheets-sync y sheets-workbook deben validar sesión antes del proxy genérico");
+}
