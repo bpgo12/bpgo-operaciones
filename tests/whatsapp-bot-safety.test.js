@@ -533,8 +533,12 @@ assert.match(worker, /if \(!env\.META_APP_SECRET\) \{[\s\S]{0,700}confirm_paymen
 assert.match(worker, /signal: AbortSignal\.timeout\(25000\)/);
 assert.match(worker, /WHERE id = 'main' AND updated_at IS \?/);
 assert.match(worker, /toLocaleString\("es-CL", \{ timeZone: "America\/Santiago" \}\)/);
-// (6) El token de la planilla ya no vive solo en el código: se puede sobrescribir por variable de entorno.
-assert.match(worker, /env\?\.CORTADOS_SYNC_URL \|\| CORTADOS_SYNC_URL_FALLBACK/);
+// (6) El token de la planilla NO vive en el código (repositorio público): solo en SHEETS_SCRIPT_TOKEN.
+assert.doesNotMatch(worker, /script\.google\.com\/macros\/s\/[^"'`\s]+token=/);
+assert.doesNotMatch(worker, /CORTADOS_SYNC_URL_FALLBACK/);
+assert.match(worker, /env\?\.SHEETS_SCRIPT_TOKEN/);
+// (7) Escrituras a la planilla: solo acciones de la lista cerrada.
+assert.match(worker, /!SHEETS_SCRIPT_ACTIONS\.has\(String\(body\.action/);
 
 // Caso real (2026-10-05, 56942968352): cliente sin internet respondió solo su nombre ("Rodrigo pavez") a la
 // pregunta de un agente y el bot le dijo su saldo pendiente. Los datos de cobranza solo se ofrecen a la IA si
