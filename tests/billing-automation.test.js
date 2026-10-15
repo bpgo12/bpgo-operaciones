@@ -74,3 +74,15 @@ assert.match(worker, /claims\.event_name/);
 assert.match(worker, /status='approved' AND strftime\('%Y-%m', created_at\) = \?/);
 
 console.log("billing automation: ok");
+
+// 2026-10-15: el envío manual ("Enviar lote por API") aplica las mismas reglas que la cobranza automática
+// (no cortados/suspendidos, no pagados, con monto) contra la planilla leída al momento; sin planilla no envía.
+{
+  const src = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "_worker.js"), "utf8");
+  const start = src.indexOf("async function sendBillingMessages(");
+  const body = src.slice(start, src.indexOf("\nfunction toBase64Url(", start));
+  require("node:assert/strict").match(body, /billingEligibilityFromRows\(source\.rows/);
+  require("node:assert/strict").match(body, /fetchFreshBillingSource\(env\)/);
+  require("node:assert/strict").match(body, /billingAllowed && !billingAllowed\.eligible\.has\(phone\)/);
+  require("node:assert/strict").match(body, /no se envió ningún mensaje/);
+}
