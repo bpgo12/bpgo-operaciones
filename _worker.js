@@ -690,21 +690,8 @@ function reactivationNeedsNormalFlow(message) {
   return hasExplicitPaymentIntent(text) || mentionsBillingTopic(text) || mentionsTechnicalIssueOrVisit(text) || !isCaseStatusQuestion(text);
 }
 
-// Decisión de Carlos (2026-10-07): lo único que le interesa recibir de una conversación en atención humana es
-// cuando el cliente envía un posible comprobante de pago (imagen o documento). Stickers, audios, videos,
-// ubicaciones y texto NO generan aviso (los textos sin respuesta los retoma el bot a los 5 minutos).
-// Un adjunto se avisa SIEMPRE (sin enfriamiento), porque es lo único que no se puede perder.
-const HUMAN_MODE_ALERT_COOLDOWN_MIN = 60;
-const HUMAN_MODE_RECENT_REPLY_MIN = 30;
-
-async function alertStaffCustomerWroteInHumanMode(env, credentials, phone, message) {
-  const receiptCandidate = message.type === "image" || message.type === "document";
-  if (!receiptCandidate) return false;
-  const name = await getKnownAccountName(env, phone).catch(() => null);
-  const summary = "Envió una imagen o documento (posible comprobante de pago) y la conversación está en atención humana. Revisa el caso en el panel.";
-  await notifyStaff(env, credentials, "carlos", "Cliente en atención humana", name, phone, summary, { sourceMessageId: message.id });
-  return true;
-}
+// Decisión de Carlos (2026-10-15): en atención humana NO se envía ningún aviso "Cliente en atención humana"
+// (el de 2026-10-07 por imágenes/documentos se eliminó: una foto no es necesariamente un comprobante).
 
 // Regla del negocio (reiterada por Carlos 2026-10-05): si nadie del equipo atiende al cliente durante unos
 // minutos, el bot retoma la conversación de inmediato. Antes la única reactivación era por inactividad
@@ -1735,7 +1722,7 @@ async function callBotResponder(env, context, inboundMessage, media) {
   // Caso real (2026-10-08, 56912000011): un cliente envió la foto de un comprobante de CajaVecina sin texto y el
   // modelo, mirando el historial ("q pasa con la tv"), contestó sobre TV en vez de revisar el adjunto.
   const attachmentOnlyNote = (inboundMessage.type === "image" || inboundMessage.type === "document") && !String(inboundMessage.text || "").trim()
-    ? "\n\nEl mensaje actual es SOLO un adjunto, sin texto. Analiza el adjunto y responde únicamente sobre él: si es un comprobante de pago (incluye CajaVecina, transferencias, depósitos, Webpay) usa payment_ack con receipt_evidence. NO respondas temas anteriores del historial."
+    ? "\n\nEl mensaje actual es SOLO un adjunto, sin texto. Analiza el adjunto y responde únicamente sobre él. Una foto cualquiera (router, luces, casa, cables, pantalla, persona, captura de otra cosa) NO es un comprobante: no menciones pagos. Solo si en la imagen se ve CLARAMENTE un comprobante de pago (título de comprobante o banco, monto, fecha; incluye CajaVecina, transferencias, depósitos, Webpay) usa payment_ack con receipt_evidence. NO respondas temas anteriores del historial."
     : "";
   const textPart = {
     type: "text",
@@ -1972,7 +1959,8 @@ async function executeBotAction(env, credentials, phone, action, message) {
   // internet, no televisión"). Solo payment_ack (con evidencia) o escalar son válidos; el resto es acuse fijo.
   const attachmentOnly = (message.inboundType === "image" || message.inboundType === "document") && !String(message.customerText || "").trim();
   if (attachmentOnly && action.action === "reply") {
-    action = { action: "reply", text: "Recibí tu imagen o archivo. Si es un comprobante de pago, el equipo lo revisará. Si es otra cosa, cuéntame por escrito qué necesitas. 🙏" };
+    // 2026-10-15 (Carlos): una foto no es necesariamente un comprobante; la respuesta no debe suponerlo.
+    action = { action: "reply", text: "Recibí tu imagen 👍 ¿Me cuentas en qué te puedo ayudar con ella?" };
   }
   const textProblem = action.text ? botTextProblem(action.text) : null;
   if (textProblem) {
@@ -2013,7 +2001,7 @@ async function executeBotAction(env, credentials, phone, action, message) {
       // hecho" sin comprobante). El texto fijo decía "Recibí la imagen" sin importar si en verdad
       // llegó una -- eso hacía que el bot afirmara haber recibido algo que el cliente nunca mandó.
       const fallbackReply = message.mediaId
-        ? "Recibí tu imagen, pero no logro confirmar que sea un comprobante de pago. Si lo es, cuéntame y lo dejo en revisión."
+        ? "Recibí tu imagen 👍 ¿Me cuentas en qué te puedo ayudar con ella?"
         : "¿Ya realizaste el pago? Envíame el comprobante para dejarlo en revisión.";
       await sendBotReply(env, credentials, phone, fallbackReply, preferAudio);
       return;
@@ -2506,7 +2494,8 @@ async function runBotForInboundMessages(env, changes) {
             // El mensaje ya fue guardado en la bandeja. Mientras un humano tenga la conversación
             // (y no se cumplan las condiciones de reactivación automática de arriba), nunca se
             // llama a la IA ni se responde; "Reactivar bot" también puede devolverla al bot.
-            await alertStaffCustomerWroteInHumanMode(env, credentials, phone, message).catch(() => null);
+            // Decisión de Carlos (2026-10-15): NO avisar "Cliente en atención humana" por ningún mensaje
+            // (tampoco por imágenes: una foto no es necesariamente un comprobante). Queda en la bandeja.
             continue;
           }
         }

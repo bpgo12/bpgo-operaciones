@@ -125,7 +125,11 @@ assert.match(worker, /return SPANISH_MONTH_NAMES\[chileDateParts\(\)\.month - 1\
 assert.match(worker, /"¿Podrías aclarar un poco más a qué te refieres\?"/);
 assert.match(worker, /"Parece que hay un malentendido"/);
 assert.match(worker, /no a una persona real de BPGO escribiendo por WhatsApp/);
-assert.match(worker, /const fallbackReply = message\.mediaId\s*\n\s*\? "Recibí tu imagen, pero no logro confirmar/);
+// 2026-10-15 (Carlos): una foto no es necesariamente un comprobante -> respuesta neutra, sin mencionar pagos.
+assert.match(worker, /const fallbackReply = message\.mediaId\s*\n\s*\? "Recibí tu imagen 👍 ¿Me cuentas en qué te puedo ayudar con ella\?"/);
+assert.match(worker, /action = \{ action: "reply", text: "Recibí tu imagen 👍 ¿Me cuentas en qué te puedo ayudar con ella\?" \};/);
+assert.doesNotMatch(worker, /Si es un comprobante de pago, el equipo lo revisará/);
+assert.match(worker, /Una foto cualquiera \(router, luces, casa, cables, pantalla, persona, captura de otra cosa\) NO es un comprobante/);
 assert.match(worker, /const known = isPlausibleAccountName\(rawKnown\) \? rawKnown : null/);
 assert.match(worker, /CREATE TABLE IF NOT EXISTS whatsapp_manual_billing_sends/);
 assert.match(worker, /SELECT message_id FROM whatsapp_manual_billing_sends WHERE phone = \? AND send_date = \?/);
@@ -435,12 +439,11 @@ assert.match(worker, /await sendWhatsAppText\(env, credentials, message\.from, a
 // Casos reales (2026-10-05): (1) un cliente en modo humano escribió pidiendo un ejecutivo y nadie se enteró
 // -> aviso a Carlos con cooldown; (2) en una prueba desde un número personal el bot repetía sin parar la lista
 // de planes y "no olvidaba" la conversación -> tope tras un recordatorio + comando para empezar de nuevo.
-assert.match(worker, /await alertStaffCustomerWroteInHumanMode\(env, credentials, phone, message\)\.catch\(\(\) => null\);\s*\n\s*continue;/);
-// 2026-10-07: Carlos solo quiere aviso de comprobantes (imagen/documento); stickers, audios y texto no avisan.
-assert.match(worker, /const receiptCandidate = message\.type === "image" \|\| message\.type === "document";\s*\n\s*if \(!receiptCandidate\) return false;/);
+// 2026-10-15: Carlos ya no quiere el aviso "Cliente en atención humana" por ningún mensaje (ni imágenes).
+assert.doesNotMatch(worker, /alertStaffCustomerWroteInHumanMode/);
+assert.doesNotMatch(worker, /notifyStaff\([^)]*"Cliente en atención humana"/);
 assert.doesNotMatch(worker, /Envió un mensaje \(\$\{message\.type/);
 assert.match(worker, /m\.message_type IN \('image', 'document'\)\s*\n\s*AND m\.created_at <=/);
-assert.match(worker, /const HUMAN_MODE_ALERT_COOLDOWN_MIN = 60;/);
 assert.match(worker, /if \(\(planReminders\?\.n \|\| 0\) >= 1\) \{[\s\S]{0,300}te va a escribir un agente[\s\S]{0,600}setBotSessionMode\(env, phone, "human", "case_created_new_customer"\)/);
 assert.match(worker, /Ese plan no está disponible en tu sector\./);
 assert.match(worker, /if \(lastOut\?\.message_text !== FACTIBILIDAD_WAIT\)/);
@@ -695,7 +698,6 @@ assert.match(worker, /"Nombre pendiente", phone,\s*\n\s*`Comprobante recibido \(
 
 // Revisión de punta a punta (2026-10-07) con 3.300 escenarios simulados contra el Worker real:
 assert.match(worker, /if \(salesLead && !funnelYields && message\.type !== "image" && message\.type !== "document"\) \{/, "un adjunto nunca es respuesta del embudo de venta");
-assert.match(worker, /const receiptCandidate = message\.type === "image" \|\| message\.type === "document";/);
 assert.match(worker, /await sendBotReply\(env, credentials, phone, "Registramos tu solicitud de visita técnica, un agente te confirmará el horario\. 🙌", preferAudio\);/);
 assert.doesNotMatch(worker, /action\.text \|\| "Registramos tu solicitud de visita/);
 assert.match(worker, /final_template|"text_fallback"/);
