@@ -3759,6 +3759,28 @@ async function sendBillingMessages(request, env) {
   // cliente el mismo día. Se limita a un envío por teléfono por día (hora Chile); días distintos sí
   // pueden reenviar (recordatorios sucesivos mientras la deuda siga pendiente).
   if (campaign === "billing") await ensureManualBillingSendsTable(env);
+  // 2026-10-15: el envío manual ("Enviar lote por API") mandaba a toda la cola de la pantalla, incluidos
+  // clientes CORTADOS en la planilla. Ahora aplica EXACTAMENTE las mismas reglas que la cobranza automática
+  // (billingEligibilityFromRows) contra la planilla leída en este momento. Sin planilla => no se envía nada.
+  let billingAllowed = null;
+  if (campaign === "billing") {
+    let source;
+    try {
+      source = await fetchFreshBillingSource(env);
+    } catch {
+      return Response.json({ ok: false, sent: 0, skipped: 0, failed: 0, excluded: 0,
+        error: "No se pudo leer la planilla de Google; no se envió ningún mensaje.", results: [] }, { status: 502 });
+    }
+    const month = BILLING_MONTHS_ES[chileDateParts().month - 1];
+    const eligibility = billingEligibilityFromRows(source.rows, new Date(), await pendingPaymentReceiptPhones(env, month));
+    if (!eligibility.ok) {
+      return Response.json({ ok: false, sent: 0, skipped: 0, failed: 0, excluded: 0, error: eligibility.error, results: [] }, { status: 422 });
+    }
+    billingAllowed = {
+      eligible: new Set(eligibility.eligible.map((item) => item.phone)),
+      excluded: new Map(eligibility.excluded.map((item) => [item.phone, item.reason])),
+    };
+  }
   const chileToday = chileDateParts();
   const todayKey = `${chileToday.year}-${String(chileToday.month).padStart(2, "0")}-${String(chileToday.day).padStart(2, "0")}`;
   for (const record of records) {
@@ -3774,6 +3796,11 @@ async function sendBillingMessages(request, env) {
         results.push({ id: record.id, phone, ok: true, skipped: true, messageId: previous.message_id });
         continue;
       }
+    }
+    if (billingAllowed && !billingAllowed.eligible.has(phone)) {
+      const reason = billingAllowed.excluded.get(phone) || "not_in_sheet";
+      results.push({ id: record.id, phone, ok: false, excluded: true, reason, error: BILLING_EXCLUSION_LABELS[reason] || reason });
+      continue;
     }
     if (campaign === "billing") {
       const previous = await env.DB.prepare("SELECT message_id FROM whatsapp_manual_billing_sends WHERE phone = ? AND send_date = ?")
@@ -3821,9 +3848,23 @@ async function sendBillingMessages(request, env) {
   }
   const sent = results.filter((item) => item.ok && !item.skipped).length;
   const skipped = results.filter((item) => item.skipped).length;
-  const failed = results.filter((item) => !item.ok).length;
-  return Response.json({ ok: failed === 0, sent, skipped, failed, campaign, templateName, results });
+  const excludedResults = results.filter((item) => item.excluded);
+  const failed = results.filter((item) => !item.ok && !item.excluded).length;
+  const excludedByReason = excludedResults.reduce((acc, item) => ({ ...acc, [item.reason]: (acc[item.reason] || 0) + 1 }), {});
+  return Response.json({ ok: failed === 0, sent, skipped, failed, excluded: excludedResults.length, excludedByReason, campaign, templateName, results });
 }
+
+// Motivos (mismos que la cobranza automática) por los que un cliente NO recibe el recordatorio de cobranza.
+const BILLING_EXCLUSION_LABELS = {
+  inactive_or_suspended: "Excluido: CORTADO/SUSPENDIDO en la planilla",
+  paid: "Excluido: mes PAGADO en la planilla",
+  month_not_pending: "Excluido: el mes no está pendiente en la planilla",
+  non_positive_amount: "Excluido: sin monto en la planilla",
+  duplicate_phone: "Excluido: teléfono repetido en la planilla",
+  invalid_phone: "Excluido: teléfono inválido en la planilla",
+  pending_receipt: "Excluido: comprobante de pago en revisión",
+  not_in_sheet: "Excluido: no figura en la planilla",
+};
 
 function toBase64Url(value) {
   return btoa(String.fromCharCode(...new Uint8Array(value))).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
