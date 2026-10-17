@@ -874,9 +874,13 @@ assert.doesNotMatch(worker, /Cliente ya registrado consulta por contratación\/v
   assert.equal(ctx.api.needsBankDataDirectly("voy a pagar en caja vecina"), true);
   assert.equal(ctx.api.needsBankDataDirectly("no tengo tarjeta"), true);
   assert.equal(ctx.api.needsBankDataDirectly("Holaa cuál es el valor para transferir"), false);
+  assert.equal(ctx.api.needsBankDataDirectly("Podrían enviar los datos De cuenta y nombre para hacer pago"), true);
+  assert.equal(ctx.api.needsBankDataDirectly("cual es la cuenta"), true);
+  assert.equal(ctx.api.needsBankDataDirectly("quiero transferir"), false);
   assert.equal(ctx.api.needsBankDataDirectly("quiero pagar mi mensualidad"), false);
 }
-assert.match(worker, /const WEBPAY_FIRST_MARKER = "te paso los datos de transferencia";/);
+assert.match(worker, /const WEBPAY_FIRST_MARKER = "Puedes pagar en un minuto con tarjeta";/);
+assert.doesNotMatch(worker, /avísame y te paso los datos de transferencia/);
 assert.match(worker, /if \(alreadyOffered \|\| needsBankDataDirectly\(inboundMessage\?\.text\)\) return \{ action: "reply", text: amountLine \+ PAYMENT_TRANSFER_REPLY \};/);
 assert.match(worker, /return \{ action: "reply", text: amountLine \+ WEBPAY_FIRST_REPLY \};/);
 assert.match(worker, /El medio de pago PREFERIDO es el portal con tarjeta de débito o crédito/);
