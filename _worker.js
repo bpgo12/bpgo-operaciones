@@ -1585,11 +1585,13 @@ const PAYMENT_PORTAL_REPLY = "Puedes pagar tu mensualidad con tarjeta de débito
 // Decisión de Carlos (2026-10-17): se prefiere el pago con tarjeta por el portal (Webpay) sobre la transferencia, porque queda
 // registrado como venta. Ante una consulta por transferencia/cuenta se ofrece primero el portal; los datos bancarios solo se
 // entregan si el cliente insiste, no puede pagar con tarjeta/link, o pide expresamente CajaVecina/efectivo.
-const WEBPAY_FIRST_MARKER = "te paso los datos de transferencia";
-const WEBPAY_FIRST_REPLY = "Puedes pagar en un minuto con tarjeta de débito o crédito, de forma segura, acá 💳:\nhttps://bpgo.cl/pagar\n\nSi no te resulta o prefieres otra forma, avísame y te paso los datos de transferencia.";
+const WEBPAY_FIRST_MARKER = "Puedes pagar en un minuto con tarjeta";
+const WEBPAY_FIRST_REPLY = "Puedes pagar en un minuto con tarjeta de débito o crédito, de forma segura, acá 💳:\nhttps://bpgo.cl/pagar";
 
 function needsBankDataDirectly(value) {
   const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
+  // Pedido explícito de los datos de la cuenta ("datos de cuenta para hacer pago", "cuál es la cuenta", "número de cuenta"): se entregan.
+  if (/\b(datos|numero|n°)\b.{0,20}\b(cuenta|transferencia|transferir|deposito|depositar|banco)\b|\bcuenta (bancaria|para depositar|para transferir)\b|\b(cual|cuales) (es|son) (la|los) (cuenta|datos)\b|\b(dame|pasame|enviame|mandame|me das|me pasas|me envias|me mandas)\b.{0,12}\b(la cuenta|los datos)\b|\bdonde (deposito|transfiero|depositar|transferir)\b/.test(text)) return true;
   return /\bcaja ?vecina\b|\bsin tarjeta\b|\bno tengo tarjeta\b|\bno uso tarjeta\b|\bno puedo (pagar )?(con|por) (la )?(tarjeta|pagina|web|portal|link)|\b(link|enlace|pagina|portal|web)\b.{0,30}\b(no funciona|no me funciona|no carga|no abre|no me deja|error|problema)|\bno (me )?(funciona|deja|resulta)\b.{0,25}\b(link|pagina|portal|tarjeta)|\bdeposito en efectivo\b|\ben efectivo\b/.test(text);
 }
 const PAYMENT_TRANSFER_REPLY = "Si el link de pago no te funciona, puedes pagar por transferencia o CajaVecina con estos datos:\nBanco Estado\nCuenta corriente\nBP GO\nRUT 77.463.597-1\nN° de cuenta 39100126196\nCorreo: consultorabpconnection@gmail.com\n\nCuando realices el pago, envíanos el comprobante por este medio.";
@@ -1673,12 +1675,14 @@ function isExecutiveQuickReply(value) {
 async function callBotResponder(env, context, inboundMessage, media) {
   // Quien ya pagó ("ya transferí", "hice el depósito") o manda un adjunto no pide datos: sigue el flujo de comprobantes.
   const alreadyPaidClaim = /\b(ya )?(transferi|deposite|pague|pagamos|hice|realice|efectue|envie|adjunto)\b/.test(String(inboundMessage?.text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
-  if (inboundMessage?.type !== "image" && inboundMessage?.type !== "document" && !alreadyPaidClaim && isAlternativePaymentRequest(inboundMessage?.text)) {
+  // Tras ofrecerle el portal, cualquier mención a la cuenta/transferencia/depósito es insistir: se le entregan los datos.
+  const alreadyOffered = (context.history || []).some((item) => item.direction !== "inbound" && String(item.message_text || "").includes(WEBPAY_FIRST_MARKER));
+  const insists = alreadyOffered && /\b(cuenta|datos|transferencia|transferir|transfiero|deposito|depositar|deposito)\b/.test(String(inboundMessage?.text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
+  if (inboundMessage?.type !== "image" && inboundMessage?.type !== "document" && !alreadyPaidClaim && (isAlternativePaymentRequest(inboundMessage?.text) || insists)) {
     // "¿Cuál es el valor para transferir?" (56957126835): los datos bancarios sin el monto no responden la pregunta.
     const c = context.customer;
     const amountLine = c?.id && c.billingAuthoritative && !c.billingAmbiguous && Number.isFinite(c.balance) && c.balance > 0
       ? `El monto a pagar es ${formatCurrency(c.balance)}.\n\n` : "";
-    const alreadyOffered = (context.history || []).some((item) => item.direction !== "inbound" && String(item.message_text || "").includes(WEBPAY_FIRST_MARKER));
     if (alreadyOffered || needsBankDataDirectly(inboundMessage?.text)) return { action: "reply", text: amountLine + PAYMENT_TRANSFER_REPLY };
     return { action: "reply", text: amountLine + WEBPAY_FIRST_REPLY };
   }
