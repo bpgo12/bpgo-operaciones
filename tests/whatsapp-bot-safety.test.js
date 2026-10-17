@@ -862,3 +862,24 @@ assert.doesNotMatch(worker, /Cliente ya registrado consulta por contratación\/v
   const proxy = worker.indexOf('if (url.pathname.startsWith("/api/")) {');
   assert.ok(guard > 0 && guard < proxy, "sheets-sync y sheets-workbook deben validar sesión antes del proxy genérico");
 }
+
+// 2026-10-17: el medio preferido es el portal con tarjeta (Webpay). Ante "datos para transferir" se ofrece primero el portal; los
+// datos bancarios solo si el cliente insiste, no puede usar tarjeta/link o menciona CajaVecina/efectivo.
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`${functionSource("needsBankDataDirectly")}; this.api = { needsBankDataDirectly };`, ctx);
+  assert.equal(ctx.api.needsBankDataDirectly("no puedo pagar con tarjeta, me das la cuenta"), true);
+  assert.equal(ctx.api.needsBankDataDirectly("el link no me funciona"), true);
+  assert.equal(ctx.api.needsBankDataDirectly("voy a pagar en caja vecina"), true);
+  assert.equal(ctx.api.needsBankDataDirectly("no tengo tarjeta"), true);
+  assert.equal(ctx.api.needsBankDataDirectly("Holaa cuál es el valor para transferir"), false);
+  assert.equal(ctx.api.needsBankDataDirectly("quiero pagar mi mensualidad"), false);
+}
+assert.match(worker, /const WEBPAY_FIRST_MARKER = "te paso los datos de transferencia";/);
+assert.match(worker, /if \(alreadyOffered \|\| needsBankDataDirectly\(inboundMessage\?\.text\)\) return \{ action: "reply", text: amountLine \+ PAYMENT_TRANSFER_REPLY \};/);
+assert.match(worker, /return \{ action: "reply", text: amountLine \+ WEBPAY_FIRST_REPLY \};/);
+assert.match(worker, /El medio de pago PREFERIDO es el portal con tarjeta de débito o crédito/);
+assert.match(worker, /const MANUAL_REMINDER_V2 = \{\s*\n\s*name: "recordatorio_pago_bpgo_v2"/);
+assert.match(worker, /if \(v2 === "APPROVED"\) templateName = MANUAL_REMINDER_V2\.name;/);
+assert.match(worker, /https:\/\/bpgo\.cl\/pagar\. Si ya realizaste el pago, puedes omitir este mensaje\./);

@@ -1534,6 +1534,7 @@ Reglas duras, nunca las rompas:
 - La campaña/promoción Cyber ya TERMINÓ. NUNCA la menciones, ni ofrezcas agendar un cambio de plan promocional, ni preguntes "para el próximo 15 o prefieres otra fecha para la promoción", aunque aparezca en el historial. Si el cliente pregunta por esa oferta, di que ya no está disponible y usa "escalate" si insiste.
 - Cuando el cliente responde a un recordatorio de pago ("tu pago está pendiente") diciendo que paga el 15, que ya pagó, que aún no tiene pagos pendientes o que no corresponde el cobro, NUNCA le des la razón ni afirmes que "no tiene pagos pendientes": solo el dato de "Cliente identificado" vale. Pide el comprobante si no lo ha enviado, o usa "escalate" para que el equipo lo verifique. No confirmes fechas de vencimiento que no estén en los datos.
 - BPGO ofrece internet Y TV cable. NUNCA digas que BPGO no ofrece televisión ni recomiendes Netflix/HBO u otros proveedores. Si el cliente reporta un problema con la tele ("qué pasa con la tv", "no se ve la tele"), trátalo como una falla del servicio: haz el diagnóstico (luces del equipo, reinicio) o usa "escalate"; jamás inventes que no es un servicio de BPGO.
+- El medio de pago PREFERIDO es el portal con tarjeta de débito o crédito (https://bpgo.cl/pagar). Cuando el cliente diga que va a pagar por transferencia o depósito, o pregunte cómo pagar, ofrécele primero el portal; los datos bancarios los entrega el sistema solo si insiste o no puede usar tarjeta (nunca los inventes). Al recordar o confirmar un pago pendiente, menciona el portal.
 - BPGO SÍ recibe pagos por transferencia bancaria y CajaVecina además del portal. NUNCA digas que "no se puede realizar transferencia" ni que el único medio es el portal. Si el cliente tiene dificultad para pagar (no puede usar la página, es adulto mayor, no entiende el portal), no insistas con el mismo link: usa "escalate" para que una persona le entregue los datos y lo guíe. Con clientes mayores o que escriben con dificultad, usa frases muy simples y paso a paso.
 - Para todo lo demás (preguntas frecuentes, saludos, consultas generales que sí puedes responder con las FAQs dadas), usa la acción "reply".
 
@@ -1580,7 +1581,17 @@ function authoritativeBalanceAction(customer) {
   return { action: "reply", text: `Tu saldo pendiente registrado es de ${formatCurrency(amount)}.` };
 }
 
-const PAYMENT_PORTAL_REPLY = "Puedes pagar tu mensualidad acá:\nhttps://bpgo.cl/pagar";
+const PAYMENT_PORTAL_REPLY = "Puedes pagar tu mensualidad con tarjeta de débito o crédito, rápido y seguro, acá 💳:\nhttps://bpgo.cl/pagar";
+// Decisión de Carlos (2026-10-17): se prefiere el pago con tarjeta por el portal (Webpay) sobre la transferencia, porque queda
+// registrado como venta. Ante una consulta por transferencia/cuenta se ofrece primero el portal; los datos bancarios solo se
+// entregan si el cliente insiste, no puede pagar con tarjeta/link, o pide expresamente CajaVecina/efectivo.
+const WEBPAY_FIRST_MARKER = "te paso los datos de transferencia";
+const WEBPAY_FIRST_REPLY = "Puedes pagar en un minuto con tarjeta de débito o crédito, de forma segura, acá 💳:\nhttps://bpgo.cl/pagar\n\nSi no te resulta o prefieres otra forma, avísame y te paso los datos de transferencia.";
+
+function needsBankDataDirectly(value) {
+  const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
+  return /\bcaja ?vecina\b|\bsin tarjeta\b|\bno tengo tarjeta\b|\bno uso tarjeta\b|\bno puedo (pagar )?(con|por) (la )?(tarjeta|pagina|web|portal|link)|\b(link|enlace|pagina|portal|web)\b.{0,30}\b(no funciona|no me funciona|no carga|no abre|no me deja|error|problema)|\bno (me )?(funciona|deja|resulta)\b.{0,25}\b(link|pagina|portal|tarjeta)|\bdeposito en efectivo\b|\ben efectivo\b/.test(text);
+}
 const PAYMENT_TRANSFER_REPLY = "Si el link de pago no te funciona, puedes pagar por transferencia o CajaVecina con estos datos:\nBanco Estado\nCuenta corriente\nBP GO\nRUT 77.463.597-1\nN° de cuenta 39100126196\nCorreo: consultorabpconnection@gmail.com\n\nCuando realices el pago, envíanos el comprobante por este medio.";
 
 function isAlternativePaymentRequest(value) {
@@ -1660,12 +1671,16 @@ function isExecutiveQuickReply(value) {
 }
 
 async function callBotResponder(env, context, inboundMessage, media) {
-  if (isAlternativePaymentRequest(inboundMessage?.text)) {
+  // Quien ya pagó ("ya transferí", "hice el depósito") o manda un adjunto no pide datos: sigue el flujo de comprobantes.
+  const alreadyPaidClaim = /\b(ya )?(transferi|deposite|pague|pagamos|hice|realice|efectue|envie|adjunto)\b/.test(String(inboundMessage?.text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
+  if (inboundMessage?.type !== "image" && inboundMessage?.type !== "document" && !alreadyPaidClaim && isAlternativePaymentRequest(inboundMessage?.text)) {
     // "¿Cuál es el valor para transferir?" (56957126835): los datos bancarios sin el monto no responden la pregunta.
     const c = context.customer;
     const amountLine = c?.id && c.billingAuthoritative && !c.billingAmbiguous && Number.isFinite(c.balance) && c.balance > 0
       ? `El monto a pagar es ${formatCurrency(c.balance)}.\n\n` : "";
-    return { action: "reply", text: amountLine + PAYMENT_TRANSFER_REPLY };
+    const alreadyOffered = (context.history || []).some((item) => item.direction !== "inbound" && String(item.message_text || "").includes(WEBPAY_FIRST_MARKER));
+    if (alreadyOffered || needsBankDataDirectly(inboundMessage?.text)) return { action: "reply", text: amountLine + PAYMENT_TRANSFER_REPLY };
+    return { action: "reply", text: amountLine + WEBPAY_FIRST_REPLY };
   }
   if (isPaymentLinkRequest(inboundMessage?.text)) return { action: "reply", text: PAYMENT_PORTAL_REPLY };
   if (isPaidQuickReply(inboundMessage?.text)) return { action: "reply", text: context.hasPendingReceipt
@@ -3097,6 +3112,39 @@ function billingAutomationTemplateDefinition(stage) {
   } : null;
 }
 
+// Recordatorio manual ("Enviar lote por API" en Gestión diaria): la plantilla original (recordatorio_pago_bpgo) no trae el link
+// del portal y pide el comprobante, lo que empuja a pagar por transferencia. La versión 2 ofrece el pago con tarjeta por el
+// portal. Una plantilla aprobada no se puede editar sin reiniciar su revisión, así que se crea una nueva y se usa SOLO cuando
+// Meta la aprueba; mientras tanto sigue la anterior (nada se interrumpe).
+const MANUAL_REMINDER_V2 = {
+  name: "recordatorio_pago_bpgo_v2",
+  language: "es_CL",
+  text: "Hola 👋 Te recordamos que tu pago está pendiente. Puedes pagar ahora con tarjeta de débito o crédito, de forma rápida y segura, en https://bpgo.cl/pagar. Si ya realizaste el pago, puedes omitir este mensaje. ¡Gracias! 🙏",
+};
+let manualReminderV2Cache = { at: 0, status: null };
+
+async function manualReminderV2Status(env, create = false) {
+  if (!create && manualReminderV2Cache.status && Date.now() - manualReminderV2Cache.at < 10 * 60 * 1000) return manualReminderV2Cache.status;
+  const credentials = await getWhatsAppCredentials(env);
+  if (!credentials.accessToken || !credentials.wabaId) return "UNAVAILABLE";
+  const endpoint = `https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.wabaId)}/message_templates`;
+  const headers = { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" };
+  const response = await fetch(`${endpoint}?name=${MANUAL_REMINDER_V2.name}&fields=name,status,language`, { headers }).catch(() => null);
+  if (!response?.ok) return "UNAVAILABLE";
+  const payload = await response.json().catch(() => ({}));
+  const found = (payload.data || []).find((item) => item.name === MANUAL_REMINDER_V2.name && item.language === MANUAL_REMINDER_V2.language);
+  let status = found?.status || "NOT_FOUND";
+  if (!found && create) {
+    const created = await fetch(endpoint, { method: "POST", headers, body: JSON.stringify({
+      name: MANUAL_REMINDER_V2.name, language: MANUAL_REMINDER_V2.language, category: "UTILITY",
+      components: [{ type: "BODY", text: MANUAL_REMINDER_V2.text }],
+    }) }).catch(() => null);
+    status = created?.ok ? "PENDING" : "NOT_FOUND";
+  }
+  manualReminderV2Cache = { at: Date.now(), status };
+  return status;
+}
+
 async function syncBillingAutomationTemplates(env, createMissing = false) {
   const credentials = await getWhatsAppCredentials(env);
   if (!credentials.accessToken || !credentials.wabaId) return { ok: false, error: "Faltan credenciales WABA.", templates: [] };
@@ -3732,9 +3780,13 @@ async function sendBillingMessages(request, env) {
   const accessToken = credentials.accessToken;
   const phoneNumberId = credentials.phoneNumberId;
   const campaign = body.campaign === "number-change" ? "number-change" : "billing";
-  const templateName = campaign === "number-change"
+  let templateName = campaign === "number-change"
     ? "nuevo_numero_whatsapp"
     : String(env.WHATSAPP_TEMPLATE_NAME || "recordatorio_pago_bpgo").trim();
+  if (campaign === "billing" && !String(env.WHATSAPP_TEMPLATE_NAME || "").trim()) {
+    const v2 = await manualReminderV2Status(env, true).catch(() => "UNAVAILABLE");
+    if (v2 === "APPROVED") templateName = MANUAL_REMINDER_V2.name;
+  }
   const languageCode = String(env.WHATSAPP_TEMPLATE_LANGUAGE || "es_CL").trim();
   if (!accessToken || !phoneNumberId || !templateName || !languageCode) {
     return Response.json({ ok: false, error: "Configuracion de WhatsApp incompleta." }, { status: 500 });
@@ -4281,11 +4333,13 @@ export default {
       // El resumen "Chats sin responder" se desactivó a pedido de Carlos (2026-10-10): llegaba a cada rato y no lo necesita.
       const digest = { ok: true, sent: false, reason: "disabled" };
       const morning = await resumeAfterHoursChats(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
+      // Crea (si falta) la plantilla de recordatorio v2 y refresca su estado de aprobación en Meta.
+      const reminderV2 = await manualReminderV2Status(env, true).catch(() => "UNAVAILABLE");
       // Los avisos en cola por el espaciado de 90 s solo se despachaban al llegar otro webhook de Meta; en una
       // hora tranquila podían quedar horas sin salir. La corrida de 10 minutos también vacía la cola.
       const flushed = await flushQueuedStaffNotifications(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
       const expired = await expireStaleConversationState(env).then(() => ({ ok: true })).catch((error) => ({ ok: false, error: String(error?.message || error) }));
-      return Response.json({ ...result, takeover, digest, morning, flushed, expired }, { status: result.ok ? 200 : 502 });
+      return Response.json({ ...result, takeover, digest, morning, reminderV2, flushed, expired }, { status: result.ok ? 200 : 502 });
     }
 
     if (url.pathname === "/api/billing/automation" && request.method === "GET") {
