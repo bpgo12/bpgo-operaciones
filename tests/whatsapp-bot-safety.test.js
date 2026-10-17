@@ -476,7 +476,7 @@ assert.match(worker, /claimInboundMessageForBot\(env, `retake-claim:\$\{row\.mes
 assert.doesNotMatch(worker, /claimInboundMessageForBot\(env, `retake:/);
 assert.match(worker, /id: `retake:\$\{row\.message_id\}`, from: row\.phone/);
 assert.match(worker, /setBotSessionMode\(env, row\.phone, "bot", "auto_reactivated_unanswered"\)/);
-assert.match(worker, /const takeoverTask = takeOverUnansweredHumanChats\(env\)\.then\(\(\) => resumeAfterHoursChats\(env\)\)\.catch\(\(\) => null\);/);
+assert.match(worker, /const takeoverTask = takeOverUnansweredHumanChats\(env\)\.then\(\(\) => resumeAfterHoursChats\(env\)\)\s*\n\s*\.then\(\(\) => \{ if \(Date\.now\(\) - lastReminderV2CheckMs < 10 \* 60 \* 1000\) return null;/);
 assert.match(worker, /const takeover = await takeOverUnansweredHumanChats\(env\)/);
 {
   const ctx = {};

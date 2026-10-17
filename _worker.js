@@ -3126,6 +3126,7 @@ const MANUAL_REMINDER_V2 = {
   text: "Hola 👋 Te recordamos que tu pago está pendiente. Puedes pagar ahora con tarjeta de débito o crédito, de forma rápida y segura, en https://bpgo.cl/pagar. Si ya realizaste el pago, puedes omitir este mensaje. ¡Gracias! 🙏",
 };
 let manualReminderV2Cache = { at: 0, status: null };
+let lastReminderV2CheckMs = 0;
 
 async function manualReminderV2Status(env, create = false) {
   if (!create && manualReminderV2Cache.status && Date.now() - manualReminderV2Cache.at < 10 * 60 * 1000) return manualReminderV2Cache.status;
@@ -4194,7 +4195,10 @@ export default {
       const messagesSaved = await saveInboundWhatsAppMessages(env, inboundChanges).catch(() => 0);
       const botTask = runBotForInboundMessages(env, inboundChanges).catch(() => null);
       const flushTask = flushQueuedStaffNotifications(env).catch(() => null);
-      const takeoverTask = takeOverUnansweredHumanChats(env).then(() => resumeAfterHoursChats(env)).catch(() => null);
+      // La corrida programada de GitHub tarda horas; la plantilla de recordatorio v2 se crea/refresca aquí (máx. cada 10 min).
+      const takeoverTask = takeOverUnansweredHumanChats(env).then(() => resumeAfterHoursChats(env))
+        .then(() => { if (Date.now() - lastReminderV2CheckMs < 10 * 60 * 1000) return null; lastReminderV2CheckMs = Date.now(); return manualReminderV2Status(env, true); })
+        .catch(() => null);
       if (ctx?.waitUntil) { ctx.waitUntil(botTask); ctx.waitUntil(flushTask); ctx.waitUntil(takeoverTask); } else { await botTask; await flushTask; await takeoverTask; }
       return Response.json({ ok: true, received: statuses.length, messagesSaved, manualEchoesSaved });
     }
