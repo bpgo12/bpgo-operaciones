@@ -43,6 +43,7 @@ vm.runInContext(`
   ${functionSource("humanizeFilename")}
   ${functionSource("inboundMessageText")}
   ${functionSource("isLikelyNotAName")}
+  ${functionSource("isNameLikeFragment")}
   ${functionSource("classifyInstallationFragment")}
   ${functionSource("mentionsServiceOutage")}
   ${functionSource("mentionsTechnicalIssueOrVisit")}
@@ -766,7 +767,13 @@ assert.match(worker, /model: String\(env\.OPENAI_MODEL \|\| "gpt-4\.1-mini"\)/);
 assert.match(worker, /const attachmentOnly = \(message\.inboundType === "image" \|\| message\.inboundType === "document"\) && !String\(message\.customerText \|\| ""\)\.trim\(\);\s*\n\s*if \(attachmentOnly && action\.action === "reply"\)/);
 assert.match(worker, /inboundType: message\.type \|\| null,/);
 assert.match(worker, /const attachmentOnlyNote = /);
-assert.match(worker, /BPGO ofrece internet Y TV cable\. NUNCA digas que BPGO no ofrece televisión/);
+// 2026-10-17: las FAQ reales dicen que BPGO provee SOLO internet (la regla anterior de "internet Y TV cable" era un error mío).
+assert.match(worker, /BPGO provee ÚNICAMENTE internet por fibra óptica; NO vende TV./);
+assert.doesNotMatch(worker, /BPGO ofrece internet Y TV cable/);
+// 2026-10-17 (56940026868): preguntas sobre qué incluyen los planes se responden con texto fijo y no se guardan como nombre.
+assert.match(worker, /const SALES_PLAN_INFO_REPLY = "Todos nuestros planes son de internet por fibra óptica, sin límite de datos. No incluyen TV/);
+assert.match(worker, /if \(salesLead\.status === "awaiting_plan" && String\(text \|\| ""\)\.trim\(\)\) \{\s*\n\s*if \(isSalesPlanInfoQuestion\(text\)\)/);
+assert.match(worker, /if \(!isNameLikeFragment\(line\)\) continue;/);
 
 // 2026-10-09: D1 free tier "daily row read limit" excedido. El esquema se verifica una vez por instancia y las
 // consultas de listados/avisos usan índices (antes escaneaban tablas completas en cada mensaje y cada sondeo del panel).

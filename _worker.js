@@ -1423,6 +1423,15 @@ function matchChosenPlan(groupKey, text) {
   return group.plans.find((p) => p.price === thousands) || null;
 }
 
+// Caso real (2026-10-17, 56940026868): "El de 30 mensual que incluye?" se tomó como elegir el plan; "Esos planes vienen con TV
+// igual? Me puedes dar más información" recibió "Anotado ✅ Todavía me falta..." y quedó guardado como nombre del titular.
+// Las dudas comunes sobre qué incluyen los planes se responden con texto fijo (según las FAQ: BPGO provee solo internet).
+const SALES_PLAN_INFO_REPLY = "Todos nuestros planes son de internet por fibra óptica, sin límite de datos. No incluyen TV: para ver contenido puedes usar las plataformas de streaming que prefieras (Netflix, Disney+, etc.). La instalación tiene un costo único de $" + INSTALLATION_COST.toLocaleString("es-CL") + ".";
+function isSalesPlanInfoQuestion(text) {
+  const normalized = cyberNormalize(text);
+  return /\b(incluye|incluyen|trae|traen|viene|vienen|ofrece|ofrecen|informacion|detalle|detalles|tv|tele|television|canales|ilimitad[oa]s?|que (es|son) lo|en que consiste)\b/.test(normalized);
+}
+
 function planConfirmationMessage(plan) {
   return `¡Excelente decisión! Con el plan ${plan.speed} ($${plan.price.toLocaleString("es-CL")}/mes) puedes realizar todo lo necesario para navegar. 🎉\n\n${INSTALLATION_PAYMENT_POLICY}`;
 }
@@ -1437,6 +1446,15 @@ const INSTALLATION_FIELD_LABELS = { name: "nombre del titular", rut: "RUT", phon
 // confirmación tipo "ahí están los datos"/"gracias") -- se descarta en vez de pegarlo al nombre o
 // a la dirección, que es lo que pasaba antes (una pregunta del cliente terminó "anotada" como si
 // fuera parte de su nombre).
+function isNameLikeFragment(raw) {
+  const line = String(raw || "").trim();
+  if (!line || /[?¿!¡:;,]/.test(line)) return false;
+  const normalized = line.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  if (/\b(yo|necesito|quiero|puedes|puede|favor|informacion|plan|planes|internet|tv|tele|incluye|precio|valor|cuanto|cuando|como|donde|que|vienen|viene|solo|gracias|ok|okay|mas|me|mi|su|hola|buenas|buenos|dias|tardes|noches|por|para|con|igual|si|no)\b/.test(normalized)) return false;
+  const words = line.split(/\s+/).filter(Boolean);
+  return words.length >= 1 && words.length <= 5 && words.every((word) => /^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ'-]{2,}$/.test(word));
+}
+
 function isLikelyNotAName(raw) {
   const text = String(raw || "");
   if (/\?/.test(text)) return true;
@@ -1473,7 +1491,7 @@ function classifyInstallationFragment(text, current) {
   let addressSoFar = current.address || null;
   let nameSoFar = current.name || null;
   for (const rawLine of raw.split(/\r?\n/)) {
-    const line = rawLine.replace(/^\s*(nombre( del titular)?|rut|tel[eé]fono|correo|direcci[oó]n)\s*:\s*/i, "").trim();
+    const line = rawLine.replace(/^\s*(nombre( del titular)?|rut|tel[eé]fono|correo|direcci[oó]n)\s*:\s*/i, "").replace(/^\s*(mi nombre es|el nombre es|me llamo|soy|a nombre de|el titular es)\s+/i, "").trim();
     if (!line) continue;
     const rutMatch = line.match(/\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b/);
     if (rutMatch) { updates.rut = rutMatch[0]; continue; }
@@ -1488,6 +1506,8 @@ function classifyInstallationFragment(text, current) {
       continue;
     }
     if (isLikelyNotAName(line)) continue;
+    // Una frase no es un nombre ("Yo necesito solo internet Me puedes dar más información Por favor" quedó como titular).
+    if (!isNameLikeFragment(line)) continue;
     // Texto libre sin dígitos ni palabras de dirección: mientras no haya aparecido ninguna señal de
     // dirección todavía, se asume que sigue siendo parte del nombre (para no cortar nombres
     // compuestos que el cliente manda palabra por palabra); una vez que la dirección ya empezó, el
@@ -1533,7 +1553,7 @@ Reglas duras, nunca las rompas:
 - Política de pago de la INSTALACIÓN (única versión válida, nunca la contradigas ni la inventes distinta): el costo de instalación ($25.000) más el mes de servicio por adelantado, calculado proporcional a los días que resten del mes, se pagan AL MOMENTO DE LA INSTALACIÓN. NUNCA se cobran en la boleta ni se difieren al primer mes de servicio. Si el cliente pregunta si la instalación o su costo "se paga en la boleta", responde claramente que NO. Si dudas de cualquier otro detalle de cómo se cobra una instalación, usa "escalate" en vez de inventar.
 - La campaña/promoción Cyber ya TERMINÓ. NUNCA la menciones, ni ofrezcas agendar un cambio de plan promocional, ni preguntes "para el próximo 15 o prefieres otra fecha para la promoción", aunque aparezca en el historial. Si el cliente pregunta por esa oferta, di que ya no está disponible y usa "escalate" si insiste.
 - Cuando el cliente responde a un recordatorio de pago ("tu pago está pendiente") diciendo que paga el 15, que ya pagó, que aún no tiene pagos pendientes o que no corresponde el cobro, NUNCA le des la razón ni afirmes que "no tiene pagos pendientes": solo el dato de "Cliente identificado" vale. Pide el comprobante si no lo ha enviado, o usa "escalate" para que el equipo lo verifique. No confirmes fechas de vencimiento que no estén en los datos.
-- BPGO ofrece internet Y TV cable. NUNCA digas que BPGO no ofrece televisión ni recomiendes Netflix/HBO u otros proveedores. Si el cliente reporta un problema con la tele ("qué pasa con la tv", "no se ve la tele"), trátalo como una falla del servicio: haz el diagnóstico (luces del equipo, reinicio) o usa "escalate"; jamás inventes que no es un servicio de BPGO.
+- BPGO provee ÚNICAMENTE internet por fibra óptica; NO vende TV. Si el cliente pregunta si los planes incluyen TV, dilo claro y amable (son solo de internet; para ver contenido puede usar plataformas de streaming legales). Si un cliente ya instalado dice que su TV o aplicación no funciona, primero revisa si hay problema de internet (luces del router, reinicio); si el internet funciona, explica que el contenido de TV por aplicaciones es externo a BPGO. Nunca recomiendes ni des soporte a servicios IPTV no regularizados.
 - El medio de pago PREFERIDO es el portal con tarjeta de débito o crédito (https://bpgo.cl/pagar). Cuando el cliente diga que va a pagar por transferencia o depósito, o pregunte cómo pagar, ofrécele primero el portal; los datos bancarios los entrega el sistema solo si insiste o no puede usar tarjeta (nunca los inventes). Al recordar o confirmar un pago pendiente, menciona el portal.
 - BPGO SÍ recibe pagos por transferencia bancaria y CajaVecina además del portal. NUNCA digas que "no se puede realizar transferencia" ni que el único medio es el portal. Si el cliente tiene dificultad para pagar (no puede usar la página, es adulto mayor, no entiende el portal), no insistas con el mismo link: usa "escalate" para que una persona le entregue los datos y lo guíe. Con clientes mayores o que escriben con dificultad, usa frases muy simples y paso a paso.
 - Para todo lo demás (preguntas frecuentes, saludos, consultas generales que sí puedes responder con las FAQs dadas), usa la acción "reply".
@@ -2584,13 +2604,15 @@ async function runBotForInboundMessages(env, changes) {
         // "esperando factibilidad"; ya instalado, escribió "Necesito ayuda con la forma de pago" y el bot le repitió
         // "Seguimos revisando la factibilidad en tu sector". Mientras el embudo espera sector, ubicación o la
         // decisión de Carlos, un mensaje sobre pagos o una falla técnica NO es respuesta del embudo: sigue el flujo normal.
+        // "¿Esos planes vienen con TV?" menciona la tele pero es una duda de venta, no una falla técnica.
+        const techMention = mentionsTechnicalIssueOrVisit(text) && !isSalesPlanInfoQuestion(text);
         const funnelYields = Boolean(salesLead) && (
           (["awaiting_sector", "awaiting_location", "awaiting_factibilidad", "awaiting_group_clarification"].includes(salesLead.status)
-            && (mentionsBillingTopic(text) || hasExplicitPaymentIntent(text) || mentionsTechnicalIssueOrVisit(text)))
+            && (mentionsBillingTopic(text) || hasExplicitPaymentIntent(text) || techMention))
           // Con el plan ya elegido o pidiendo datos, solo un pago YA hecho o una falla técnica sacan al cliente del embudo
           // (una duda de "cómo pago" se responde con la política de la instalación, ver más arriba).
           || (["awaiting_plan", "awaiting_installation_data"].includes(salesLead.status)
-            && (hasExplicitPaymentIntent(text) || /\b(pague|pagamos|pagado|pagada|transferi|transferimos|deposite|comprobante)\b/.test(cyberNormalize(text)) || mentionsTechnicalIssueOrVisit(text))));
+            && (hasExplicitPaymentIntent(text) || /\b(pague|pagamos|pagado|pagada|transferi|transferimos|deposite|comprobante)\b/.test(cyberNormalize(text)) || techMention)));
         if (salesLead && !funnelYields && message.type !== "image" && message.type !== "document") {
           if (isOptOutMessage(text)) {
             await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?").bind(salesLead.id).run();
@@ -2651,6 +2673,11 @@ async function runBotForInboundMessages(env, changes) {
             continue;
           }
           if (salesLead.status === "awaiting_plan" && String(text || "").trim()) {
+            if (isSalesPlanInfoQuestion(text)) {
+              const planLines = (PLAN_GROUPS[salesLead.plan_group]?.plans || []).map((p) => `• ${p.speed} — $${p.price.toLocaleString("es-CL")}/mes`).join("\n");
+              await sendBotReply(env, credentials, phone, `${SALES_PLAN_INFO_REPLY}\n\nPlanes disponibles en tu sector:\n${planLines}\n\n¿Cuál te gustaría contratar?`, preferAudio);
+              continue;
+            }
             const plan = matchChosenPlan(salesLead.plan_group, text);
             if (plan) {
               await env.DB.prepare("UPDATE whatsapp_sales_leads SET chosen_plan = ?, status = 'awaiting_installation_data', updated_at = datetime('now') WHERE id = ?")
@@ -2688,6 +2715,11 @@ async function runBotForInboundMessages(env, changes) {
             // El cliente puede mandar los datos todos juntos o de a poco, en cualquier orden -- se
             // van completando campo por campo y recién cuando estén todos se avisa a Carlos, nunca
             // antes (para no mandarle un caso a medio llenar).
+            if (isSalesPlanInfoQuestion(text) && !/\d{7,}|@/.test(text)) {
+              const stillMissing = missingInstallationFields(salesLead);
+              await sendBotReply(env, credentials, phone, `${SALES_PLAN_INFO_REPLY}${stillMissing.length ? `\n\nPara avanzar con tu instalación todavía necesito: ${stillMissing.join(", ")}.` : ""}`, preferAudio);
+              continue;
+            }
             const fragment = classifyInstallationFragment(text, {
               name: salesLead.installation_name, address: salesLead.installation_address,
             });
