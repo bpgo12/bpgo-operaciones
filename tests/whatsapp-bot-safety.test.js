@@ -862,3 +862,28 @@ assert.doesNotMatch(worker, /Cliente ya registrado consulta por contratación\/v
   const proxy = worker.indexOf('if (url.pathname.startsWith("/api/")) {');
   assert.ok(guard > 0 && guard < proxy, "sheets-sync y sheets-workbook deben validar sesión antes del proxy genérico");
 }
+
+// 2026-10-17: clasificación del canal de pago (CajaVecina vs transferencia vs Webpay) de cada comprobante, en segundo plano.
+(async () => {
+  const ctx = { AbortSignal, JSON, String, Promise };
+  vm.createContext(ctx);
+  let lastBody = null;
+  ctx.fetch = async (url, init) => { lastBody = JSON.parse(init.body); return { ok: true, json: async () => ({ choices: [{ message: { content: ctx.__reply } }] }) }; };
+  vm.runInContext(`
+    const RECEIPT_CHANNELS = ["cajavecina", "transferencia", "webpay", "otro", "no_comprobante"];
+    async ${functionSource("classifyReceiptChannel")}
+    this.api = { classifyReceiptChannel };
+  `, ctx);
+  const env = { OPENAI_API_KEY: "k" };
+  ctx.__reply = '{"channel":"cajavecina"}';
+  assert.equal(await ctx.api.classifyReceiptChannel(env, { base64: "AAAA", mimeType: "image/jpeg" }), "cajavecina");
+  assert.equal(lastBody.messages[1].content[0].type, "image_url");
+  ctx.__reply = '{"channel":"algo raro"}';
+  assert.equal(await ctx.api.classifyReceiptChannel(env, { base64: "AAAA", mimeType: "image/jpeg" }), null);
+  ctx.__reply = '{"channel":"webpay"}';
+  assert.equal(await ctx.api.classifyReceiptChannel(env, { base64: "AAAA", mimeType: "application/pdf" }), "webpay");
+  assert.equal(lastBody.messages[1].content[0].type, "file");
+})().catch((error) => { console.error(error); process.exit(1); });
+assert.match(worker, /ALTER TABLE whatsapp_automation_cases ADD COLUMN payment_channel TEXT/);
+assert.match(worker, /const channels = await classifyPendingReceiptChannels\(env\)/);
+assert.match(worker, /url\.pathname === "\/api\/whatsapp\/receipts\/channels"/);
