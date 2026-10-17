@@ -234,67 +234,9 @@ async function ensureWhatsAppAutomationTableRun(env) {
   await env.DB.prepare("ALTER TABLE whatsapp_automation_cases ADD COLUMN reported_name TEXT").run().catch(() => null);
   await env.DB.prepare("ALTER TABLE whatsapp_automation_cases ADD COLUMN receipt_tx TEXT").run().catch(() => null);
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_cases_receipt_tx ON whatsapp_automation_cases(receipt_tx)").run().catch(() => null);
-  await env.DB.prepare("ALTER TABLE whatsapp_automation_cases ADD COLUMN payment_channel TEXT").run().catch(() => null);
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_cases_created ON whatsapp_automation_cases(created_at)").run().catch(() => null);
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_cases_source_message ON whatsapp_automation_cases(source_message_id)").run().catch(() => null);
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_whatsapp_cases_phone_created ON whatsapp_automation_cases(phone, created_at)").run().catch(() => null);
-}
-
-// Canal de pago de cada comprobante (2026-10-17, pedido de Carlos: saber cuántos pagos llegan por depósito en CajaVecina para
-// negociar el convenio de ingreso automático). El canal se clasifica leyendo la imagen/PDF con la IA, en segundo plano
-// (corrida de 10 minutos), para no sumar latencia al webhook. Solo mide: no cambia ningún pago ni respuesta al cliente.
-const RECEIPT_CHANNELS = ["cajavecina", "transferencia", "webpay", "otro", "no_comprobante"];
-const RECEIPT_CHANNEL_BATCH = 8;
-const RECEIPT_CHANNEL_MAX_AGE_DAYS = 28;
-
-async function classifyReceiptChannel(env, media) {
-  if (!env.OPENAI_API_KEY || !media) return null;
-  const isPdf = /pdf/i.test(media.mimeType || "");
-  const attachment = isPdf
-    ? { type: "file", file: { filename: "comprobante.pdf", file_data: `data:application/pdf;base64,${media.base64}` } }
-    : { type: "image_url", image_url: { url: `data:${media.mimeType};base64,${media.base64}`, detail: "low" } };
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${env.OPENAI_API_KEY}` },
-    signal: AbortSignal.timeout(25000),
-    body: JSON.stringify({
-      model: String(env.OPENAI_MODEL || "gpt-4.1-mini"),
-      max_tokens: 60,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: "Clasificas comprobantes de pago chilenos. Responde SOLO JSON: {\"channel\":\"...\"} con uno de: cajavecina (comprobante impreso o foto de CajaVecina / Caja Vecina / BancoEstado depósito en caja, suele decir CajaVecina, terminal, código de autorización), transferencia (captura de la app o sitio de un banco: transferencia exitosa/realizada), webpay (comprobante de Webpay/Transbank o pago con tarjeta), otro (otro medio de pago o comprobante dudoso), no_comprobante (no es un comprobante de pago: foto de router, persona, captura sin relación)." },
-        { role: "user", content: [attachment, { type: "text", text: "¿Por qué canal se hizo este pago?" }] },
-      ],
-    }),
-  }).catch(() => null);
-  if (!response || !response.ok) return null;
-  const payload = await response.json().catch(() => null);
-  try {
-    const channel = String(JSON.parse(payload?.choices?.[0]?.message?.content || "{}").channel || "").toLowerCase();
-    return RECEIPT_CHANNELS.includes(channel) ? channel : null;
-  } catch { return null; }
-}
-
-async function classifyPendingReceiptChannels(env) {
-  if (!env.OPENAI_API_KEY) return { ok: true, classified: 0, reason: "no_openai" };
-  await ensureWhatsAppAutomationTable(env);
-  const credentials = await getWhatsAppCredentials(env);
-  if (!credentials.accessToken) return { ok: true, classified: 0, reason: "no_whatsapp" };
-  const pending = await env.DB.prepare(
-    `SELECT id, media_id FROM whatsapp_automation_cases
-     WHERE media_id IS NOT NULL AND payment_channel IS NULL AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
-     ORDER BY created_at DESC LIMIT ?`
-  ).bind(`-${RECEIPT_CHANNEL_MAX_AGE_DAYS} days`, RECEIPT_CHANNEL_BATCH).all();
-  let classified = 0;
-  for (const row of pending.results || []) {
-    const media = await fetchWhatsAppMediaBase64(credentials, row.media_id).catch(() => null);
-    // Meta borra los archivos a los 30 días: si ya no se puede bajar, se marca para no reintentar eternamente.
-    const channel = media ? await classifyReceiptChannel(env, media) : "expirado";
-    if (!channel) continue;
-    await env.DB.prepare("UPDATE whatsapp_automation_cases SET payment_channel = ? WHERE id = ?").bind(channel, row.id).run();
-    classified += 1;
-  }
-  return { ok: true, classified, pending: (pending.results || []).length };
 }
 
 // Verificación del comprobante para quien lo revisa (2026-10-05): el bot lee el monto y el número de operación
@@ -4201,17 +4143,6 @@ export default {
       return Response.json({ ok: true, received: statuses.length, messagesSaved, manualEchoesSaved });
     }
 
-    // Cantidad de comprobantes por canal de pago (CajaVecina, transferencia, Webpay...) por mes.
-    if (url.pathname === "/api/whatsapp/receipts/channels" && request.method === "GET") {
-      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
-      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
-      await ensureWhatsAppAutomationTable(env);
-      const rows = await env.DB.prepare(`SELECT substr(created_at, 1, 7) AS month, COALESCE(payment_channel, 'sin_clasificar') AS channel, COUNT(*) AS n,
-        SUM(COALESCE(amount, 0)) AS amount FROM whatsapp_automation_cases WHERE media_id IS NOT NULL AND created_at >= date('now', '-90 days')
-        GROUP BY month, channel ORDER BY month DESC, n DESC`).all();
-      return Response.json({ ok: true, channels: rows.results || [] });
-    }
-
     if (url.pathname === "/api/whatsapp/inbox" && request.method === "GET") {
       const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
       if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
@@ -4350,12 +4281,11 @@ export default {
       // El resumen "Chats sin responder" se desactivó a pedido de Carlos (2026-10-10): llegaba a cada rato y no lo necesita.
       const digest = { ok: true, sent: false, reason: "disabled" };
       const morning = await resumeAfterHoursChats(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
-      const channels = await classifyPendingReceiptChannels(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
       // Los avisos en cola por el espaciado de 90 s solo se despachaban al llegar otro webhook de Meta; en una
       // hora tranquila podían quedar horas sin salir. La corrida de 10 minutos también vacía la cola.
       const flushed = await flushQueuedStaffNotifications(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
       const expired = await expireStaleConversationState(env).then(() => ({ ok: true })).catch((error) => ({ ok: false, error: String(error?.message || error) }));
-      return Response.json({ ...result, takeover, digest, morning, channels, flushed, expired }, { status: result.ok ? 200 : 502 });
+      return Response.json({ ...result, takeover, digest, morning, flushed, expired }, { status: result.ok ? 200 : 502 });
     }
 
     if (url.pathname === "/api/billing/automation" && request.method === "GET") {
