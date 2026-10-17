@@ -244,9 +244,7 @@ async function ensureWhatsAppAutomationTableRun(env) {
 // negociar el convenio de ingreso automático). El canal se clasifica leyendo la imagen/PDF con la IA, en segundo plano
 // (corrida de 10 minutos), para no sumar latencia al webhook. Solo mide: no cambia ningún pago ni respuesta al cliente.
 const RECEIPT_CHANNELS = ["cajavecina", "transferencia", "webpay", "otro", "no_comprobante"];
-const RECEIPT_CHANNEL_BATCH = 40; // por corrida programada (GitHub la ejecuta cada varias horas)
-const RECEIPT_CHANNEL_WEBHOOK_BATCH = 4; // además, un poco en cada webhook (máx. 1 vez por minuto por instancia)
-let lastReceiptChannelRunMs = 0;
+const RECEIPT_CHANNEL_BATCH = 8;
 const RECEIPT_CHANNEL_MAX_AGE_DAYS = 28;
 
 async function classifyReceiptChannel(env, media) {
@@ -277,7 +275,7 @@ async function classifyReceiptChannel(env, media) {
   } catch { return null; }
 }
 
-async function classifyPendingReceiptChannels(env, limit = RECEIPT_CHANNEL_BATCH) {
+async function classifyPendingReceiptChannels(env) {
   if (!env.OPENAI_API_KEY) return { ok: true, classified: 0, reason: "no_openai" };
   await ensureWhatsAppAutomationTable(env);
   const credentials = await getWhatsAppCredentials(env);
@@ -286,7 +284,7 @@ async function classifyPendingReceiptChannels(env, limit = RECEIPT_CHANNEL_BATCH
     `SELECT id, media_id FROM whatsapp_automation_cases
      WHERE media_id IS NOT NULL AND payment_channel IS NULL AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?)
      ORDER BY created_at DESC LIMIT ?`
-  ).bind(`-${RECEIPT_CHANNEL_MAX_AGE_DAYS} days`, limit).all();
+  ).bind(`-${RECEIPT_CHANNEL_MAX_AGE_DAYS} days`, RECEIPT_CHANNEL_BATCH).all();
   let classified = 0;
   for (const row of pending.results || []) {
     const media = await fetchWhatsAppMediaBase64(credentials, row.media_id).catch(() => null);
@@ -4198,9 +4196,7 @@ export default {
       const messagesSaved = await saveInboundWhatsAppMessages(env, inboundChanges).catch(() => 0);
       const botTask = runBotForInboundMessages(env, inboundChanges).catch(() => null);
       const flushTask = flushQueuedStaffNotifications(env).catch(() => null);
-      const takeoverTask = takeOverUnansweredHumanChats(env).then(() => resumeAfterHoursChats(env))
-        .then(() => { if (Date.now() - lastReceiptChannelRunMs < 60000) return null; lastReceiptChannelRunMs = Date.now(); return classifyPendingReceiptChannels(env, RECEIPT_CHANNEL_WEBHOOK_BATCH); })
-        .catch(() => null);
+      const takeoverTask = takeOverUnansweredHumanChats(env).then(() => resumeAfterHoursChats(env)).catch(() => null);
       if (ctx?.waitUntil) { ctx.waitUntil(botTask); ctx.waitUntil(flushTask); ctx.waitUntil(takeoverTask); } else { await botTask; await flushTask; await takeoverTask; }
       return Response.json({ ok: true, received: statuses.length, messagesSaved, manualEchoesSaved });
     }
