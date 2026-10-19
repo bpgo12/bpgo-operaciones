@@ -920,3 +920,20 @@ assert.match(worker, /https:\/\/bpgo\.cl\/pagar\. Si ya realizaste el pago, pued
 
 // 2026-10-19: Huechicura usa el tarifario de Cayucupil (Carlos lo indicó en una solicitud anterior).
 assert.match(worker, /"fundo anique", "rucanire", "huechicura", "canete"/);
+
+// 2026-10-19: el mensaje que arma bpgo.cl tras un pago por Webpay se confirma como ingresado SOLO si la planilla lo muestra PAGADO;
+// si no, se avisa que se verifica (y a Carlos). Nunca se pide comprobante.
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`${functionSource("parseWebpayPaymentNotice")}; this.api = { parseWebpayPaymentNotice };`, ctx);
+  const ok = ctx.api.parseWebpayPaymentNotice("Hola BPGO, pagué mi mensualidad por Webpay. Orden: BPGO261019180624FB9EXU. Monto: $18.000. Autorización: 823962.");
+  assert.equal(ok.order, "BPGO261019180624FB9EXU");
+  assert.equal(ok.amount, "18.000");
+  assert.equal(ok.authorization, "823962");
+  assert.equal(ctx.api.parseWebpayPaymentNotice("pagué por webpay"), null);
+  assert.equal(ctx.api.parseWebpayPaymentNotice("Orden: BPGO123456789 pagué"), null);
+}
+assert.match(worker, /const registered = await webpayPaymentIsRegistered\(env, phone\)\.catch\(\(\) => false\);/);
+assert.match(worker, /return hits\.length === 1 && hits\[0\]\.reason === "paid";/);
+assert.match(worker, /ya quedó ingresado ✅/);

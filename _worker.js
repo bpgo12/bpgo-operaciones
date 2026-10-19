@@ -2447,6 +2447,29 @@ async function applyFactibilidadDecision(env, credentials, staffPhone, lead, isY
   await sendWhatsAppText(env, credentials, staffPhone, `Listo, le envié los planes de ${PLAN_GROUPS[group].label}.`);
 }
 
+// Aviso de pago por Webpay (2026-10-19): al terminar de pagar en bpgo.cl el cliente toca "Avisar a BPGO por WhatsApp" y se envía
+// "Hola BPGO, pagué mi mensualidad por Webpay. Orden: BPGO…. Monto: $18.000. Autorización: 823962." El Worker del sitio ya marcó el pago en la
+// planilla, así que el bot NO pide comprobante: confirma que quedó ingresado, pero solo si la planilla lo muestra PAGADO para ese
+// teléfono (el bot nunca da por pagado algo que no esté registrado).
+function parseWebpayPaymentNotice(text) {
+  const raw = String(text || "");
+  if (!/webpay/i.test(raw) || !/pagu[eé]/i.test(raw)) return null;
+  const order = raw.match(/orden:\s*(BPGO[A-Z0-9]{6,40})/i);
+  if (!order) return null;
+  const amount = raw.match(/monto:\s*\$?\s*(\d[\d.]*\d|\d)/i);
+  const auth = raw.match(/autorizaci[oó]n:\s*(\d{3,12})/i);
+  return { order: order[1].toUpperCase(), amount: amount ? amount[1] : null, authorization: auth ? auth[1] : null };
+}
+
+async function webpayPaymentIsRegistered(env, phone) {
+  const source = await fetchFreshBillingSource(env);
+  const parsed = billingEligibilityFromRows(source.rows, new Date(), new Set());
+  if (!parsed.ok) return false;
+  const wanted = normalizeWhatsAppPhone(phone);
+  const hits = parsed.excluded.concat(parsed.eligible).filter((item) => item.phone === wanted);
+  return hits.length === 1 && hits[0].reason === "paid";
+}
+
 async function runBotForInboundMessages(env, changes) {
   if (String(env.WHATSAPP_BOT_ENABLED || "").toLowerCase() !== "true") return;
   const credentials = await getWhatsAppCredentials(env);
@@ -2588,6 +2611,21 @@ async function runBotForInboundMessages(env, changes) {
         const recoveredHandoffReply = reactivationNeedsNormalFlow(message) ? null : safeReplyForReactivatedBusinessHandoff(message.reactivatedHandoffReason);
         if (recoveredHandoffReply) {
           await sendBotReply(env, credentials, phone, recoveredHandoffReply, message.type === "audio");
+          continue;
+        }
+        const webpayNotice = !isStaffPhone && message.type === "text" ? parseWebpayPaymentNotice(inboundMessageText(message)) : null;
+        if (webpayNotice) {
+          const registered = await webpayPaymentIsRegistered(env, phone).catch(() => false);
+          if (registered) {
+            await sendBotReply(env, credentials, phone, `¡Listo! Tu pago por Webpay${webpayNotice.amount ? ` de $${webpayNotice.amount}` : ""} ya quedó ingresado ✅ Gracias por pagar. 🙌`, false);
+            await ensureWhatsAppAutomationTable(env);
+            await env.DB.prepare("UPDATE whatsapp_automation_cases SET status = 'dismissed', decision_note = ?, updated_at = datetime('now') WHERE source_message_id = ? AND status = 'suggested'")
+              .bind(`Pago por Webpay ya registrado automáticamente en la planilla. Orden ${webpayNotice.order}.`, message.id).run().catch(() => null);
+          } else {
+            await sendBotReply(env, credentials, phone, "Recibimos tu aviso de pago por Webpay 🙌 Estamos verificando que haya quedado registrado y te confirmamos en breve.", false);
+            await notifyStaff(env, credentials, "carlos", "Pago Webpay por verificar", await getKnownAccountName(env, phone).catch(() => null), phone,
+              `El cliente avisó un pago por Webpay (orden ${webpayNotice.order}, monto $${webpayNotice.amount || "?"}, autorización ${webpayNotice.authorization || "?"}) pero no aparece como PAGADO en la planilla. Revisa la pestaña "Pagos web".`, { sourceMessageId: message.id }).catch(() => null);
+          }
           continue;
         }
         // Fuera del horario de atención el bot no conversa (ver BOT_HOURS), tampoco con el personal (así se puede probar). Los adjuntos pasan igual; los botones de los avisos se atienden más arriba.
