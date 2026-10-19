@@ -1358,7 +1358,7 @@ function matchPlanGroup(sectorText) {
   // Normaliza acentos (Rucañire -> rucanire) para no repetir el bug ya visto con "señal": una ñ
   // sin tilde escrita por el cliente no debe impedir el match.
   const norm = String(sectorText || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
-  if (["cayucupil", "los aromos", "la curva", "tres sauces", "fundo anique", "rucanire", "canete"].some((s) => norm.includes(s))) return "cayucupil";
+  if (["cayucupil", "los aromos", "la curva", "tres sauces", "fundo anique", "rucanire", "huechicura", "canete"].some((s) => norm.includes(s))) return "cayucupil";
   if (["peleco", "lanalhue", "trangilboro", "llenquehue"].some((s) => norm.includes(s))) return "otros";
   return null;
 }
@@ -2407,6 +2407,46 @@ async function guardAgainstBotLoop(env, credentials, phone, message) {
   return true;
 }
 
+// Respuesta de Carlos/Eduardo a una solicitud de factibilidad: por el botón del aviso o escribiendo "sí hay factibilidad" /
+// "no hay factibilidad" (2026-10-19: escribió a mano "si tenemos factibilidad" y el bot le contestó a él en vez de avisarle al cliente).
+function staffFactibilidadDecision(text) {
+  if (/[?¿]/.test(String(text || ""))) return null;
+  const normalized = cyberNormalize(text).replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+  if (!normalized || normalized.length > 60) return null;
+  const mentions = /\b(hay|tenemos|tiene|existe|factibilidad|cobertura|factible)\b/.test(normalized);
+  if (!mentions) return null;
+  if (/^(no|sin|todavia no|aun no)\b/.test(normalized)) return "no";
+  if (/^(si|sii+|claro|ok|hay|tenemos|tiene|existe|con|factible)\b/.test(normalized)) return "yes";
+  return null;
+}
+
+async function applyFactibilidadDecision(env, credentials, staffPhone, lead, isYes, allowedStatuses = ["awaiting_factibilidad"]) {
+  // Un doble toque del botón (o una reentrega del webhook con otro message.id) volvía a mandar los planes por segunda vez.
+  // Solo se procesa mientras siga esperando la confirmación.
+  if (!allowedStatuses.includes(lead.status)) {
+    await sendWhatsAppText(env, credentials, staffPhone, "Esa solicitud ya fue procesada antes.");
+    return;
+  }
+  if (!isYes) {
+    await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'no_factibilidad', updated_at = datetime('now') WHERE id = ?").bind(lead.id).run();
+    await sendWhatsAppText(env, credentials, lead.phone, NO_FACTIBILIDAD_MESSAGE);
+    await sendWhatsAppText(env, credentials, staffPhone, "Listo, le avisé al cliente que por ahora no hay factibilidad en su sector.");
+    return;
+  }
+  const group = matchPlanGroup(lead.sector);
+  if (!group) {
+    await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'awaiting_group_clarification', updated_at = datetime('now') WHERE id = ?").bind(lead.id).run();
+    await sendWhatsAppText(env, credentials, staffPhone, `No reconozco el sector "${lead.sector}". Respóndeme "cayucupil" o "otros" para saber qué planes ofrecerle.`);
+    return;
+  }
+  await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'awaiting_plan', plan_group = ?, updated_at = datetime('now') WHERE id = ?").bind(group, lead.id).run();
+  // Si la conversación estaba en atención humana (p. ej. "no logra compartir la ubicación"), el bot la retoma para seguir con los planes.
+  const customerSession = await getBotSessionRow(env, lead.phone);
+  if (customerSession?.mode === "human") await setBotSessionMode(env, lead.phone, "bot", "factibilidad_confirmada");
+  await sendWhatsAppText(env, credentials, lead.phone, formatPlansMessage(group));
+  await sendWhatsAppText(env, credentials, staffPhone, `Listo, le envié los planes de ${PLAN_GROUPS[group].label}.`);
+}
+
 async function runBotForInboundMessages(env, changes) {
   if (String(env.WHATSAPP_BOT_ENABLED || "").toLowerCase() !== "true") return;
   const credentials = await getWhatsAppCredentials(env);
@@ -2472,28 +2512,7 @@ async function runBotForInboundMessages(env, changes) {
             await sendWhatsAppText(env, credentials, phone, "No encontré esa solicitud (puede que ya haya sido procesada).");
             continue;
           }
-          // Un doble toque del botón (o una reentrega del webhook con un message.id distinto, que
-          // claimInboundMessageForBot no detecta como duplicado) volvía a mandar los planes al
-          // cliente por segunda vez. Solo se procesa mientras siga esperando la confirmación.
-          if (lead.status !== "awaiting_factibilidad") {
-            await sendWhatsAppText(env, credentials, phone, "Esa solicitud ya fue procesada antes.");
-            continue;
-          }
-          if (!isYes) {
-            await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'no_factibilidad', updated_at = datetime('now') WHERE id = ?").bind(leadId).run();
-            await sendWhatsAppText(env, credentials, lead.phone, NO_FACTIBILIDAD_MESSAGE);
-            await sendWhatsAppText(env, credentials, phone, "Listo, le avisé al cliente que por ahora no hay factibilidad en su sector.");
-            continue;
-          }
-          const group = matchPlanGroup(lead.sector);
-          if (!group) {
-            await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'awaiting_group_clarification', updated_at = datetime('now') WHERE id = ?").bind(leadId).run();
-            await sendWhatsAppText(env, credentials, phone, `No reconozco el sector "${lead.sector}". Respóndeme "cayucupil" o "otros" para saber qué planes ofrecerle.`);
-            continue;
-          }
-          await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'awaiting_plan', plan_group = ?, updated_at = datetime('now') WHERE id = ?").bind(group, leadId).run();
-          await sendWhatsAppText(env, credentials, lead.phone, formatPlansMessage(group));
-          await sendWhatsAppText(env, credentials, phone, `Listo, le envié los planes de ${PLAN_GROUPS[group].label}.`);
+          await applyFactibilidadDecision(env, credentials, phone, lead, isYes);
           continue;
         }
         if (isStaffPhone && staffButtonPayload === null) {
@@ -2503,6 +2522,34 @@ async function runBotForInboundMessages(env, changes) {
             "SELECT * FROM whatsapp_sales_leads WHERE status = 'awaiting_group_clarification' ORDER BY updated_at DESC LIMIT 1"
           ).first();
           const staffText = String(message.text?.body || "").toLowerCase();
+          const decision = staffFactibilidadDecision(message.text?.body);
+          if (decision) {
+            const pendingStatuses = ["awaiting_factibilidad", "awaiting_location"];
+            const marks = pendingStatuses.map(() => "?").join(",");
+            let target = null;
+            // Si Carlos respondió sobre el aviso del cliente (mantener presionado > Responder), se identifica exactamente.
+            const repliedTo = message.context?.id;
+            if (repliedTo) {
+              const notice = await env.DB.prepare("SELECT customer_phone FROM staff_notifications_log WHERE message_id = ? OR fallback_message_id = ? LIMIT 1").bind(repliedTo, repliedTo).first().catch(() => null);
+              if (notice?.customer_phone) {
+                target = await env.DB.prepare(`SELECT * FROM whatsapp_sales_leads WHERE phone = ? AND status IN (${marks}) ORDER BY created_at DESC LIMIT 1`).bind(notice.customer_phone, ...pendingStatuses).first();
+              }
+            }
+            if (!target) {
+              const pending = (await env.DB.prepare(`SELECT * FROM whatsapp_sales_leads WHERE status IN (${marks}) ORDER BY updated_at DESC LIMIT 5`).bind(...pendingStatuses).all()).results || [];
+              if (pending.length === 1) target = pending[0];
+              else if (!pending.length) {
+                await sendWhatsAppText(env, credentials, phone, "No hay solicitudes de factibilidad pendientes.");
+                continue;
+              } else {
+                const list = pending.map((lead) => `+${lead.phone} (${lead.sector || "sin sector"})`).join(", ");
+                await sendWhatsAppText(env, credentials, phone, `Hay ${pending.length} solicitudes pendientes: ${list}. Responde directamente sobre el aviso del cliente (mantén presionado > Responder) para saber a cuál te refieres.`);
+                continue;
+              }
+            }
+            await applyFactibilidadDecision(env, credentials, phone, target, decision === "yes", pendingStatuses);
+            continue;
+          }
           if (clarifyingLead && staffText) {
             const group = staffText.includes("cayucupil") ? "cayucupil" : staffText.includes("otro") ? "otros" : null;
             if (group) {

@@ -334,7 +334,30 @@ const addressOnly = api.classifyInstallationFragment("Calle Los Aromos 123", { n
 assert.equal(addressOnly.address, "Calle Los Aromos 123");
 assert.equal(Object.keys(addressOnly).length, 1);
 
-assert.match(worker, /if \(lead\.status !== "awaiting_factibilidad"\) \{/);
+assert.match(worker, /if \(!allowedStatuses\.includes\(lead\.status\)\) \{/);
+assert.match(worker, /await applyFactibilidadDecision\(env, credentials, phone, lead, isYes\);/);
+// 2026-10-19: Carlos responde a mano "sí hay factibilidad" y el sistema se lo avisa al cliente (planes), sin que el bot le conteste a él.
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`
+    function cyberNormalize(value) { return String(value || "").normalize("NFD").replace(/[\\u0300-\\u036f]/g, "").toLowerCase(); }
+    ${functionSource("staffFactibilidadDecision")}
+    this.api = { staffFactibilidadDecision };
+  `, ctx);
+  assert.equal(ctx.api.staffFactibilidadDecision("si tenemos factibilidad"), "yes");
+  assert.equal(ctx.api.staffFactibilidadDecision("Sí hay factibilidad"), "yes");
+  assert.equal(ctx.api.staffFactibilidadDecision("si hay"), "yes");
+  assert.equal(ctx.api.staffFactibilidadDecision("hay factibilidad"), "yes");
+  assert.equal(ctx.api.staffFactibilidadDecision("no hay factibilidad"), "no");
+  assert.equal(ctx.api.staffFactibilidadDecision("no hay"), "no");
+  assert.equal(ctx.api.staffFactibilidadDecision("sin factibilidad"), "no");
+  assert.equal(ctx.api.staffFactibilidadDecision("¿hay factibilidad en peleco?"), null);
+  assert.equal(ctx.api.staffFactibilidadDecision("hola, cuánto debe el cliente"), null);
+  assert.equal(ctx.api.staffFactibilidadDecision("cayucupil"), null);
+}
+assert.match(worker, /const decision = staffFactibilidadDecision\(message\.text\?\.body\);/);
+assert.match(worker, /await applyFactibilidadDecision\(env, credentials, phone, target, decision === "yes", pendingStatuses\);/);
 
 // Un audio reciente no debe arrastrarse como si fuera un posible comprobante (el bot terminaba
 // describiéndolo como "un documento" al cliente). Solo imagen/documento son evidencia de pago.
@@ -894,3 +917,6 @@ assert.match(worker, /El medio de pago PREFERIDO es el portal con tarjeta de dé
 assert.match(worker, /const MANUAL_REMINDER_V2 = \{\s*\n\s*name: "recordatorio_pago_bpgo_v2"/);
 assert.match(worker, /if \(v2 === "APPROVED"\) templateName = MANUAL_REMINDER_V2\.name;/);
 assert.match(worker, /https:\/\/bpgo\.cl\/pagar\. Si ya realizaste el pago, puedes omitir este mensaje\./);
+
+// 2026-10-19: Huechicura usa el tarifario de Cayucupil (Carlos lo indicó en una solicitud anterior).
+assert.match(worker, /"fundo anique", "rucanire", "huechicura", "canete"/);
