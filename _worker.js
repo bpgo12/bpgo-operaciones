@@ -1493,30 +1493,76 @@ function isOptOutMessage(text) {
 // perdía). RUT/correo/teléfono son fáciles de reconocer por formato; nombre y dirección (ambos
 // texto libre) usan una heurística simple (dígitos o palabras típicas de dirección), y el texto que
 // no es ninguna de esas cosas ni un dato plausible se descarta en vez de forzarlo a un campo.
-// Caso real (2026-10-20, 56912000014): el cliente mandó "11979750" (RUT sin dígito verificador) y se guardó como DIRECCIÓN; desde ahí todo texto
+// Caso real (2026-10-20, 56912000014): el cliente mandó "12345678" (RUT sin dígito verificador) y se guardó como DIRECCIÓN; desde ahí todo texto
 // libre (los nombres) se sumaba a la dirección, "Marta de Lourdes Soto Rivas." (con punto final) se descartó y el bot repitió "todavía
 // me falta: nombre del titular" ~10 veces. Ahora: números sueltos de 7-8 dígitos son RUT, el punto final no invalida un nombre, "Nombre de
 // titular:" se reconoce, un nombre dentro de una frase ("que es Marta Soto Rivas") se extrae, el último nombre completo reemplaza al
 // anterior si se repite, y el bot muestra qué anotó.
+// Etiquetas del formulario que mandamos ("Nombre del titular:", "Rut:", "Número de teléfono:", "Correo:", "Dirección:").
+// Caso real (2026-10-20, 56912000025): el cliente escribió cada etiqueta SIN dos puntos o sola en una línea y el dato en la
+// línea siguiente ("Telefono" / "9 1200 0025" / "Dirección" / "Valle Verde , Cayucupil"): el teléfono con espacios terminó
+// como DIRECCIÓN, la dirección real (con coma) se descartó y el bot pidió el teléfono dos veces.
+const INSTALLATION_LABEL_PATTERN = /^\s*(nombre(?: (?:de|del) (?:la |el )?titular)?|titular|rut|n[uú]mero(?: de)? tel[eé]fono|n[uú]mero|tel[eé]fono|celular|fono|correo(?: electr[oó]nico)?|e-?mail|mail|direcci[oó]n|domicilio)(?=\s|:|$)\s*:?\s*(.*)$/i;
+
+function installationLabelField(label) {
+  const value = String(label || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  if (/^(nombre|titular)/.test(value)) return "name";
+  if (/^rut/.test(value)) return "rut";
+  if (/^(numero|telefono|celular|fono)/.test(value)) return "phone";
+  if (/^(correo|e-?mail|mail)/.test(value)) return "email";
+  return "address";
+}
+
+// Teléfono chileno escrito con espacios, guiones o paréntesis: se quitan los separadores y se respeta si venía con 56
+// ("9 1200 0025" -> "912000025", "+56 9 1200-0025" -> "+56912000025").
+function normalizeInstallationPhone(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  const match = digits.match(/^(56)?(9\d{8})$/);
+  if (!match) return null;
+  return match[1] ? `+56${match[2]}` : match[2];
+}
+
 function classifyInstallationFragment(text, current) {
   const raw = String(text || "").trim();
   if (!raw) return null;
   const updates = {};
   let addressSoFar = current.address || null;
   let nameSoFar = current.name || null;
+  let pendingField = null;
   for (const rawLine of raw.split(/\r?\n/)) {
-    const line = rawLine
-      .replace(/^\s*(nombre( (de|del) (la |el )?titular)?|titular|rut|tel[eé]fono|correo|direcci[oó]n)\s*:\s*/i, "")
-      .replace(/^\s*(mi nombre es|el nombre es|me llamo|soy|a nombre de|el titular es)\s+/i, "")
-      .replace(/[.\s]+$/, "")
-      .trim();
+    let line = rawLine.replace(/[.\s]+$/, "").trim();
     if (!line) continue;
+    // "Rut:" / "Telefono" solos en una línea: el dato viene en la línea siguiente. "Dirección Valle Verde": dato en la misma línea.
+    let field = null;
+    const labelMatch = line.match(INSTALLATION_LABEL_PATTERN);
+    if (labelMatch) {
+      field = installationLabelField(labelMatch[1]);
+      line = labelMatch[2].replace(/[.\s]+$/, "").trim();
+      if (!line) { pendingField = field; continue; }
+    } else if (pendingField) {
+      field = pendingField;
+    }
+    pendingField = null;
+    line = line.replace(/^\s*(mi nombre es|el nombre es|me llamo|soy|a nombre de|el titular es)\s+/i, "").trim();
+    if (!line) continue;
+    // Con etiqueta, el dato va a ese campo (validando el formato de RUT/correo/teléfono cuando corresponde).
+    if (field === "address") {
+      addressSoFar = line;
+      updates.address = addressSoFar;
+      continue;
+    }
+    if (field === "name" && !isLikelyNotAName(line) && /[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/.test(line)) {
+      nameSoFar = line;
+      updates.name = nameSoFar;
+      continue;
+    }
+    if (field === "phone" && normalizeInstallationPhone(line)) { updates.phone = normalizeInstallationPhone(line); continue; }
     const rutMatch = line.match(/\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b/);
     if (rutMatch) { updates.rut = rutMatch[0]; continue; }
     const emailMatch = line.match(/[^\s@]+@[^\s@]+\.[^\s@]+/);
     if (emailMatch) { updates.email = emailMatch[0].toLowerCase(); continue; }
-    const phoneMatch = line.match(/(?:\+?56)?\s*9\d{8}\b/);
-    if (phoneMatch) { updates.phone = phoneMatch[0].trim(); continue; }
+    const phone = normalizeInstallationPhone(line);
+    if (phone) { updates.phone = phone; continue; }
     // Un número suelto de 7-8 dígitos es el RUT sin dígito verificador, no una dirección.
     if (!/[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/.test(line) && /^\d{7,8}$/.test(line.replace(/[\s.-]/g, ""))) { updates.rut = line.replace(/\s+/g, ""); continue; }
     // Un nombre metido en una frase: "...que es Marta Soto Rivas".
@@ -1533,7 +1579,16 @@ function classifyInstallationFragment(text, current) {
       continue;
     }
     if (isLikelyNotAName(line)) continue;
-    if (!isNameLikeFragment(line)) continue;
+    if (!isNameLikeFragment(line)) {
+      // Sin etiqueta: texto libre que no es nombre (p. ej. "Valle Verde , Cayucupil", con coma) después del nombre y sin
+      // dirección todavía => es la dirección. Preguntas y frases sueltas ya se descartaron arriba (isLikelyNotAName).
+      if (nameSoFar && !addressSoFar && /[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{3,}/.test(line) && line.length <= 120
+        && !/\b(necesito|quiero|puedes|cuanto|cuando|gracias|hola)\b/i.test(line)) {
+        addressSoFar = line;
+        updates.address = addressSoFar;
+      }
+      continue;
+    }
     const words = line.split(/\s+/).filter(Boolean);
     const norm = (value) => String(value).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
     if (!nameSoFar) {
@@ -2587,6 +2642,10 @@ async function runBotForInboundMessages(env, changes) {
         // sin este corte, terminaba llamando a la IA con "(sin texto, ver adjunto)" y a veces
         // respondía algo como "no entendí, ¿me explicas de nuevo?" a un simple emoji.
         if (message.type === "reaction") continue;
+        // Caso real (2026-10-20, 56912000025): el cliente EDITÓ su mensaje con los datos de instalación; el evento
+        // "edit" (sin texto ni adjunto) llegó a la IA y respondió "Gracias por la foto". Ediciones, mensajes
+        // eliminados y tipos no soportados no tienen contenido nuevo que responder: se guardan, no se contestan.
+        if (["edit", "revoke", "unsupported", "system", "ephemeral", "deleted"].includes(message.type)) continue;
         await ensureWhatsAppBotTables(env);
         const staffButtonPayload = message.button?.payload || null;
         const isStaffPhone = phone === normalizeWhatsAppPhone(env.STAFF_PHONE_CARLOS) || phone === normalizeWhatsAppPhone(env.STAFF_PHONE_EDUARDO);

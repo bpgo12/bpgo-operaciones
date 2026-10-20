@@ -7,6 +7,9 @@ const vm = require("node:vm");
 
 const worker = fs.readFileSync(path.join(__dirname, "..", "_worker.js"), "utf8");
 
+// Constante del lector de datos de instalación (se inyecta junto a classifyInstallationFragment).
+const installationLabelPatternSource = worker.slice(worker.indexOf("const INSTALLATION_LABEL_PATTERN ="), worker.indexOf("/i;", worker.indexOf("const INSTALLATION_LABEL_PATTERN =")) + 3);
+
 function functionSource(name) {
   const start = worker.indexOf(`function ${name}(`);
   assert.notEqual(start, -1, `missing ${name}`);
@@ -44,6 +47,9 @@ vm.runInContext(`
   ${functionSource("inboundMessageText")}
   ${functionSource("isLikelyNotAName")}
   ${functionSource("isNameLikeFragment")}
+  ${installationLabelPatternSource}
+  ${functionSource("installationLabelField")}
+  ${functionSource("normalizeInstallationPhone")}
   ${functionSource("classifyInstallationFragment")}
   ${functionSource("mentionsServiceOutage")}
   ${functionSource("mentionsTechnicalIssueOrVisit")}
@@ -785,11 +791,14 @@ assert.match(worker, /fragment \? `Anotado ✅ \$\{describeInstallationFragment\
     ${functionSource("isPureGreeting")}
     ${functionSource("isLikelyNotAName")}
     ${functionSource("isNameLikeFragment")}
+    ${installationLabelPatternSource}
+    ${functionSource("installationLabelField")}
+    ${functionSource("normalizeInstallationPhone")}
     ${functionSource("classifyInstallationFragment")}
     this.api = { classifyInstallationFragment };
   `, ctx);
   const c = (text, cur = { name: null, address: null }) => ctx.api.classifyInstallationFragment(text, cur);
-  assert.deepEqual(JSON.parse(JSON.stringify(c("11979750"))), { rut: "11979750" });
+  assert.deepEqual(JSON.parse(JSON.stringify(c("12345678"))), { rut: "12345678" });
   assert.deepEqual(JSON.parse(JSON.stringify(c("Marta de Lourdes Soto Rivas."))), { name: "Marta de Lourdes Soto Rivas" });
   assert.deepEqual(JSON.parse(JSON.stringify(c("Nombre de titular:Marta de Lourdes Soto Rivas"))), { name: "Marta de Lourdes Soto Rivas" });
   assert.deepEqual(JSON.parse(JSON.stringify(c("1.197.975-0"))), { rut: "1.197.975-0" });
@@ -844,7 +853,9 @@ assert.doesNotMatch(worker, /BPGO ofrece internet Y TV cable/);
 // 2026-10-17 (56912000006): preguntas sobre qué incluyen los planes se responden con texto fijo y no se guardan como nombre.
 assert.match(worker, /const SALES_PLAN_INFO_REPLY = "Todos nuestros planes son de internet por fibra óptica, sin límite de datos. No incluyen TV/);
 assert.match(worker, /if \(salesLead\.status === "awaiting_plan" && String\(text \|\| ""\)\.trim\(\)\) \{\s*\n\s*if \(isSalesPlanInfoQuestion\(text\)\)/);
-assert.match(worker, /if \(!isNameLikeFragment\(line\)\) continue;/);
+// 2026-10-20: el texto que no parece nombre ya no se descarta siempre: si viene después del nombre y aún no hay
+// dirección, es la dirección ("Valle Verde , Cayucupil"). Las preguntas siguen sin guardarse (installation-capture.test.js).
+assert.match(worker, /if \(!isNameLikeFragment\(line\)\) \{/);
 
 // 2026-10-09: D1 free tier "daily row read limit" excedido. El esquema se verifica una vez por instancia y las
 // consultas de listados/avisos usan índices (antes escaneaban tablas completas en cada mensaje y cada sondeo del panel).
