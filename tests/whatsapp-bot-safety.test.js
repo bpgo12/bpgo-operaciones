@@ -758,7 +758,38 @@ assert.match(worker, /\(failed\?\.n \|\| 0\) >= 10\) return Response\.json\(\{ o
 }
 assert.match(worker, /if \(!isPlausibleSector\(text\)\) \{/);
 assert.match(worker, /if \(!isStaffPhone && String\(text \|\| ""\)\.trim\(\) && isHumanRequest\(text\) && !isOptOutMessage\(text\)\) \{/);
-assert.match(worker, /fragment \? `Anotado ✅ Todavía me falta/);
+assert.match(worker, /fragment \? `Anotado ✅ \$\{describeInstallationFragment\(fragment\)\}\. Todavía me falta/);
+// 2026-10-20 (56912000014): datos de instalación dados de a poco, con errores y repeticiones.
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`
+    ${functionSource("cyberNormalize")}
+    ${functionSource("isPureGreeting")}
+    ${functionSource("isLikelyNotAName")}
+    ${functionSource("isNameLikeFragment")}
+    ${functionSource("classifyInstallationFragment")}
+    this.api = { classifyInstallationFragment };
+  `, ctx);
+  const c = (text, cur = { name: null, address: null }) => ctx.api.classifyInstallationFragment(text, cur);
+  assert.deepEqual(JSON.parse(JSON.stringify(c("11979750"))), { rut: "11979750" });
+  assert.deepEqual(JSON.parse(JSON.stringify(c("Marta de Lourdes Soto Rivas."))), { name: "Marta de Lourdes Soto Rivas" });
+  assert.deepEqual(JSON.parse(JSON.stringify(c("Nombre de titular:Marta de Lourdes Soto Rivas"))), { name: "Marta de Lourdes Soto Rivas" });
+  assert.deepEqual(JSON.parse(JSON.stringify(c("1.197.975-0"))), { rut: "1.197.975-0" });
+  assert.deepEqual(JSON.parse(JSON.stringify(c("912000023"))), { phone: "912000023" });
+  assert.equal(c("cliente1@ejemplo.cl").email, "cliente1@ejemplo.cl");
+  // un número suelto ya no se vuelve dirección, y el nombre posterior no se pega a ella
+  const afterRut = c("Marta Soto Rivas", { name: null, address: null });
+  assert.deepEqual(JSON.parse(JSON.stringify(afterRut)), { name: "Marta Soto Rivas" });
+  // reenvío de su nombre: el último reemplaza al anterior (no se concatenan)
+  assert.deepEqual(JSON.parse(JSON.stringify(c("Marta Soto Rivas", { name: "Marta de Lourdes Soto Rivas", address: null }))), { name: "Marta Soto Rivas" });
+  // nombre dentro de una frase
+  assert.deepEqual(JSON.parse(JSON.stringify(c("Que honda si ya le di el nombre de la titular que quiere instalar el waifai aca en peleco que es Marta Soto Rivas"))), { name: "Marta Soto Rivas" });
+  // una pregunta o frase suelta no es nombre
+  assert.equal(c("Se lo envie dos veces ya"), null);
+  assert.equal(c("Yo necesito solo internet"), null);
+}
+assert.match(worker, /if \(\(askedBefore\?\.n \|\| 0\) >= 7\) \{/);
 assert.match(worker, /if \(!fragment && looksLikeQuestion\(text\)\) \{/);
 assert.match(worker, /"Cliente esperando factibilidad"/);
 assert.match(worker, /const SALES_LEAD_FACTIBILIDAD_TTL_DAYS = 7;/);

@@ -1484,6 +1484,11 @@ function isOptOutMessage(text) {
 // perdía). RUT/correo/teléfono son fáciles de reconocer por formato; nombre y dirección (ambos
 // texto libre) usan una heurística simple (dígitos o palabras típicas de dirección), y el texto que
 // no es ninguna de esas cosas ni un dato plausible se descarta en vez de forzarlo a un campo.
+// Caso real (2026-10-20, 56912000014): el cliente mandó "11979750" (RUT sin dígito verificador) y se guardó como DIRECCIÓN; desde ahí todo texto
+// libre (los nombres) se sumaba a la dirección, "Marta de Lourdes Soto Rivas." (con punto final) se descartó y el bot repitió "todavía
+// me falta: nombre del titular" ~10 veces. Ahora: números sueltos de 7-8 dígitos son RUT, el punto final no invalida un nombre, "Nombre de
+// titular:" se reconoce, un nombre dentro de una frase ("que es Marta Soto Rivas") se extrae, el último nombre completo reemplaza al
+// anterior si se repite, y el bot muestra qué anotó.
 function classifyInstallationFragment(text, current) {
   const raw = String(text || "").trim();
   if (!raw) return null;
@@ -1491,7 +1496,11 @@ function classifyInstallationFragment(text, current) {
   let addressSoFar = current.address || null;
   let nameSoFar = current.name || null;
   for (const rawLine of raw.split(/\r?\n/)) {
-    const line = rawLine.replace(/^\s*(nombre( del titular)?|rut|tel[eé]fono|correo|direcci[oó]n)\s*:\s*/i, "").replace(/^\s*(mi nombre es|el nombre es|me llamo|soy|a nombre de|el titular es)\s+/i, "").trim();
+    const line = rawLine
+      .replace(/^\s*(nombre( (de|del) (la |el )?titular)?|titular|rut|tel[eé]fono|correo|direcci[oó]n)\s*:\s*/i, "")
+      .replace(/^\s*(mi nombre es|el nombre es|me llamo|soy|a nombre de|el titular es)\s+/i, "")
+      .replace(/[.\s]+$/, "")
+      .trim();
     if (!line) continue;
     const rutMatch = line.match(/\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b/);
     if (rutMatch) { updates.rut = rutMatch[0]; continue; }
@@ -1499,6 +1508,15 @@ function classifyInstallationFragment(text, current) {
     if (emailMatch) { updates.email = emailMatch[0].toLowerCase(); continue; }
     const phoneMatch = line.match(/(?:\+?56)?\s*9\d{8}\b/);
     if (phoneMatch) { updates.phone = phoneMatch[0].trim(); continue; }
+    // Un número suelto de 7-8 dígitos es el RUT sin dígito verificador, no una dirección.
+    if (!/[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/.test(line) && /^\d{7,8}$/.test(line.replace(/[\s.-]/g, ""))) { updates.rut = line.replace(/\s+/g, ""); continue; }
+    // Un nombre metido en una frase: "...que es Marta Soto Rivas".
+    // (se toma la ÚLTIMA coincidencia: el nombre va al final de la frase)
+    const nameTriggers = /\b(?:se llama|que es|a nombre de|titular (?:es|seria)|el nombre (?:es|de la titular|del titular))\s+/gi;
+    let trigger;
+    let afterTrigger = null;
+    while ((trigger = nameTriggers.exec(line))) afterTrigger = line.slice(trigger.index + trigger[0].length).trim();
+    if (afterTrigger && isNameLikeFragment(afterTrigger)) { nameSoFar = afterTrigger; updates.name = nameSoFar; continue; }
     const looksLikeAddress = /\d/.test(line) || /\b(calle|avenida|av\.?|pasaje|camino|sector|km|villa|poblaci[oó]n|parcela|hijuela|block|depto|casa)\b/i.test(line);
     if (looksLikeAddress) {
       addressSoFar = addressSoFar ? `${addressSoFar} ${line}`.trim() : line;
@@ -1506,21 +1524,30 @@ function classifyInstallationFragment(text, current) {
       continue;
     }
     if (isLikelyNotAName(line)) continue;
-    // Una frase no es un nombre ("Yo necesito solo internet Me puedes dar más información Por favor" quedó como titular).
     if (!isNameLikeFragment(line)) continue;
-    // Texto libre sin dígitos ni palabras de dirección: mientras no haya aparecido ninguna señal de
-    // dirección todavía, se asume que sigue siendo parte del nombre (para no cortar nombres
-    // compuestos que el cliente manda palabra por palabra); una vez que la dirección ya empezó, el
-    // texto libre que sigue se suma ahí.
-    if (!addressSoFar) {
-      nameSoFar = nameSoFar ? `${nameSoFar} ${line}`.trim() : line;
+    const words = line.split(/\s+/).filter(Boolean);
+    const norm = (value) => String(value).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    if (!nameSoFar) {
+      nameSoFar = line;
+      updates.name = nameSoFar;
+    } else if (words.length >= 2 && norm(nameSoFar).split(/\s+/).some((word) => word.length > 3 && norm(line).split(/\s+/).includes(word))) {
+      // Re-envió su nombre (con alguna variante): el último reemplaza al anterior.
+      nameSoFar = line;
+      updates.name = nameSoFar;
+    } else if (!addressSoFar && nameSoFar.split(/\s+/).length < 2) {
+      nameSoFar = `${nameSoFar} ${line}`.trim();
       updates.name = nameSoFar;
     } else {
-      addressSoFar = `${addressSoFar} ${line}`.trim();
+      addressSoFar = addressSoFar ? `${addressSoFar} ${line}`.trim() : line;
       updates.address = addressSoFar;
     }
   }
   return Object.keys(updates).length ? updates : null;
+}
+
+function describeInstallationFragment(fragment) {
+  const labels = { name: "Nombre", rut: "RUT", phone: "Teléfono", email: "Correo", address: "Dirección" };
+  return Object.entries(fragment).map(([key, value]) => `${labels[key] || key}: ${String(value).slice(0, 70)}`).join(" · ");
 }
 
 function missingInstallationFields(lead) {
@@ -2832,7 +2859,18 @@ async function runBotForInboundMessages(env, changes) {
               await setBotSessionMode(env, phone, "human", "case_created_new_customer");
             } else {
               // "Anotado ✅" solo si de verdad se anotó algo; ante una pregunta o un "ok gracias" no se finge.
-              await sendBotReply(env, credentials, phone, fragment ? `Anotado ✅ Todavía me falta: ${missing.join(", ")}.` : `Para avanzar con tu instalación todavía necesito: ${missing.join(", ")}.`, preferAudio);
+              // Si ya se pidió lo mismo muchas veces sin avanzar, el cliente está atascado: lo toma una persona con lo ya reunido.
+              const askedBefore = await env.DB.prepare(`SELECT COUNT(*) AS n FROM whatsapp_inbox_messages WHERE phone = ? AND direction = 'outbound'
+                AND (message_text LIKE 'Anotado ✅%' OR message_text LIKE 'Para avanzar con tu instalación%') AND created_at >= replace(?, ' ', 'T')`)
+                .bind(phone, salesLead.created_at).first().catch(() => null);
+              if ((askedBefore?.n || 0) >= 7) {
+                await sendBotReply(env, credentials, phone, "Para ayudarte mejor, un agente te va a escribir por acá y completará contigo los datos que faltan. 🙏", preferAudio);
+                await notifyStaff(env, credentials, "carlos", "Consulta de venta", updatedLead.installation_name || salesLead.customer_name, phone,
+                  `Cliente atascado dando los datos de instalación. Tengo: nombre ${updatedLead.installation_name || "—"}, RUT ${updatedLead.installation_rut || "—"}, tel ${updatedLead.installation_phone || "—"}, correo ${updatedLead.installation_email || "—"}, dirección ${updatedLead.installation_address || "—"}. Falta: ${missing.join(", ")}. Plan: ${salesLead.chosen_plan || "—"}.`, { sourceMessageId: message.id }).catch(() => null);
+                await setBotSessionMode(env, phone, "human", "case_created_new_customer");
+                continue;
+              }
+              await sendBotReply(env, credentials, phone, fragment ? `Anotado ✅ ${describeInstallationFragment(fragment)}. Todavía me falta: ${missing.join(", ")}.` : `Para avanzar con tu instalación todavía necesito: ${missing.join(", ")}.`, preferAudio);
             }
             continue;
           }
