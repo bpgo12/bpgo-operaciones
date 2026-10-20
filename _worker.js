@@ -3195,12 +3195,27 @@ async function ensureBillingAutomationTablesRun(env) {
   )`).run();
 }
 
+// 2026-10-20: la cobranza del día 20 no salió porque la lectura de la planilla (Apps Script, vía el respaldo STABLE_BACKEND) a veces
+// se CUELGA 40 s o falla en una llamada suelta (las siguientes, segundos después, responden en ~2.5 s). Sin tiempo máximo ni reintentos,
+// una sola lectura fallida abortaba todo el lote ("aborted"). Ahora cada lectura tiene tiempo máximo y hasta 3 intentos; si aun así
+// falla, el motivo real (timeout, HTTP, JSON) queda en el mensaje para diagnosticar. El lote sigue abortando sin enviar nada si no hay datos.
+const SHEET_READ_ATTEMPTS = 3;
+const SHEET_READ_TIMEOUT_MS = 20000;
 async function fetchFreshBillingSource(env) {
   const endpoint = String(env.BILLING_SHEETS_SYNC_URL || sheetsScriptUrl(env) || `https://${STABLE_BACKEND}/api/billing/sheets-sync`).trim();
-  const response = await fetch(endpoint, { headers: { "cache-control": "no-cache" }, cache: "no-store" }).catch(() => null);
-  const payload = response ? await response.json().catch(() => null) : null;
-  if (!response?.ok || !payload?.ok || !Array.isArray(payload.rows)) throw new Error("No se pudo leer Google Sheets; lote abortado sin envíos.");
-  return payload;
+  let cause = "sin respuesta";
+  for (let attempt = 1; attempt <= SHEET_READ_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(endpoint, { headers: { "cache-control": "no-cache" }, cache: "no-store", signal: AbortSignal.timeout(SHEET_READ_TIMEOUT_MS) });
+      const payload = await response.json().catch(() => null);
+      if (response.ok && payload?.ok && Array.isArray(payload.rows)) return payload;
+      cause = `HTTP ${response.status}${payload && payload.error ? ` (${String(payload.error).slice(0, 80)})` : payload ? "" : " (respuesta no es JSON)"}`;
+    } catch (error) {
+      cause = error?.name === "TimeoutError" ? `sin respuesta en ${SHEET_READ_TIMEOUT_MS / 1000} s` : String(error?.message || error).slice(0, 80);
+    }
+    if (attempt < SHEET_READ_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+  }
+  throw new Error(`No se pudo leer Google Sheets; lote abortado sin envíos. Causa: ${cause} (tras ${SHEET_READ_ATTEMPTS} intentos).`);
 }
 
 async function pendingPaymentReceiptPhones(env, month) {

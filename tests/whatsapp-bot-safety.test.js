@@ -944,3 +944,33 @@ assert.match(worker, /clock\.minutes < 10 \* 60 \+ 15 \|\| clock\.minutes >= 19 
 assert.match(worker, /WHERE billing_automation_sends\.status='failed' OR \(billing_automation_sends\.status='pending' AND billing_automation_sends\.updated_at < datetime\('now','-10 minutes'\)\)/);
 assert.match(worker, /if \(claim\?\.meta && Number\(claim\.meta\.changes\) === 0\) continue;/);
 assert.match(worker, /let billingRevalidationCache = \{ at: 0, month: null, parsed: null \};/);
+
+// 2026-10-20: la lectura de la planilla de cobranza reintenta (3 intentos, 20 s c/u) y reporta la causa real; el día 20 se abortó el lote por
+// una lectura que se colgó.
+(async () => {
+  const make = (behaviors) => {
+    const ctx = { AbortSignal, JSON, String, Promise, Array, Error, STABLE_BACKEND: "backend.example", calls: 0 };
+    ctx.setTimeout = (fn) => { fn(); return 0; };
+    ctx.sheetsScriptUrl = () => null;
+    ctx.fetch = async () => { const b = behaviors[ctx.calls] || behaviors[behaviors.length - 1]; ctx.calls += 1; return b(); };
+    vm.createContext(ctx);
+    vm.runInContext(`
+      const SHEET_READ_ATTEMPTS = 3;
+      const SHEET_READ_TIMEOUT_MS = 20000;
+      async ${functionSource("fetchFreshBillingSource")}
+      this.api = { fetchFreshBillingSource };
+    `, ctx);
+    return ctx;
+  };
+  const okResponse = () => ({ ok: true, status: 200, json: async () => ({ ok: true, rows: [["a"]] }) });
+  const badResponse = () => ({ ok: false, status: 502, json: async () => ({ ok: false, error: "Apps Script no disponible" }) });
+  const hang = () => { const error = new Error("timeout"); error.name = "TimeoutError"; throw error; };
+  const flaky = make([hang, badResponse, okResponse]);
+  assert.deepEqual((await flaky.api.fetchFreshBillingSource({})).rows, [["a"]]);
+  assert.equal(flaky.calls, 3);
+  const dead = make([hang]);
+  await assert.rejects(() => dead.api.fetchFreshBillingSource({}), /No se pudo leer Google Sheets; lote abortado sin envíos\. Causa: sin respuesta en 20 s \(tras 3 intentos\)\./);
+  assert.equal(dead.calls, 3);
+  const bad = make([badResponse]);
+  await assert.rejects(() => bad.api.fetchFreshBillingSource({}), /Causa: HTTP 502 \(Apps Script no disponible\)/);
+})().catch((error) => { console.error(error); process.exit(1); });
