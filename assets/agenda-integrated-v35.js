@@ -43,10 +43,10 @@
     return customers.find(function (item) { return item.id === work.customerId; }) || null;
   }
 
-  function descriptionForWork(work) {
+  // 2026-10-15 (Carlos): en agenda y detalle se muestran las OBSERVACIONES que escribe el equipo (accessNotes de la
+  // ficha del cliente), nunca la descripción de plantilla del tipo de trabajo (igual para todas las órdenes).
+  function observationsForWork(work) {
     if (!work) return "";
-    var description = String(work.description || "").trim();
-    if (description) return description;
     var customer = customerForWork(work);
     return String(customer && customer.accessNotes || "").trim();
   }
@@ -57,7 +57,7 @@
       var codeNode = card.querySelector("span");
       var code = String(codeNode && codeNode.textContent || "").split("|")[0].trim();
       var work = orders.find(function (item) { return String(item.code || "").trim() === code; });
-      var description = descriptionForWork(work);
+      var description = observationsForWork(work);
       var current = card.querySelector(".agenda-work-description");
       var previousObservations = card.querySelector(".agenda-work-observations");
       if (previousObservations) previousObservations.remove();
@@ -71,7 +71,7 @@
         var location = Array.from(card.querySelectorAll("em")).find(function (item) { return !item.classList.contains("followup-tag"); });
         (location || card.querySelector("strong")).insertAdjacentElement("afterend", current);
       }
-      current.textContent = "Descripción: " + description;
+      current.textContent = "Observaciones: " + description;
       current.title = description;
     });
   }
@@ -83,9 +83,7 @@
     var orders = Array.isArray(state.workOrders) ? state.workOrders : [];
     var work = orders.find(function (item) { return item.code && detail.textContent.includes(item.code); });
     if (!work) return;
-    var customer = customerForWork(work);
-    var description = descriptionForWork(work);
-    var observations = String(customer && customer.accessNotes || "").trim();
+    var observations = observationsForWork(work);
     var block = detail.querySelector(".agenda-work-fields");
     if (!block) {
       block = document.createElement("div");
@@ -93,9 +91,8 @@
       var head = detail.querySelector(".panel-head");
       head.insertAdjacentElement("afterend", block);
     }
-    block.innerHTML = (description ? '<div><strong>Descripción del trabajo</strong><p>' + escapeHtml(description) + '</p></div>' : "") +
-      (observations ? '<div><strong>Observaciones del cliente</strong><p>' + escapeHtml(observations) + '</p></div>' : "");
-    block.hidden = !description && !observations;
+    block.innerHTML = observations ? '<div><strong>Observaciones</strong><p>' + escapeHtml(observations) + '</p></div>' : "";
+    block.hidden = !observations;
   }
 
   function decorateAgenda() {

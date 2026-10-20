@@ -19,3 +19,20 @@ assert(html.includes("/assets/mobile-ux-v11.js?v=13"), "Debe cargarse la lógica
 assert(html.includes("/assets/mobile-v5.css?v=16"), "Debe cargarse el estilo móvil actualizado.");
 
 console.log("mobile technician UX tests: ok");
+
+// 2026-10-15 (Carlos): agenda, detalle de actividad y agenda móvil muestran las Observaciones del cliente
+// (accessNotes), nunca la descripción de plantilla del tipo de trabajo.
+{
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const assert = require("node:assert/strict");
+  const agenda = fs.readFileSync(path.join(__dirname, "..", "assets", "agenda-integrated-v35.js"), "utf8");
+  const mobile = fs.readFileSync(path.join(__dirname, "..", "assets", "mobile-agenda-calendar-v1.js"), "utf8");
+  // work.description sigue sirviendo solo para el buscador (searchText), no se muestra.
+  assert.doesNotMatch(agenda, /"Descripción: "/);
+  assert.doesNotMatch(agenda, /Descripción del trabajo/);
+  assert.match(agenda, /<strong>Observaciones<\/strong>/);
+  assert.match(agenda, /"Observaciones: " \+ description/);
+  assert.doesNotMatch(mobile, /work\.description/);
+  assert.match(mobile, /Observaciones: '/);
+}
