@@ -369,7 +369,24 @@ assert.match(worker, /Cuando el cliente deja claro que quiere instalarse, conect
 assert.equal(api.mentionsServiceOutage("Tiene 2 cuentas diferentes"), false);
 assert.equal(api.mentionsServiceOutage("Llevo 3 días sin internet"), true);
 assert.equal(api.mentionsServiceOutage("hubo un corte de servicio ayer"), true);
-assert.match(worker, /if \(!mentionsServiceOutage\(message\.customerText\) && !mentionsServiceOutage\(action\.reason\)\) \{/);
+// 2026-10-20 (56912000022): la solicitud de descuento por corte exige palabras del PROPIO cliente, no solo el resumen del modelo.
+assert.match(worker, /if \(!mentionsServiceOutage\(message\.customerText\) && !mentionsServiceOutage\(recentCustomerWords\)\) \{/);
+assert.doesNotMatch(worker, /!mentionsServiceOutage\(action\.reason\)/);
+// 2026-10-20 (56912000019): nombre + RUT + mes en la misma frase.
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`${functionSource("extractAccountName")}; ${functionSource("isPlausibleAccountName")}; this.api = { extractAccountName, isPlausibleAccountName };`, ctx);
+  const n = (v) => ctx.api.extractAccountName(v);
+  assert.equal(n("Oscar Varela Solis, 12.345.678-5, mes de octubre 2026"), "Oscar Varela Solis");
+  assert.equal(n("Oscar Varela Solis, 12.345.678-5"), "Oscar Varela Solis");
+  assert.equal(n("a nombre de Juan Pérez"), "Juan Pérez");
+  assert.equal(ctx.api.isPlausibleAccountName(n("Oscar Varela Solis, 12.345.678-5, mes de octubre 2026")), true);
+  assert.equal(ctx.api.isPlausibleAccountName(n("ya pagué")), false);
+}
+// 2026-10-20 (56912000022): "No ya cansele" = ya pagué, no una baja del servicio.
+assert.match(worker, /\(cancele\|cansele\|cancelee\|cancelado\|cancelada\|cancelamos\|canselamos\)/);
+assert.match(worker, /const captionName = extractAccountName\(message\.customerText\);/);
 
 // Mismo guard aplicado a visit_request: no crear la solicitud si nada menciona falla/visita/técnico.
 assert.equal(api.mentionsTechnicalIssueOrVisit("Tiene 2 cuentas diferentes"), false);

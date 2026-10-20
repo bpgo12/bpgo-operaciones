@@ -347,6 +347,15 @@ function extractAccountName(value) {
   let name = String(value || "").trim().slice(0, 200).replace(/\s+/g, " ");
   name = name.replace(/^(mi nombre es|el nombre es|es a nombre de|a nombre de|al nombre de|nombre( del titular)?)\s*:?\s*/i, "").trim();
   name = name.replace(/^[.:,-]+\s*/, "").trim();
+  // Caso real (2026-10-20, 56912000019): "Oscar Varela Solis, 12.345.678-5, mes de octubre 2026" se rechazó como nombre por traer RUT y mes.
+  name = name
+    .replace(/\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b/g, " ")
+    .replace(/\brut\s*:?/gi, " ")
+    .replace(/,?\s*\b(?:pago )?(?:del? )?mes de [A-Za-zÁÉÍÓÚáéíóúñ]+(?: (?:de |del )?\d{4})?/gi, " ")
+    .replace(/[,;]+/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/[.:\s-]+$/, "")
+    .trim();
   return name;
 }
 
@@ -1745,6 +1754,15 @@ async function callBotResponder(env, context, inboundMessage, media) {
   if (isPureGreeting(inboundMessage?.text)) return { action: "reply", text: "¡Hola! 😊 Cuéntame, ¿qué necesitas?" };
   const externalPayment = externalConnectivityPaymentReply(inboundMessage?.text);
   if (externalPayment) return { action: "reply", text: externalPayment };
+  // "No ya cansele" (56912000022): en Chile "cancelar" es pagar; en pasado ("cancelé", "cancelado", con errores de tipeo) es que YA pagó. El
+  // modelo lo tomó como baja del servicio y preguntó "¿quieres dar de baja?".
+  const normalizedForCancel = String(inboundMessage?.text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  if (/\b(ya )?(cancele|cansele|cancelee|cancelado|cancelada|cancelamos|canselamos)\b/.test(normalizedForCancel)
+    && !/\b(servicio|contrato|plan|internet)\b/.test(normalizedForCancel)) {
+    return { action: "reply", text: context.hasPendingReceipt
+      ? "Tu comprobante ya está en revisión."
+      : "Perfecto. Envíame el comprobante para dejarlo en revisión." };
+  }
   if (cancellationMeansPayment(inboundMessage?.text, context.history)) {
     return { action: "reply", text: "Entendido, puedes realizar el pago más tarde. Cuando lo hagas, si quieres puedes enviarnos el comprobante por este medio." };
   }
@@ -2094,7 +2112,8 @@ async function executeBotAction(env, credentials, phone, action, message) {
     // un reported_name ya guardado en un caso anterior. Si esa fuente tiene un dato sucio (fila mal
     // cargada, o un valor inválido que se coló antes por este mismo camino), no se debe reutilizar
     // ni propagar -- se revalida igual antes de confiar en él.
-    const rawKnown = caseRow?.reported_name || await getKnownAccountName(env, phone)
+    const captionName = extractAccountName(message.customerText);
+    const rawKnown = caseRow?.reported_name || (isPlausibleAccountName(captionName) ? captionName : null) || await getKnownAccountName(env, phone)
       || (matchedCustomer.matchedByPhone ? matchedCustomer.name : null);
     const known = isPlausibleAccountName(rawKnown) ? rawKnown : null;
     if (known) {
@@ -2179,7 +2198,11 @@ async function executeBotAction(env, credentials, phone, action, message) {
     // acción) como si fuera un pedido de descuento por días sin servicio. No se crea el caso de
     // descuento salvo que el propio mensaje del cliente O el resumen que dio el modelo mencionen
     // explícitamente una falla/corte -- así no se depende solo de que el modelo acierte siempre.
-    if (!mentionsServiceOutage(message.customerText) && !mentionsServiceOutage(action.reason)) {
+    // Caso real (2026-10-20, 56912000022): "Del 1 al 10" (sin hablar de cortes) generó "Registramos tu solicitud de revisión por los días sin
+    // servicio" porque el resumen del modelo mencionaba la falla. Ahora debe haber palabras del PROPIO cliente (mensaje actual o los últimos).
+    const recentCustomerWords = ((await env.DB.prepare("SELECT message_text FROM whatsapp_inbox_messages WHERE phone = ? AND direction = 'inbound' ORDER BY created_at DESC LIMIT 6").bind(phone).all()).results || [])
+      .map((row) => row.message_text || "").join(" ");
+    if (!mentionsServiceOutage(message.customerText) && !mentionsServiceOutage(recentCustomerWords)) {
       await sendBotReply(env, credentials, phone, "No logré entender bien tu consulta, ¿me la puedes contar de nuevo con más detalle?", preferAudio);
       return;
     }
