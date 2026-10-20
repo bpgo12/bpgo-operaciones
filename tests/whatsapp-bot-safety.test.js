@@ -500,7 +500,7 @@ assert.match(worker, /claimInboundMessageForBot\(env, `retake-claim:\$\{row\.mes
 assert.doesNotMatch(worker, /claimInboundMessageForBot\(env, `retake:/);
 assert.match(worker, /id: `retake:\$\{row\.message_id\}`, from: row\.phone/);
 assert.match(worker, /setBotSessionMode\(env, row\.phone, "bot", "auto_reactivated_unanswered"\)/);
-assert.match(worker, /const takeoverTask = takeOverUnansweredHumanChats\(env\)\.then\(\(\) => resumeAfterHoursChats\(env\)\)\s*\n\s*\.then\(\(\) => \{ if \(Date\.now\(\) - lastReminderV2CheckMs < 10 \* 60 \* 1000\) return null;/);
+assert.match(worker, /const takeoverTask = takeOverUnansweredHumanChats\(env\)\.then\(\(\) => resumeAfterHoursChats\(env\)\)\s*\n\s*\.then\(\(\) => runBillingAutomationIfDue\(env\)\)\s*\n\s*\.then\(\(\) => \{ if \(Date\.now\(\) - lastReminderV2CheckMs < 10 \* 60 \* 1000\) return null;/);
 assert.match(worker, /const takeover = await takeOverUnansweredHumanChats\(env\)/);
 {
   const ctx = {};
@@ -937,3 +937,10 @@ assert.match(worker, /"fundo anique", "rucanire", "huechicura", "canete"/);
 assert.match(worker, /const registered = await webpayPaymentIsRegistered\(env, phone\)\.catch\(\(\) => false\);/);
 assert.match(worker, /return hits\.length === 1 && hits\[0\]\.reason === "paid";/);
 assert.match(worker, /ya quedó ingresado ✅/);
+
+// 2026-10-20: la cobranza automática dependía solo del cron de GitHub (retrasos de 3-6 h). Respaldo desde los webhooks, con reclamo atómico por cliente.
+assert.match(worker, /async function runBillingAutomationIfDue\(env\)/);
+assert.match(worker, /clock\.minutes < 10 \* 60 \+ 15 \|\| clock\.minutes >= 19 \* 60 \+ 30/);
+assert.match(worker, /WHERE billing_automation_sends\.status='failed' OR \(billing_automation_sends\.status='pending' AND billing_automation_sends\.updated_at < datetime\('now','-10 minutes'\)\)/);
+assert.match(worker, /if \(claim\?\.meta && Number\(claim\.meta\.changes\) === 0\) continue;/);
+assert.match(worker, /let billingRevalidationCache = \{ at: 0, month: null, parsed: null \};/);

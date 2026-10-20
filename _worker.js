@@ -3324,10 +3324,18 @@ async function updateBillingAutomationStatus(env, item) {
     .bind(item.status, item.error?.code ? String(item.error.code) : null, item.error?.message || item.error?.error_data?.details || null, item.messageId).run();
 }
 
+// Cada destinatario releía TODA la planilla (~3 s): un lote de 80 clientes tardaba ~4 minutos y, si lo disparaba un webhook,
+// Cloudflare lo cortaba a los ~30 s. Se reutiliza la lectura por 45 s (seguridad intacta: sigue siendo una lectura reciente).
+let billingRevalidationCache = { at: 0, month: null, parsed: null };
 async function revalidateBillingRecipient(env, phone, date = new Date()) {
-  const source = await fetchFreshBillingSource(env);
-  const parsed = billingEligibilityFromRows(source.rows, date, await pendingPaymentReceiptPhones(env, billingMonthKey(date)));
-  if (!parsed.ok) throw new Error(parsed.error);
+  const month = billingMonthKey(date);
+  let parsed = billingRevalidationCache.month === month && Date.now() - billingRevalidationCache.at < 45000 ? billingRevalidationCache.parsed : null;
+  if (!parsed) {
+    const source = await fetchFreshBillingSource(env);
+    parsed = billingEligibilityFromRows(source.rows, date, await pendingPaymentReceiptPhones(env, month));
+    if (!parsed.ok) throw new Error(parsed.error);
+    billingRevalidationCache = { at: Date.now(), month, parsed };
+  }
   return parsed.eligible.find((item) => item.phone === phone) || null;
 }
 
@@ -3388,11 +3396,15 @@ async function runBillingAutomation(env, options = {}) {
       return { ok: false, aborted: true, error: "Google Sheets falló durante la revalidación; lote detenido.", sent, failed };
     }
     if (!item) continue;
-    await env.DB.prepare(`INSERT INTO billing_automation_sends
+    // Reclamo atómico: solo sigue quien logra insertar la fila o retomar una 'failed' / 'pending' abandonada (>10 min). Si otra
+    // corrida (GitHub o un webhook) ya la tomó, se salta, así nunca se manda dos veces el mismo recordatorio.
+    const claim = await env.DB.prepare(`INSERT INTO billing_automation_sends
       (billing_month,stage,phone,customer_id,customer_name,amount,template_name,status,is_test,created_at,updated_at)
       VALUES (?,?,?,?,?,?,?,'pending',0,datetime('now'),datetime('now'))
-      ON CONFLICT(billing_month,stage,phone) WHERE is_test=0 DO UPDATE SET status='pending',error_code=NULL,error_message=NULL,updated_at=datetime('now')`)
+      ON CONFLICT(billing_month,stage,phone) WHERE is_test=0 DO UPDATE SET status='pending',error_code=NULL,error_message=NULL,updated_at=datetime('now')
+        WHERE billing_automation_sends.status='failed' OR (billing_automation_sends.status='pending' AND billing_automation_sends.updated_at < datetime('now','-10 minutes'))`)
       .bind(month, stage, item.phone, item.customerId, item.customerName, item.amount, template.name).run();
+    if (claim?.meta && Number(claim.meta.changes) === 0) continue;
     const result = await sendBillingAutomationTemplate(env, stage, item.phone);
     await env.DB.prepare(`UPDATE billing_automation_sends SET status=?,message_id=?,error_code=?,error_message=?,updated_at=datetime('now')
       WHERE billing_month=? AND stage=? AND phone=? AND is_test=0`)
@@ -3408,6 +3420,28 @@ async function runBillingAutomation(env, options = {}) {
     (billing_month,stage,status,eligible_count,excluded_count,sent_count,failed_count,details)
     VALUES (?,?,'completed',?,?,?,?,?)`).bind(month, stage, parsed.eligible.length, parsed.excluded.length, sent, failed, null).run();
   return { ok: failed === 0, month, stage, eligible: parsed.eligible.length, excluded: parsed.excluded.length, sent, failed, templates: templateState.templates };
+}
+
+// GitHub Actions ejecuta los "cron" con retrasos de horas (2026-10-18: ~3 h; 2026-10-19: ~6 h) y a veces los omite, y la cobranza
+// automática dependía solo de eso: el recordatorio del día 20 no salía. Respaldo: los webhooks de WhatsApp (llegan todo el día)
+// disparan la cobranza del día si ya es hora (10:15 a 19:30 Chile), hoy toca etapa y aún no hay una corrida completa. Es
+// idempotente: cada cliente se reclama de forma atómica, así que coincidir con la corrida de GitHub no duplica envíos.
+let lastBillingDueCheckMs = 0;
+async function runBillingAutomationIfDue(env) {
+  if (Date.now() - lastBillingDueCheckMs < 3 * 60 * 1000) return null;
+  lastBillingDueCheckMs = Date.now();
+  const now = new Date();
+  const stage = billingStageForDate(now);
+  if (!stage) return null;
+  const clock = chileClock(now);
+  if (clock.minutes < 10 * 60 + 15 || clock.minutes >= 19 * 60 + 30) return null;
+  await ensureBillingAutomationTables(env);
+  const month = billingMonthKey(now);
+  const done = await env.DB.prepare("SELECT 1 AS found FROM billing_automation_runs WHERE billing_month = ? AND stage = ? AND status = 'completed' LIMIT 1").bind(month, stage).first();
+  if (done) return null;
+  const slot = `${month}:${stage}:${now.toISOString().slice(0, 15)}`; // una corrida por franja de 10 minutos
+  if (!(await claimInboundMessageForBot(env, `billing-run:${slot}`))) return null;
+  return runBillingAutomation(env);
 }
 
 async function billingAutomationDashboard(env) {
@@ -4314,6 +4348,7 @@ export default {
       const flushTask = flushQueuedStaffNotifications(env).catch(() => null);
       // La corrida programada de GitHub tarda horas; la plantilla de recordatorio v2 se crea/refresca aquí (máx. cada 10 min).
       const takeoverTask = takeOverUnansweredHumanChats(env).then(() => resumeAfterHoursChats(env))
+        .then(() => runBillingAutomationIfDue(env))
         .then(() => { if (Date.now() - lastReminderV2CheckMs < 10 * 60 * 1000) return null; lastReminderV2CheckMs = Date.now(); return manualReminderV2Status(env, true); })
         .catch(() => null);
       if (ctx?.waitUntil) { ctx.waitUntil(botTask); ctx.waitUntil(flushTask); ctx.waitUntil(takeoverTask); } else { await botTask; await flushTask; await takeoverTask; }
