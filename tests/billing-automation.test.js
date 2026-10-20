@@ -56,12 +56,14 @@ const rows = [headers,
 ];
 const parsed = api.billingEligibilityFromRows(rows, new Date("2026-09-23T16:00:00Z"), new Set(["56912345677"]));
 assert.equal(parsed.ok, true);
-assert.deepEqual(Array.from(parsed.eligible, (item) => item.customerName), ["Pendiente"]);
+// Orden de Carlos (2026-10-20): un comprobante en revisión NO excluye; solo manda la planilla (el cliente "Comprobante" sí recibe el recordatorio).
+assert.deepEqual(Array.from(parsed.eligible, (item) => item.customerName), ["Pendiente", "Comprobante"]);
 const reasons = Array.from(parsed.excluded, (item) => item.reason);
-for (const reason of ["paid", "inactive_or_suspended", "non_positive_amount", "invalid_phone", "pending_receipt", "duplicate_phone"]) {
+for (const reason of ["paid", "inactive_or_suspended", "non_positive_amount", "invalid_phone", "duplicate_phone"]) {
   assert.ok(reasons.includes(reason), `missing exclusion ${reason}`);
 }
 
+assert.doesNotMatch(worker, /reason = "pending_receipt"/);
 assert.equal((worker.match(/async function runBillingAutomation\(/g) || []).length, 1);
 assert.equal((worker.match(/function billingAutomationTemplateDefinition\(/g) || []).length, 1);
 assert.match(worker, /\["accepted", "sent", "delivered", "read"\]\.includes\(previous\.status\)/);
@@ -71,7 +73,9 @@ assert.match(worker, /billing_suspension_queue/);
 assert.match(worker, /claims\.repository === "bpgo12\/bpgo-operaciones"/);
 assert.match(worker, /claims\.ref === "refs\/heads\/main"/);
 assert.match(worker, /claims\.event_name/);
-assert.match(worker, /status='approved' AND strftime\('%Y-%m', created_at\) = \?/);
+// Orden de Carlos (2026-10-20): los comprobantes (aprobados o no) ya no excluyen a nadie de la cobranza; solo manda la planilla.
+assert.doesNotMatch(worker, /status='approved' AND strftime\('%Y-%m', created_at\) = \?/);
+assert.match(worker, /async function pendingPaymentReceiptPhones\(\) \{\s*\n\s*return new Set\(\);/);
 
 console.log("billing automation: ok");
 

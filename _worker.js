@@ -3128,7 +3128,10 @@ function billingSheetColumns(rows, date = new Date()) {
   };
 }
 
-function billingEligibilityFromRows(rows, date = new Date(), pendingReceiptPhones = new Set()) {
+// Orden de Carlos (2026-10-20): la ÚNICA fuente para decidir si se cobra es la planilla. Si el mes no figura PAGADO, el recordatorio se envía
+// siempre; los comprobantes sin aprobar o en revisión en el panel ya NO excluyen a nadie (el tercer parámetro se conserva por compatibilidad
+// y se ignora).
+function billingEligibilityFromRows(rows, date = new Date(), _ignoredPendingReceiptPhones = new Set()) {
   const columns = billingSheetColumns(rows, date);
   if (Object.values(columns).some((index) => index < 0)) {
     return { ok: false, error: "La planilla no contiene todas las columnas obligatorias del mes vigente.", eligible: [], excluded: [] };
@@ -3160,7 +3163,6 @@ function billingEligibilityFromRows(rows, date = new Date(), pendingReceiptPhone
     else if (item.monthStatus) reason = "month_not_pending";
     else if (/CORTADO|SUSPENDIDO|INACTIV/.test(item.accountStatus)) reason = "inactive_or_suspended";
     else if (!(item.amount > 0)) reason = "non_positive_amount";
-    else if (pendingReceiptPhones.has(item.phone)) reason = "pending_receipt";
     (reason ? excluded : eligible).push(reason ? { ...item, reason } : item);
   }
   return { ok: true, columns, eligible, excluded };
@@ -3218,17 +3220,9 @@ async function fetchFreshBillingSource(env) {
   throw new Error(`No se pudo leer Google Sheets; lote abortado sin envíos. Causa: ${cause} (tras ${SHEET_READ_ATTEMPTS} intentos).`);
 }
 
-async function pendingPaymentReceiptPhones(env, month) {
-  await ensureWhatsAppAutomationTable(env);
-  // 'suggested'/'reviewing' pausan el envío mientras Carlos revisa el comprobante. Una vez que lo
-  // aprueba ('approved'), el cliente debe seguir excluido de la cobranza del MISMO mes aunque a
-  // alguien se le olvide marcar "PAGADO" en la planilla de Google Sheets -- si no, el sistema le
-  // vuelve a mandar recordatorios a alguien que ya pagó y Carlos ya confirmó. Se limita al mes de
-  // cobranza vigente para no bloquear para siempre a un cliente que vuelva a deber el mes siguiente.
-  const rows = await env.DB.prepare(`SELECT DISTINCT phone FROM whatsapp_automation_cases
-    WHERE case_type='payment' AND (status IN ('suggested','reviewing')
-      OR (status='approved' AND strftime('%Y-%m', created_at) = ?))`).bind(month || "").all();
-  return new Set((rows.results || []).map((item) => normalizeWhatsAppPhone(item.phone)).filter(Boolean));
+// Ya no se usa para excluir clientes de la cobranza (ver billingEligibilityFromRows); devuelve vacío y se mantiene por compatibilidad.
+async function pendingPaymentReceiptPhones() {
+  return new Set();
 }
 
 function billingAutomationTemplateDefinition(stage) {
