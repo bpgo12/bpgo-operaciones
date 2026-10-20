@@ -7,8 +7,21 @@ const vm = require("node:vm");
 
 const worker = fs.readFileSync(path.join(__dirname, "..", "_worker.js"), "utf8");
 
-// Constante del lector de datos de instalación (se inyecta junto a classifyInstallationFragment).
-const installationLabelPatternSource = worker.slice(worker.indexOf("const INSTALLATION_LABEL_PATTERN ="), worker.indexOf("/i;", worker.indexOf("const INSTALLATION_LABEL_PATTERN =")) + 3);
+// Constantes y funciones auxiliares del lector de datos de instalación (se inyectan antes de classifyInstallationFragment).
+function topLevelConst(name) {
+  const start = worker.indexOf(`const ${name} =`);
+  let depth = 0;
+  for (let i = start; i < worker.length; i += 1) {
+    const c = worker[i];
+    if ("[({".includes(c)) depth += 1;
+    else if ("])}".includes(c)) depth -= 1;
+    else if (c === ";" && depth === 0) return worker.slice(start, i + 1);
+  }
+  throw new Error(`unterminated ${name}`);
+}
+const installationParserDeps = () => ["INSTALLATION_SECTORS", "INSTALLATION_ADDRESS_WORDS", "INSTALLATION_CHAT_WORDS", "INSTALLATION_NAME_STOPWORDS",
+  "INSTALLATION_LABELS", "INSTALLATION_COMMON_WORDS", "INSTALLATION_NAME_PARTICLES"].map(topLevelConst).join("\n") + "\n" +
+  ["installationPlain", "installationRutCheckDigit", "normalizeInstallationRut", "normalizeInstallationPhone", "isInstallationName", "isInstallationAddress"].map(functionSource).join("\n");
 
 function functionSource(name) {
   const start = worker.indexOf(`function ${name}(`);
@@ -47,9 +60,7 @@ vm.runInContext(`
   ${functionSource("inboundMessageText")}
   ${functionSource("isLikelyNotAName")}
   ${functionSource("isNameLikeFragment")}
-  ${installationLabelPatternSource}
-  ${functionSource("installationLabelField")}
-  ${functionSource("normalizeInstallationPhone")}
+  ${installationParserDeps()}
   ${functionSource("classifyInstallationFragment")}
   ${functionSource("mentionsServiceOutage")}
   ${functionSource("mentionsTechnicalIssueOrVisit")}
@@ -791,17 +802,16 @@ assert.match(worker, /fragment \? `Anotado ✅ \$\{describeInstallationFragment\
     ${functionSource("isPureGreeting")}
     ${functionSource("isLikelyNotAName")}
     ${functionSource("isNameLikeFragment")}
-    ${installationLabelPatternSource}
-    ${functionSource("installationLabelField")}
-    ${functionSource("normalizeInstallationPhone")}
+    ${installationParserDeps()}
     ${functionSource("classifyInstallationFragment")}
     this.api = { classifyInstallationFragment };
   `, ctx);
   const c = (text, cur = { name: null, address: null }) => ctx.api.classifyInstallationFragment(text, cur);
-  assert.deepEqual(JSON.parse(JSON.stringify(c("12345678"))), { rut: "12345678" });
+  // 2026-10-20: el RUT se guarda normalizado; "81234566" tiene verificador válido (8.123.456-6).
+  assert.deepEqual(JSON.parse(JSON.stringify(c("81234566"))), { rut: "8123456-6" });
   assert.deepEqual(JSON.parse(JSON.stringify(c("Marta de Lourdes Soto Rivas."))), { name: "Marta de Lourdes Soto Rivas" });
   assert.deepEqual(JSON.parse(JSON.stringify(c("Nombre de titular:Marta de Lourdes Soto Rivas"))), { name: "Marta de Lourdes Soto Rivas" });
-  assert.deepEqual(JSON.parse(JSON.stringify(c("1.197.975-0"))), { rut: "1.197.975-0" });
+  assert.deepEqual(JSON.parse(JSON.stringify(c("8.123.456-6"))), { rut: "8123456-6" });
   assert.deepEqual(JSON.parse(JSON.stringify(c("912000023"))), { phone: "912000023" });
   assert.equal(c("cliente1@ejemplo.cl").email, "cliente1@ejemplo.cl");
   // un número suelto ya no se vuelve dirección, y el nombre posterior no se pega a ella
@@ -855,7 +865,7 @@ assert.match(worker, /const SALES_PLAN_INFO_REPLY = "Todos nuestros planes son d
 assert.match(worker, /if \(salesLead\.status === "awaiting_plan" && String\(text \|\| ""\)\.trim\(\)\) \{\s*\n\s*if \(isSalesPlanInfoQuestion\(text\)\)/);
 // 2026-10-20: el texto que no parece nombre ya no se descarta siempre: si viene después del nombre y aún no hay
 // dirección, es la dirección ("Valle Verde , Cayucupil"). Las preguntas siguen sin guardarse (installation-capture.test.js).
-assert.match(worker, /if \(!isNameLikeFragment\(line\)\) \{/);
+assert.match(worker, /if \(isInstallationAddress\(rest\)\) \{/);
 
 // 2026-10-09: D1 free tier "daily row read limit" excedido. El esquema se verifica una vez por instancia y las
 // consultas de listados/avisos usan índices (antes escaneaban tablas completas en cada mensaje y cada sondeo del panel).
