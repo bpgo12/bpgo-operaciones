@@ -1085,3 +1085,27 @@ assert.match(worker, /\} else if \(extractMapsLink\(text\)\) \{/);
 assert.match(worker, /await submitLocationForFactibilidad\(env, credentials, salesLead, phone, name, message, \{ latitude, longitude \}, preferAudio\);/);
 assert.match(worker, /NUNCA reveles ni insinúes que la respuesta es automática/);
 assert.match(worker, /action = \{ \.\.\.action, text: sanitizeBotDisclosure\(action\.text\) \};/);
+
+// 2026-10-21: el bot debe entender el historial: una ficha de datos enviada tras pedirla (a mano o por el bot) se entrega al equipo y no reinicia el embudo;
+// una ficha con RUT/correo/teléfono nunca es un "sector"; el modelo ve 16 mensajes y se le indica continuar lo que un agente ya venía haciendo.
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`
+    ${functionSource("cyberNormalize")}
+    ${functionSource("isPureGreeting")}
+    ${functionSource("isClosingPleasantry")}
+    ${functionSource("isHumanRequest")}
+    ${functionSource("isPlausibleSector")}
+    ${functionSource("extractSectorFromText")}
+    this.api = { extractSectorFromText };
+  `, ctx);
+  const ficha = "Datos\nAna Torres Rojas \n12.345.678-5 \n+56912000060\nana.torres@mail.cl \nSector Valle Verde km 1,7 camino a Cayucupil\nPlan Platino";
+  assert.equal(ctx.api.extractSectorFromText(ficha), null);
+  assert.equal(ctx.api.extractSectorFromText("Datos Ana Torres Rojas 12.345.678-5"), null);
+  assert.equal(ctx.api.extractSectorFromText("Hola, uds instalan fibra óptica en Cañete, sector Valle Verde?"), "Valle Verde");
+}
+assert.match(worker, /\.bind\(phone, "%datos para realizar la instalaci%"\)\.first\(\);/);
+assert.match(worker, /dataPackage\.rut && \(dataPackage\.email \|\| dataPackage\.phone\) && dataPackage\.name && dataPackage\.address/);
+assert.match(worker, /history = history\.slice\(-16\);/);
+assert.match(worker, /LEE TODO el historial antes de responder/);

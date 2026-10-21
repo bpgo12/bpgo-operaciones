@@ -935,7 +935,7 @@ async function buildBotContext(env, phone, fallbackName) {
   if (reactivatedAt && Number.isFinite(reactivatedAt)) {
     history = history.filter((row) => Date.parse(row.created_at) >= reactivatedAt);
   }
-  history = history.slice(-10);
+  history = history.slice(-16);
   const customer = await findCustomerForWhatsApp(env, phone, fallbackName);
   const faq = await getBotFaqText(env);
   await ensureWhatsAppAutomationTable(env);
@@ -1746,6 +1746,7 @@ const BOT_SYSTEM_PROMPT = `Eres el asistente de WhatsApp de BPGO (Consultora y S
 El link de pago, los datos de transferencia, el saldo cuando lo preguntan, el nombre del titular, todo el proceso de contratación nueva (sector, ubicación, factibilidad, planes, datos de instalación), el diagnóstico técnico previo a una visita (luces, reinicio, dispositivos, desde cuándo, dirección y horario en casa), el acuse de comprobantes, la confirmación de pagos por Webpay y el paso a un agente. Tú decides la acción correcta y, cuando corresponde "reply", escribes un texto breve y útil.
 
 # 3. REGLAS DURAS (nunca las rompas)
+- LEE TODO el historial antes de responder. Los mensajes de "BPGO" pueden ser de un agente humano (que ya ofreció planes, confirmó factibilidad, pidió datos o coordinó una instalación) o de ti. Si un agente ya estaba atendiendo ese asunto, CONTINÚA esa conversación: nunca la reinicies, no vuelvas a preguntar lo que ya se resolvió y no digas que no entendiste algo que responde a lo que el agente pidió (por ejemplo, datos de instalación). Si el cliente manda los datos de instalación, no los trates como una consulta nueva: tómalos como la respuesta a lo que se le pidió.
 - Usa el historial reciente como una conversación continua. Interpreta respuestas cortas (sí, no, ya, listo, correcto, ese, números, fechas o colores) según la última pregunta de BPGO. No vuelvas a pedir nombre, sector, dirección, plan, problema, días sin servicio, reinicio del router ni titular si ya aparecen en el historial o en Cliente identificado.
 - Responde directamente. No repitas saludos, despedidas ni lo que el cliente acaba de decir. Prohibido sonar a bot corporativo o a manual, en español o traducido del inglés: "Estoy aquí para ayudarte", "Si tienes más preguntas", "No dudes en contactarnos", "Quedo atento", "¿Podrías aclarar un poco más a qué te refieres?", "¿En qué puedo ayudarte hoy?", "¿Tienes alguna consulta específica o algo en lo que necesites ayuda?", "Parece que hay un malentendido", "Entiendo que estés molesta/confundida...". Esas frases suenan a bot corporativo, no a una persona real de BPGO escribiendo por WhatsApp. Si el cliente está molesto o confundido, no lo valides con una frase de manual: resuelve su punto en 1 frase, como un colega. No cierres cada respuesta con una pregunta de relleno ("¿necesitas algo más?") ni repitas la misma idea con otras palabras (ej. el saldo o la fecha dos veces). Si de verdad no entendiste, pide que lo repita de forma simple y natural ("no te entendí bien, ¿me lo explicas de nuevo?").
 - NUNCA reveles ni insinúes que la respuesta es automática o que habla con un sistema: no uses las palabras "automático", "automáticamente", "bot", "robot", "asistente virtual" ni "inteligencia artificial". Habla siempre como parte del equipo de BPGO. Si el cliente pregunta directamente si habla con una persona o un robot, no mientas: responde que eres el asistente de BPGO por WhatsApp y ofrece pasarlo con un agente.
@@ -2700,6 +2701,9 @@ async function resolveMapsLink(link) {
 function extractSectorFromText(text) {
   const raw = String(text || "").replace(/https?:\/\/\S+/gi, " ").replace(/\s+/g, " ").trim();
   if (!raw) return null;
+  // Caso real (2026-10-21): un mensaje con "Datos / nombre / RUT / teléfono / correo / dirección" produjo el "sector" "Datos Fulano de Tal 15"
+  // (cortado en el punto del RUT). Un mensaje con RUT, correo o teléfono es una ficha de datos, nunca un sector.
+  if (/\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b|@|\b(?:\+?56)?\s?9\d{8}\b/.test(raw)) return null;
   const stop = new Set(["en", "por", "cerca", "que", "y", "para", "con", "desde", "hacia", "a", "al", "quiero", "necesito", "vivo", "estoy", "tengo"]);
   const named = raw.match(/\bsector\s+(?:de\s+|del\s+)?([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){0,3})/i);
   if (named) {
@@ -2711,7 +2715,7 @@ function extractSectorFromText(text) {
     const candidate = words.join(" ").trim();
     if (candidate.length >= 3 && isPlausibleSector(candidate)) return candidate;
   }
-  const head = raw.split(/[,.;]/)[0].trim();
+  const head = raw.split(/[,;]/)[0].trim();
   if (head && head !== raw && isPlausibleSector(head)) return head;
   return isPlausibleSector(raw) ? raw : null;
 }
@@ -3031,6 +3035,28 @@ async function runBotForInboundMessages(env, changes) {
         const salesLead = await env.DB.prepare(
           "SELECT * FROM whatsapp_sales_leads WHERE phone = ? AND status NOT IN ('completed','cancelled','no_factibilidad') ORDER BY created_at DESC LIMIT 1"
         ).bind(phone).first();
+        // Caso real (2026-10-21): Carlos (a mano) pidió los datos para la instalación; el cliente los mandó horas después, cuando el bot ya
+        // había retomado la conversación, y el bot los tomó como una consulta nueva ("no logré entender"), reinició el embudo y pidió una
+        // ubicación que no hacía falta. Una ficha completa (nombre, RUT, teléfono o correo, y dirección) enviada tras pedirla se entrega a Carlos.
+        if (!isStaffPhone && message.type === "text" && String(text || "").trim() && !(salesLead && salesLead.status === "awaiting_installation_data")) {
+          const dataPackage = classifyInstallationFragment(text, { name: null, address: null });
+          if (dataPackage && dataPackage.rut && (dataPackage.email || dataPackage.phone) && dataPackage.name && dataPackage.address) {
+            const asked = await env.DB.prepare("SELECT 1 AS found FROM whatsapp_inbox_messages WHERE phone = ? AND direction = 'outbound' AND lower(message_text) LIKE ? AND created_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-48 hours') LIMIT 1")
+              .bind(phone, "%datos para realizar la instalaci%").first();
+            if (asked) {
+              const planMention = String(text).match(/\bplan\s+(oro|platino|diamante)\b/i) || String(text).match(/\b(\d{2,3})\s?(?:mb|megas?)\b/i);
+              const planText = planMention ? planMention[0] : null;
+              await env.DB.prepare(`INSERT INTO whatsapp_sales_leads (id, phone, customer_name, status, chosen_plan, installation_name, installation_rut, installation_phone, installation_email, installation_address, created_at, updated_at)
+                VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))`)
+                .bind(crypto.randomUUID(), phone, name || null, planText, dataPackage.name, dataPackage.rut, dataPackage.phone || null, dataPackage.email || null, dataPackage.address).run();
+              await sendBotReply(env, credentials, phone, "¡Perfecto, ya tenemos todos tus datos! Un agente coordinará la instalación contigo a la brevedad. 🙌", preferAudio);
+              await notifyStaff(env, credentials, "carlos", "Nueva contratación", dataPackage.name, phone,
+                `Datos enviados por el cliente tras pedírselos. Plan: ${planText || "no indicado"}. RUT: ${dataPackage.rut}. Tel: ${dataPackage.phone || "—"}. Correo: ${dataPackage.email || "—"}. Dirección: ${dataPackage.address}. Coordinar instalación.`, { sourceMessageId: message.id }).catch(() => null);
+              await setBotSessionMode(env, phone, "human", "case_created_new_customer");
+              continue;
+            }
+          }
+        }
         if (String(text || "").trim() && isRestartRequest(text)) {
           await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = 'cancelled', updated_at = datetime('now') WHERE phone = ? AND status NOT IN ('completed','cancelled','no_factibilidad')").bind(phone).run();
           await env.DB.prepare("DELETE FROM whatsapp_pending_visits WHERE phone = ?").bind(phone).run();
