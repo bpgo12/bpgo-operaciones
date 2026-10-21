@@ -1748,6 +1748,7 @@ El link de pago, los datos de transferencia, el saldo cuando lo preguntan, el no
 # 3. REGLAS DURAS (nunca las rompas)
 - Usa el historial reciente como una conversación continua. Interpreta respuestas cortas (sí, no, ya, listo, correcto, ese, números, fechas o colores) según la última pregunta de BPGO. No vuelvas a pedir nombre, sector, dirección, plan, problema, días sin servicio, reinicio del router ni titular si ya aparecen en el historial o en Cliente identificado.
 - Responde directamente. No repitas saludos, despedidas ni lo que el cliente acaba de decir. Prohibido sonar a bot corporativo o a manual, en español o traducido del inglés: "Estoy aquí para ayudarte", "Si tienes más preguntas", "No dudes en contactarnos", "Quedo atento", "¿Podrías aclarar un poco más a qué te refieres?", "¿En qué puedo ayudarte hoy?", "¿Tienes alguna consulta específica o algo en lo que necesites ayuda?", "Parece que hay un malentendido", "Entiendo que estés molesta/confundida...". Esas frases suenan a bot corporativo, no a una persona real de BPGO escribiendo por WhatsApp. Si el cliente está molesto o confundido, no lo valides con una frase de manual: resuelve su punto en 1 frase, como un colega. No cierres cada respuesta con una pregunta de relleno ("¿necesitas algo más?") ni repitas la misma idea con otras palabras (ej. el saldo o la fecha dos veces). Si de verdad no entendiste, pide que lo repita de forma simple y natural ("no te entendí bien, ¿me lo explicas de nuevo?").
+- NUNCA reveles ni insinúes que la respuesta es automática o que habla con un sistema: no uses las palabras "automático", "automáticamente", "bot", "robot", "asistente virtual" ni "inteligencia artificial". Habla siempre como parte del equipo de BPGO. Si el cliente pregunta directamente si habla con una persona o un robot, no mientas: responde que eres el asistente de BPGO por WhatsApp y ofrece pasarlo con un agente.
 - El campo "text" es siempre el mensaje DIRIGIDO al cliente, nunca una nota sobre él ("el cliente quiere...").
 - NUNCA inventes políticas, plazos, promociones, cupos o reglas de la empresa (por ejemplo "no se pueden cambiar las fechas de pago"). Si algo no está en este prompt, en las FAQs ni en los datos del cliente, usa "escalate".
 - NUNCA prometas ni confirmes el día u hora en que llegará un técnico ("mañana", "hoy", "en la mañana", etc.): solo di que la solicitud quedó registrada y que un agente confirmará el horario.
@@ -1774,6 +1775,7 @@ El link de pago, los datos de transferencia, el saldo cuando lo preguntan, el no
 
 **Contratación nueva**
 - Si el cliente quiere CONTRATAR internet por primera vez (no es cliente ya identificado, o pide un nuevo punto/dirección), usa la acción "new_customer_request" y no digas nada más tú: el sistema pregunta el sector, pide la ubicación, revisa la factibilidad y muestra los planes por su cuenta. Esto incluye cuando el cliente responde a un aviso/campaña de zona nueva habilitada (ej. "sí", "qué valores tiene", "quiero agendar") y cuando pregunta por precios o planes sin estar identificado como cliente. Un cliente ya registrado que quiere otro punto también entra por aquí.
+- Las consultas de cobertura o factibilidad ("¿llega la fibra a X?", "quería consultar la cobertura en el sector X") también son "new_customer_request", aunque el sector no esté en la lista de arriba: el sistema pide la ubicación y el equipo revisa. NUNCA respondas tú que un sector "no está en las zonas con cobertura".
 - Cuando el cliente deja claro que quiere instalarse, conectarse, o retomar/resolver una visita de instalación que quedó pendiente (aunque la situación sea confusa: un cupo, una instalación a medias, alguien de la familia que no estaba), no encadenes varias preguntas parafraseando lo mismo ("¿te refieres a...?", "entiendo que... ¿quieres que...?"): quédate con la interpretación más razonable y avanza directo al siguiente paso concreto, sin darle vueltas.
 
 **Cuándo escalar**
@@ -2249,6 +2251,7 @@ async function executeBotAction(env, credentials, phone, action, message) {
     // 2026-10-15 (Carlos): una foto no es necesariamente un comprobante; la respuesta no debe suponerlo.
     action = { action: "reply", text: "Recibí tu imagen 👍 ¿Me cuentas en qué te puedo ayudar con ella?" };
   }
+  if (action.text) action = { ...action, text: sanitizeBotDisclosure(action.text) };
   const textProblem = action.text ? botTextProblem(action.text) : null;
   if (textProblem) {
     console.error("bot_text_blocked", textProblem);
@@ -2458,12 +2461,22 @@ async function executeBotAction(env, credentials, phone, action, message) {
     // Caso real (2026-10-13, 56912000021): el cliente ya había dicho su sector ("Llenquehue S/N carretera p500") en el mensaje
     // que disparó esta acción y el bot se lo volvió a preguntar. Si el mensaje actual ya parece un sector, se guarda y se pasa
     // directo a pedir la ubicación.
-    const givenSector = String(message.customerText || "").trim();
-    if (givenSector && isPlausibleSector(givenSector)) {
+    // Caso real (2026-10-21): "cobertura en sector Tucapel Alto" + descripción + enlace de Google Maps; el bot preguntó "¿de qué sector nos
+    // escribes?" y luego pidió la ubicación que ya había recibido. Se toma el sector de este mensaje o de los últimos del cliente, y un enlace de
+    // Maps cuenta como ubicación: si hay sector y enlace va directo a factibilidad; si solo hay sector, pide la ubicación.
+    const mapsLinkGiven = extractMapsLink(message.customerText);
+    const sectorGuess = extractSectorFromText(message.customerText) || await findSectorHint(env, phone);
+    if (sectorGuess || mapsLinkGiven) {
+      const newLead = { id: crypto.randomUUID(), phone, customer_name: message.customerName || null, sector: sectorGuess ? sectorGuess.slice(0, 200) : "No indicado (ver ubicación enviada)" };
       await env.DB.prepare(`INSERT INTO whatsapp_sales_leads (id, phone, customer_name, sector, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, 'awaiting_location', datetime('now'), datetime('now'))`)
-        .bind(crypto.randomUUID(), phone, message.customerName || null, givenSector.slice(0, 200)).run();
-      await sendBotReply(env, credentials, phone, "Perfecto, ahora por favor envíanos tu ubicación desde WhatsApp (ícono 📎 > Ubicación) para revisar la factibilidad exacta. 📍", preferAudio);
+        .bind(newLead.id, phone, newLead.customer_name, newLead.sector).run();
+      if (mapsLinkGiven) {
+        const coords = await resolveMapsLink(mapsLinkGiven).catch(() => null);
+        await submitLocationForFactibilidad(env, credentials, newLead, phone, message.customerName, { id: message.messageId }, { ...(coords || {}), link: mapsLinkGiven }, preferAudio);
+      } else {
+        await sendBotReply(env, credentials, phone, "Perfecto, ahora por favor envíanos tu ubicación desde WhatsApp (ícono 📎 > Ubicación) para revisar la factibilidad exacta. 📍", preferAudio);
+      }
       return;
     }
     await env.DB.prepare(`INSERT INTO whatsapp_sales_leads (id, phone, customer_name, status, created_at, updated_at)
@@ -2600,6 +2613,8 @@ async function askForAccountNameOrHandOff(env, credentials, phone, text, message
 function botTextProblem(text) {
   const value = String(text || "");
   if (/\b(el|la) cliente\b/i.test(value)) return "internal_note";
+  // El cliente no debe enterarse de que lo atiende un sistema automático (pedido de Carlos, 2026-10-21).
+  if (/\b(chatbot|robot|asistente virtual|inteligencia artificial|modelo de lenguaje)\b/i.test(value) || /\b(soy|eres|es) (un )?bot\b/i.test(value)) return "reveals_bot";
   const normalized = cyberNormalize(value);
   if (/\b(tecnico|visita)\b.{0,80}\b(manana|hoy|esta tarde|esta noche|en la tarde|a las \d)/.test(normalized)
     || /\b(manana|hoy|esta tarde|esta noche|a las \d).{0,80}\b(tecnico|visita)\b/.test(normalized)
@@ -2635,6 +2650,107 @@ function isPlausibleSector(text) {
 function isPureGreeting(text) {
   const normalized = cyberNormalize(text).replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim();
   return /^(hola|holi|ola|buenas|buenos dias|buen dia|buenas tardes|buenas noches|hola buenas|hola buenos dias|hola buen dia|hola buenas tardes|hola buenas noches)$/.test(normalized);
+}
+
+// Ubicación como enlace de Google Maps (2026-10-21): muchos clientes comparten la ubicación como enlace de texto ("maps.app.goo.gl/...",
+// "goo.gl/maps/...") en vez de la ubicación nativa de WhatsApp. El bot solo aceptaba la nativa y repetía "compártenos tu ubicación" aunque ya la
+// hubieran enviado. Ahora un enlace de Google Maps cuenta como ubicación (se intenta sacar las coordenadas; si no se puede, igual se envía el enlace).
+const MAPS_LINK_PATTERN = /https?:\/\/(?:maps\.app\.goo\.gl|goo\.gl\/maps|(?:www\.)?google\.[a-z.]+\/maps|maps\.google\.[a-z.]+)\/?[^\s]*/i;
+
+function extractMapsLink(text) {
+  const match = String(text || "").match(MAPS_LINK_PATTERN);
+  return match ? match[0].replace(/[).,;]+$/, "") : null;
+}
+
+function coordinatesFromMapsUrl(url) {
+  const value = String(url || "");
+  const patterns = [
+    /@(-?\d{1,3}\.\d+),(-?\d{1,3}\.\d+)/,
+    /[?&](?:q|ll|query|destination|center)=(-?\d{1,3}\.\d+)(?:,|%2C)(-?\d{1,3}\.\d+)/i,
+    /!3d(-?\d{1,3}\.\d+)!4d(-?\d{1,3}\.\d+)/,
+  ];
+  for (const pattern of patterns) {
+    const match = value.match(pattern);
+    if (match) {
+      const latitude = Number(match[1]);
+      const longitude = Number(match[2]);
+      if (Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180) return { latitude, longitude };
+    }
+  }
+  return null;
+}
+
+// Mejor esfuerzo: nunca lanza ni demora la conversación más de unos segundos.
+async function resolveMapsLink(link) {
+  let current = String(link || "");
+  const direct = coordinatesFromMapsUrl(current);
+  if (direct) return direct;
+  for (let hop = 0; hop < 4; hop += 1) {
+    const response = await fetch(current, { redirect: "manual", signal: AbortSignal.timeout(4000) }).catch(() => null);
+    const next = response?.headers?.get("location");
+    if (!next) return null;
+    current = new URL(next, current).toString();
+    const found = coordinatesFromMapsUrl(current);
+    if (found) return found;
+  }
+  return null;
+}
+
+// Un sector mencionado en el mensaje ("...cobertura en sector Tucapel Alto en Cañete", "Tucapel Alto, desde el hospital hacia dentro...").
+function extractSectorFromText(text) {
+  const raw = String(text || "").replace(/https?:\/\/\S+/gi, " ").replace(/\s+/g, " ").trim();
+  if (!raw) return null;
+  const stop = new Set(["en", "por", "cerca", "que", "y", "para", "con", "desde", "hacia", "a", "al", "quiero", "necesito", "vivo", "estoy", "tengo"]);
+  const named = raw.match(/\bsector\s+(?:de\s+|del\s+)?([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){0,3})/i);
+  if (named) {
+    const words = [];
+    for (const word of named[1].split(" ")) {
+      if (stop.has(word.toLowerCase())) break;
+      words.push(word);
+    }
+    const candidate = words.join(" ").trim();
+    if (candidate.length >= 3 && isPlausibleSector(candidate)) return candidate;
+  }
+  const head = raw.split(/[,.;]/)[0].trim();
+  if (head && head !== raw && isPlausibleSector(head)) return head;
+  return isPlausibleSector(raw) ? raw : null;
+}
+
+// Si el cliente ya dijo su sector en mensajes anteriores, no se le vuelve a preguntar.
+async function findSectorHint(env, phone) {
+  const rows = (await env.DB.prepare("SELECT message_text FROM whatsapp_inbox_messages WHERE phone = ? AND direction = 'inbound' AND message_type = 'text' ORDER BY created_at DESC LIMIT 6")
+    .bind(phone).all()).results || [];
+  for (const row of rows) {
+    const sector = extractSectorFromText(row.message_text);
+    if (sector) return sector;
+  }
+  return null;
+}
+
+// Guarda la ubicación (coordenadas o solo el enlace), avisa al cliente y manda a Carlos la solicitud de factibilidad.
+async function submitLocationForFactibilidad(env, credentials, lead, phone, name, message, location, preferAudio) {
+  const latitude = location?.latitude ?? null;
+  const longitude = location?.longitude ?? null;
+  await env.DB.prepare("UPDATE whatsapp_sales_leads SET sector = COALESCE(?, sector), latitude = ?, longitude = ?, status = 'awaiting_factibilidad', updated_at = datetime('now') WHERE id = ?")
+    .bind(lead.sector || null, latitude, longitude, lead.id).run();
+  await sendBotReply(env, credentials, phone, "¡Gracias! Ya estamos revisando la factibilidad en tu zona, te avisamos apenas tengamos la confirmación. 🙏", preferAudio);
+  const coordsLink = latitude != null && longitude != null ? `https://www.google.com/maps?q=${latitude},${longitude}` : null;
+  const customerLink = location?.link || null;
+  const shown = coordsLink || customerLink || "no indicada";
+  const extra = coordsLink && customerLink && customerLink !== coordsLink ? ` (enlace del cliente: ${customerLink})` : "";
+  await notifyStaff(env, credentials, "carlos", "Solicitud de factibilidad", name || lead.customer_name, phone,
+    `Sector: ${lead.sector || "no indicado"}. Ubicación: ${shown}${extra}`, { caseId: null, factibilidadLeadId: lead.id, sourceMessageId: message.id });
+}
+
+// Nunca revelar que quien responde es automático (pedido de Carlos, 2026-10-21): se quitan las palabras "automático/automáticamente".
+function sanitizeBotDisclosure(text) {
+  return String(text || "")
+    .replace(/,?\s*\b(?:de forma|de manera|en forma)\s+autom[aá]tic[ao]\b/gi, "")
+    .replace(/,?\s*\bautom[aá]ticamente\b/gi, "")
+    .replace(/\bautom[aá]tic[ao]s?\b/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .trim();
 }
 
 async function guardAgainstBotLoop(env, credentials, phone, message) {
@@ -2961,6 +3077,14 @@ async function runBotForInboundMessages(env, changes) {
             await sendBotReply(env, credentials, phone, "Entendido, no seguimos con la solicitud. Cualquier cosa, escríbenos. 🙌", preferAudio);
             continue;
           }
+          if (salesLead.status === "awaiting_sector" && String(text || "").trim() && extractMapsLink(text) && !isPlausibleSector(text)) {
+            const linkInSector = extractMapsLink(text);
+            const hint = await findSectorHint(env, phone);
+            const coordsInSector = await resolveMapsLink(linkInSector).catch(() => null);
+            await submitLocationForFactibilidad(env, credentials, { ...salesLead, sector: hint || salesLead.sector || "No indicado (ver ubicación enviada)" }, phone, name, message,
+              { ...(coordsInSector || {}), link: linkInSector }, preferAudio);
+            continue;
+          }
           if (salesLead.status === "awaiting_sector" && String(text || "").trim()) {
             // Cualquier texto se guardaba como "sector": "Hola muy buenas tardes", "¿se podría?", "ok gracias" y hasta
             // el nombre de un PDF de Webpay quedaron como sector en producción. Solo se acepta algo que parezca un lugar.
@@ -2976,12 +3100,11 @@ async function runBotForInboundMessages(env, changes) {
           if (salesLead.status === "awaiting_location") {
             if (message.location?.latitude && message.location?.longitude) {
               const { latitude, longitude } = message.location;
-              await env.DB.prepare("UPDATE whatsapp_sales_leads SET latitude = ?, longitude = ?, status = 'awaiting_factibilidad', updated_at = datetime('now') WHERE id = ?")
-                .bind(latitude, longitude, salesLead.id).run();
-              await sendBotReply(env, credentials, phone, "¡Gracias! Ya estamos revisando la factibilidad en tu zona, te avisamos apenas tengamos la confirmación. 🙏", preferAudio);
-              const mapsLink = `https://www.google.com/maps?q=${latitude},${longitude}`;
-              await notifyStaff(env, credentials, "carlos", "Solicitud de factibilidad", name || salesLead.customer_name, phone,
-                `Sector: ${salesLead.sector || "no indicado"}. Ubicación: ${mapsLink}`, { caseId: null, factibilidadLeadId: salesLead.id, sourceMessageId: message.id });
+              await submitLocationForFactibilidad(env, credentials, salesLead, phone, name, message, { latitude, longitude }, preferAudio);
+            } else if (extractMapsLink(text)) {
+              const locationLink = extractMapsLink(text);
+              const coordsFromLink = await resolveMapsLink(locationLink).catch(() => null);
+              await submitLocationForFactibilidad(env, credentials, salesLead, phone, name, message, { ...(coordsFromLink || {}), link: locationLink }, preferAudio);
             } else {
               // Caso real (2026-10-02): una persona mayor que no sabía compartir la ubicación recibió
               // el mismo recordatorio 5 veces seguidas. Tras un primer recordatorio se escala a un

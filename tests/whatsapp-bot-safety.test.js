@@ -941,7 +941,7 @@ assert.match(worker, /return "Gracias por tu mensaje\. Estamos fuera de horario 
 }
 
 // 2026-10-13 (56912000021): si el mensaje que dispara new_customer_request ya trae el sector, no se vuelve a preguntar.
-assert.match(worker, /const givenSector = String\(message\.customerText \|\| ""\)\.trim\(\);\s*\n\s*if \(givenSector && isPlausibleSector\(givenSector\)\) \{/);
+assert.match(worker, /const sectorGuess = extractSectorFromText\(message\.customerText\) \|\| await findSectorHint\(env, phone\);/);
 assert.match(worker, /VALUES \(\?, \?, \?, \?, 'awaiting_location', datetime\('now'\), datetime\('now'\)\)/);
 
 // 2026-10-13 (56912000016): una solicitud del embudo anterior a una intervención humana manual se cancela al volver el bot.
@@ -1043,3 +1043,45 @@ assert.match(worker, /let billingRevalidationCache = \{ at: 0, month: null, pars
   const bad = make([badResponse]);
   await assert.rejects(() => bad.api.fetchFreshBillingSource({}), /Causa: HTTP 502 \(Apps Script no disponible\)/);
 })().catch((error) => { console.error(error); process.exit(1); });
+
+// 2026-10-21: un enlace de Google Maps cuenta como ubicación; el sector se toma de los mensajes del cliente; nunca se delata que es automático.
+{
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(`
+    ${functionSource("cyberNormalize")}
+    ${functionSource("isPureGreeting")}
+    ${functionSource("isClosingPleasantry")}
+    ${functionSource("isHumanRequest")}
+    ${functionSource("isPlausibleSector")}
+    ${worker.slice(worker.indexOf("const MAPS_LINK_PATTERN"), worker.indexOf("function coordinatesFromMapsUrl"))}
+    ${functionSource("coordinatesFromMapsUrl")}
+    ${functionSource("extractSectorFromText")}
+    ${functionSource("sanitizeBotDisclosure")}
+    ${functionSource("botTextProblem")}
+    this.api = { extractMapsLink, coordinatesFromMapsUrl, extractSectorFromText, sanitizeBotDisclosure, botTextProblem };
+  `, ctx);
+  const api2 = ctx.api;
+  assert.equal(api2.extractMapsLink("https://maps.app.goo.gl/AbCdEf123"), "https://maps.app.goo.gl/AbCdEf123");
+  assert.equal(api2.extractMapsLink("mira: https://goo.gl/maps/Q1w2E3r4?g_st=aw."), "https://goo.gl/maps/Q1w2E3r4?g_st=aw");
+  assert.equal(api2.extractMapsLink("https://www.google.com/maps/place/Algo/@-37.80,-73.22,17z"), "https://www.google.com/maps/place/Algo/@-37.80,-73.22,17z");
+  assert.equal(api2.extractMapsLink("https://bpgo.cl/pagar"), null);
+  assert.equal(api2.extractMapsLink("hola buenas"), null);
+  assert.deepEqual(JSON.parse(JSON.stringify(api2.coordinatesFromMapsUrl("https://www.google.com/maps/place/Algo/@-37.8013,-73.2263,17z"))), { latitude: -37.8013, longitude: -73.2263 });
+  assert.deepEqual(JSON.parse(JSON.stringify(api2.coordinatesFromMapsUrl("https://www.google.com/maps?q=-37.8013,-73.2263"))), { latitude: -37.8013, longitude: -73.2263 });
+  assert.equal(api2.coordinatesFromMapsUrl("https://maps.app.goo.gl/AbCdEf123"), null);
+  assert.equal(api2.extractSectorFromText("Quería consultar sobre la cobertura en sector Valle Alto  en Cañete"), "Valle Alto");
+  assert.equal(api2.extractSectorFromText("Valle Alto , desde el hospital hacia dentro entre el paradero 3 y el 4"), "Valle Alto");
+  assert.equal(api2.extractSectorFromText("Lomas Verdes Cañete"), "Lomas Verdes Cañete");
+  assert.equal(api2.extractSectorFromText("Hola buen día"), null);
+  assert.equal(api2.extractSectorFromText("https://maps.app.goo.gl/AbCdEf123"), null);
+  assert.equal(api2.sanitizeBotDisclosure("Este sector no está en las zonas con cobertura confirmada automáticamente, pero puedo consultar con el equipo."), "Este sector no está en las zonas con cobertura confirmada, pero puedo consultar con el equipo.");
+  assert.equal(api2.sanitizeBotDisclosure("Tu pago se registra de forma automática."), "Tu pago se registra.");
+  assert.equal(api2.botTextProblem("Soy un robot de BPGO"), "reveals_bot");
+  assert.equal(api2.botTextProblem("Soy el asistente virtual de BPGO"), "reveals_bot");
+  assert.equal(api2.botTextProblem("Tu comprobante está en revisión."), null);
+}
+assert.match(worker, /\} else if \(extractMapsLink\(text\)\) \{/);
+assert.match(worker, /await submitLocationForFactibilidad\(env, credentials, salesLead, phone, name, message, \{ latitude, longitude \}, preferAudio\);/);
+assert.match(worker, /NUNCA reveles ni insinúes que la respuesta es automática/);
+assert.match(worker, /action = \{ \.\.\.action, text: sanitizeBotDisclosure\(action\.text\) \};/);
