@@ -1143,3 +1143,20 @@ assert.match(fs.readFileSync(path.join(__dirname, "..", "assets", "whatsapp-onbo
 })().catch((error) => { console.error(error); process.exit(1); });
 assert.match(worker, /const expected = officialMatches\.find\(\(candidate\) => candidate\.status === "CONNECTED"\) \|\| officialMatches\[0\];/);
 assert.match(worker, /await reconcileWhatsAppPhoneNumber\(env, await getWhatsAppCredentials\(env\)\);\s*\n\s*const result = await runBillingAutomation\(env\);/);
+
+// 2026-10-22: diagnóstico de solo lectura del número en Meta (plataforma, modo y salud de envío), sin exponer el token.
+(async () => {
+  let calledUrl = "";
+  const ctx = { AbortSignal, String, Array, Promise, JSON, encodeURIComponent };
+  ctx.fetch = async (url) => { calledUrl = String(url); return { ok: true, json: async () => ({ status: "CONNECTED", platform_type: "CLOUD_API", health_status: { can_send_message: "BLOCKED", entities: [{ entity_type: "PHONE_NUMBER", can_send_message: "BLOCKED", errors: [{ error_code: 141000, error_description: "demo", possible_solution: "demo" }] }] } }) }; };
+  vm.createContext(ctx);
+  vm.runInContext(`async ${functionSource("getMetaPhoneDiagnostic")}; this.api = { getMetaPhoneDiagnostic };`, ctx);
+  const result = await ctx.api.getMetaPhoneDiagnostic({ accessToken: "tok", phoneNumberId: "123" });
+  assert.match(calledUrl, /\/123\?fields=status,platform_type,account_mode,/);
+  assert.equal(result.platformType, "CLOUD_API");
+  assert.equal(result.canSendMessage, "BLOCKED");
+  assert.equal(result.entities[0].errors[0].code, 141000);
+  assert.equal(JSON.stringify(result).includes("tok"), false);
+  assert.equal(await ctx.api.getMetaPhoneDiagnostic({}), null);
+})().catch((error) => { console.error(error); process.exit(1); });
+assert.match(worker, /metaDiagnostic: await getMetaPhoneDiagnostic\(credentials\),/);

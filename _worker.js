@@ -135,6 +135,26 @@ async function getMetaPhoneConnection(credentials) {
   };
 }
 
+// 2026-10-22: el número figuraba CONNECTED pero los envíos seguían con 133010. Estos campos de Meta (plataforma, modo, salud de envío) dicen por qué
+// y sirven de evidencia para soporte. Solo lectura y sin secretos: se muestran en GET /api/whatsapp/onboarding (superadministrador).
+async function getMetaPhoneDiagnostic(credentials) {
+  try {
+    if (!credentials?.accessToken || !credentials?.phoneNumberId) return null;
+    const response = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}?fields=status,platform_type,account_mode,code_verification_status,name_status,is_pin_enabled,health_status`, {
+      headers: { authorization: `Bearer ${credentials.accessToken}` }, signal: AbortSignal.timeout(8000),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) return { error: payload.error?.message || "Meta rechazó la consulta", errorCode: payload.error?.code };
+    const entities = Array.isArray(payload.health_status?.entities) ? payload.health_status.entities.map((item) => ({
+      type: item.entity_type, canSend: item.can_send_message, errors: (item.errors || []).map((error) => ({ code: error.error_code, description: error.error_description, solution: error.possible_solution })),
+    })) : [];
+    return {
+      status: payload.status, platformType: payload.platform_type, accountMode: payload.account_mode, codeVerification: payload.code_verification_status,
+      nameStatus: payload.name_status, pinEnabled: payload.is_pin_enabled, canSendMessage: payload.health_status?.can_send_message, entities,
+    };
+  } catch { return null; }
+}
+
 function equalBytes(left, right) {
   if (left.length !== right.length) return false;
   let difference = 0;
@@ -5030,6 +5050,7 @@ export default {
         connected: hasEmbeddedCredentials && metaPhone.connected,
         needsCompletion: hasEmbeddedCredentials && !metaPhone.connected,
         metaPhoneStatus: metaPhone.status,
+        metaDiagnostic: await getMetaPhoneDiagnostic(credentials),
         appId,
         configId,
         featureType,
