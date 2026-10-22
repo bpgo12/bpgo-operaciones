@@ -185,6 +185,12 @@
         // exchange now. If they are still missing, finishSignup safely waits
         // for the message event instead.
         finishSignup(panel);
+        // 2026-10-22: tras cambiar de teléfono, Meta entrega la autorización pero NO muestra el paso del QR ni envía el evento FINISH, y el
+        // panel quedaba esperando para siempre. El servidor ya sabe resolver el número autorizado (+56 9 4198 5967) a partir del código, así
+        // que si en 15 s no llegó el evento, se completa con esa resolución automática.
+        window.setTimeout(function () {
+          if (signupResult.code && !signupResult.completed && !signupResult.exchangeStarted) finishSignup(panel, true);
+        }, 15000);
       }, {
         config_id: onboarding.configId,
         response_type: "code",
