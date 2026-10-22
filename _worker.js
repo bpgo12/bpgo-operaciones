@@ -5037,11 +5037,15 @@ export default {
       if (body.confirm !== "DESREGISTRAR") return Response.json({ ok: false, error: "Falta la confirmación." }, { status: 400 });
       const credentials = await getWhatsAppCredentials(env);
       if (!credentials.accessToken || !/^\d+$/.test(String(credentials.phoneNumberId || ""))) return Response.json({ ok: false, error: "No hay un número configurado." }, { status: 400 });
-      const response = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/deregister`, {
-        method: "POST", headers: { authorization: `Bearer ${credentials.accessToken}` }, signal: AbortSignal.timeout(15000),
-      });
-      const payload = await response.json().catch(() => ({}));
-      return Response.json({ ok: response.ok && payload.success === true, status: response.status, success: payload.success, error: payload.error?.message, errorCode: payload.error?.code }, { status: response.ok ? 200 : 502 });
+      try {
+        const response = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/deregister`, {
+          method: "POST", headers: { authorization: `Bearer ${credentials.accessToken}` }, signal: AbortSignal.timeout(15000),
+        });
+        const payload = await response.json().catch(() => ({}));
+        return Response.json({ ok: response.ok && payload.success === true, status: response.status, success: payload.success, error: payload.error?.message, errorCode: payload.error?.code }, { status: 200 });
+      } catch (error) {
+        return Response.json({ ok: false, error: `No se pudo consultar a Meta: ${error?.name || "error"}` }, { status: 200 });
+      }
     }
 
     if (url.pathname === "/api/whatsapp/onboarding" && request.method === "GET") {
