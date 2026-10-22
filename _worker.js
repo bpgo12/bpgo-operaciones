@@ -3865,7 +3865,9 @@ async function runBillingAutomationIfDue(env) {
   if (clock.minutes < 10 * 60 + 15 || clock.minutes >= 19 * 60 + 30) return null;
   await ensureBillingAutomationTables(env);
   const month = billingMonthKey(now);
-  const done = await env.DB.prepare("SELECT 1 AS found FROM billing_automation_runs WHERE billing_month = ? AND stage = ? AND status = 'completed' LIMIT 1").bind(month, stage).first();
+  // Una corrida "completada" donde TODOS los envíos fallaron (2026-10-22: número de WhatsApp desregistrado, error 133010) no cuenta como hecha:
+  // el respaldo debe seguir reintentando hasta que realmente salgan.
+  const done = await env.DB.prepare("SELECT 1 AS found FROM billing_automation_runs WHERE billing_month = ? AND stage = ? AND status = 'completed' AND (failed_count = 0 OR sent_count > 0) LIMIT 1").bind(month, stage).first();
   if (done) return null;
   const slot = `${month}:${stage}:${now.toISOString().slice(0, 15)}`; // una corrida por franja de 10 minutos
   if (!(await claimInboundMessageForBot(env, `billing-run:${slot}`))) return null;

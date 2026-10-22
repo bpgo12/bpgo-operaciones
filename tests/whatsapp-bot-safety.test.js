@@ -1110,3 +1110,6 @@ assert.match(worker, /\.bind\(phone, "%datos para realizar la instalaci%"\)\.fir
 assert.match(worker, /dataPackage\.rut && \(dataPackage\.email \|\| dataPackage\.phone\) && dataPackage\.name && dataPackage\.address/);
 assert.match(worker, /history = history\.slice\(-16\);/);
 assert.match(worker, /LEE TODO el historial antes de responder/);
+
+// 2026-10-22: una corrida con todos los envíos fallidos no cierra la cobranza del día; el respaldo sigue reintentando.
+assert.match(worker, /status = 'completed' AND \(failed_count = 0 OR sent_count > 0\) LIMIT 1/);
