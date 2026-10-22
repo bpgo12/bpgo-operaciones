@@ -3811,9 +3811,11 @@ async function runBillingAutomation(env, options = {}) {
   let sent = 0;
   let failed = 0;
   for (const candidate of parsed.eligible) {
-    const previous = await env.DB.prepare(`SELECT status FROM billing_automation_sends
+    const previous = await env.DB.prepare(`SELECT status, error_code FROM billing_automation_sends
       WHERE billing_month=? AND stage=? AND phone=? AND is_test=0`).bind(month, stage, candidate.phone).first();
     if (previous && ["accepted", "sent", "delivered", "read"].includes(previous.status)) continue;
+    // 131026 = "Message undeliverable" (el número no tiene WhatsApp o no puede recibir): reintentarlo en cada corrida del día no sirve de nada.
+    if (previous && previous.status === "failed" && String(previous.error_code || "") === "131026") continue;
     let item;
     try { item = await revalidateBillingRecipient(env, candidate.phone, date); } catch (error) {
       await env.DB.prepare(`INSERT INTO billing_automation_runs
@@ -3828,7 +3830,7 @@ async function runBillingAutomation(env, options = {}) {
       (billing_month,stage,phone,customer_id,customer_name,amount,template_name,status,is_test,created_at,updated_at)
       VALUES (?,?,?,?,?,?,?,'pending',0,datetime('now'),datetime('now'))
       ON CONFLICT(billing_month,stage,phone) WHERE is_test=0 DO UPDATE SET status='pending',error_code=NULL,error_message=NULL,updated_at=datetime('now')
-        WHERE billing_automation_sends.status='failed' OR (billing_automation_sends.status='pending' AND billing_automation_sends.updated_at < datetime('now','-10 minutes'))`)
+        WHERE (billing_automation_sends.status='failed' AND COALESCE(billing_automation_sends.error_code,'') != '131026') OR (billing_automation_sends.status='pending' AND billing_automation_sends.updated_at < datetime('now','-10 minutes'))`)
       .bind(month, stage, item.phone, item.customerId, item.customerName, item.amount, template.name).run();
     if (claim?.meta && Number(claim.meta.changes) === 0) continue;
     const result = await sendBillingAutomationTemplate(env, stage, item.phone);

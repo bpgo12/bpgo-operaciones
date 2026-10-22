@@ -10,6 +10,11 @@ on:
     - cron: "15 13 * * *"
     - cron: "45 13 * * *"
     - cron: "15 14 * * *"
+    # Franjas extra: GitHub retrasa los cron por horas (2026-10-22 aun no había corrido a las 11:00 hora Chile). Es idempotente: no duplica envíos.
+    - cron: "5 15 * * *"
+    - cron: "35 15 * * *"
+    - cron: "5 16 * * *"
+    - cron: "5 17 * * *"
   workflow_dispatch:
 
 concurrency:

@@ -1010,7 +1010,8 @@ assert.match(worker, /ya quedó ingresado ✅/);
 // 2026-10-20: la cobranza automática dependía solo del cron de GitHub (retrasos de 3-6 h). Respaldo desde los webhooks, con reclamo atómico por cliente.
 assert.match(worker, /async function runBillingAutomationIfDue\(env\)/);
 assert.match(worker, /clock\.minutes < 10 \* 60 \+ 15 \|\| clock\.minutes >= 19 \* 60 \+ 30/);
-assert.match(worker, /WHERE billing_automation_sends\.status='failed' OR \(billing_automation_sends\.status='pending' AND billing_automation_sends\.updated_at < datetime\('now','-10 minutes'\)\)/);
+assert.match(worker, /WHERE \(billing_automation_sends\.status='failed' AND COALESCE\(billing_automation_sends\.error_code,''\) != '131026'\) OR \(billing_automation_sends\.status='pending' AND billing_automation_sends\.updated_at < datetime\('now','-10 minutes'\)\)/);
+assert.match(worker, /previous\.status === "failed" && String\(previous\.error_code \|\| ""\) === "131026"/);
 assert.match(worker, /if \(claim\?\.meta && Number\(claim\.meta\.changes\) === 0\) continue;/);
 assert.match(worker, /let billingRevalidationCache = \{ at: 0, month: null, parsed: null \};/);
 
