@@ -139,7 +139,7 @@
       signupResult.completed = true;
       showStatus(panel, data.connected
         ? "Conexión y recepción de mensajes activadas para " + (data.displayPhoneNumber || "el número BPGO") + "."
-        : "Autorización guardada para " + (data.displayPhoneNumber || "el número BPGO") + ". Falta completar el registro final en Meta.", data.connected ? "success" : "pending");
+        : "Autorización guardada para " + (data.displayPhoneNumber || "el número BPGO") + ". Falta completar el registro final en Meta" + (data.status ? " (estado del número en Meta: " + data.status + ")" : "") + ".", data.connected ? "success" : "pending");
       window.setTimeout(function () { loadStatus(panel); }, 1800);
     } catch (error) {
       signupResult.saving = false;

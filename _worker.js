@@ -83,6 +83,28 @@ function normalizeWhatsAppPhone(value) {
   return phone;
 }
 
+// 2026-10-22: tras cambiar de teléfono, Meta puede dejar dos "números" con el mismo teléfono en la cuenta (el viejo, desregistrado, y uno nuevo
+// CONECTADO con otro id). La plataforma seguía usando el id viejo y todos los envíos fallaban con 133010 "Account not registered". Si el número
+// guardado no está CONECTADO pero la misma cuenta tiene el teléfono oficial CONECTADO con otro id, se actualiza el id guardado (el token no cambia).
+const OFFICIAL_WHATSAPP_DIGITS = "56941985967";
+async function reconcileWhatsAppPhoneNumber(env, credentials) {
+  try {
+    if (!env.DB || !credentials?.accessToken || !/^\d+$/.test(String(credentials.wabaId || "")) || credentials.source !== "embedded-signup") return { changed: false, reason: "not_applicable" };
+    const response = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.wabaId)}/phone_numbers?fields=id,display_phone_number,status&limit=100`, {
+      headers: { authorization: `Bearer ${credentials.accessToken}` }, signal: AbortSignal.timeout(8000),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !Array.isArray(payload.data)) return { changed: false, reason: "graph_error" };
+    const official = payload.data.filter((item) => String(item.display_phone_number || "").replace(/\D/g, "") === OFFICIAL_WHATSAPP_DIGITS);
+    const current = official.find((item) => String(item.id) === String(credentials.phoneNumberId));
+    if (current && String(current.status || "").toUpperCase() === "CONNECTED") return { changed: false, reason: "already_connected" };
+    const connected = official.find((item) => String(item.status || "").toUpperCase() === "CONNECTED" && String(item.id) !== String(credentials.phoneNumberId));
+    if (!connected || !/^\d+$/.test(String(connected.id))) return { changed: false, reason: "no_connected_candidate", seen: official.map((item) => `${item.id}:${item.status}`) };
+    await env.DB.prepare("UPDATE whatsapp_onboarding_config SET phone_number_id = ?, updated_at = datetime('now') WHERE id = 'primary'").bind(String(connected.id)).run();
+    return { changed: true, phoneNumberId: String(connected.id) };
+  } catch { return { changed: false, reason: "error" }; }
+}
+
 async function getMetaPhoneConnection(credentials) {
   if (!credentials.accessToken || !credentials.phoneNumberId) {
     return { ok: false, connected: false, status: "UNCONFIGURED", error: "Configuracion incompleta" };
@@ -4909,6 +4931,7 @@ export default {
     if (url.pathname === "/api/billing/automation/run" && request.method === "POST") {
       const oidc = await verifyBillingAutomationOidc(request);
       if (!oidc) return Response.json({ ok: false, error: "Ejecución automática no autorizada." }, { status: 401 });
+      await reconcileWhatsAppPhoneNumber(env, await getWhatsAppCredentials(env));
       const result = await runBillingAutomation(env);
       return Response.json(result, { status: result.ok || result.skipped || result.blocked ? 200 : 502 });
     }
@@ -4925,11 +4948,12 @@ export default {
       const morning = await resumeAfterHoursChats(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
       // Crea (si falta) la plantilla de recordatorio v2 y refresca su estado de aprobación en Meta.
       const reminderV2 = await manualReminderV2Status(env, true).catch(() => "UNAVAILABLE");
+      const phoneReconcile = await reconcileWhatsAppPhoneNumber(env, await getWhatsAppCredentials(env)).catch(() => null);
       // Los avisos en cola por el espaciado de 90 s solo se despachaban al llegar otro webhook de Meta; en una
       // hora tranquila podían quedar horas sin salir. La corrida de 10 minutos también vacía la cola.
       const flushed = await flushQueuedStaffNotifications(env).catch((error) => ({ ok: false, error: String(error?.message || error) }));
       const expired = await expireStaleConversationState(env).then(() => ({ ok: true })).catch((error) => ({ ok: false, error: String(error?.message || error) }));
-      return Response.json({ ...result, takeover, digest, morning, reminderV2, flushed, expired }, { status: result.ok ? 200 : 502 });
+      return Response.json({ ...result, takeover, digest, morning, reminderV2, phoneReconcile, flushed, expired }, { status: result.ok ? 200 : 502 });
     }
 
     if (url.pathname === "/api/billing/automation" && request.method === "GET") {
@@ -4991,7 +5015,14 @@ export default {
       const appId = String(env.META_APP_ID || "").trim();
       const configId = String(env.META_EMBEDDED_SIGNUP_CONFIG_ID || "").trim();
       const featureType = String(env.META_EMBEDDED_SIGNUP_FEATURE || "").trim();
-      const metaPhone = await getMetaPhoneConnection(credentials);
+      let metaPhone = await getMetaPhoneConnection(credentials);
+      if (!metaPhone.connected) {
+        const reconciled = await reconcileWhatsAppPhoneNumber(env, credentials);
+        if (reconciled.changed) {
+          credentials.phoneNumberId = reconciled.phoneNumberId;
+          metaPhone = await getMetaPhoneConnection(credentials);
+        }
+      }
       const hasEmbeddedCredentials = Boolean(credentials.accessToken && credentials.phoneNumberId && credentials.wabaId && credentials.source === "embedded-signup");
       return Response.json({
         ok: true,
@@ -5076,6 +5107,7 @@ export default {
                 wabaId: accountId,
                 phoneNumberId: String(number.id),
                 displayPhoneNumber: String(number.display_phone_number || ""),
+                status: String(number.status || "").toUpperCase(),
               });
             }
           }
@@ -5083,7 +5115,8 @@ export default {
         const uniqueCandidates = candidates.filter((candidate, index, list) =>
           list.findIndex((item) => item.phoneNumberId === candidate.phoneNumberId) === index
         );
-        const expected = uniqueCandidates.find((candidate) => candidate.displayPhoneNumber.replace(/\D/g, "") === "56941985967");
+        const officialMatches = uniqueCandidates.filter((candidate) => candidate.displayPhoneNumber.replace(/\D/g, "") === "56941985967");
+        const expected = officialMatches.find((candidate) => candidate.status === "CONNECTED") || officialMatches[0];
         const selected = expected || (uniqueCandidates.length === 1 ? uniqueCandidates[0] : null);
         if (!selected) {
           return Response.json({

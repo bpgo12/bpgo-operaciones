@@ -1116,3 +1116,30 @@ assert.match(worker, /status = 'completed' AND \(failed_count = 0 OR sent_count 
 
 // 2026-10-22: si Meta entrega la autorización pero no el evento FINISH (ni el paso del QR), el panel completa con la resolución automática del servidor.
 assert.match(fs.readFileSync(path.join(__dirname, "..", "assets", "whatsapp-onboarding-v43.js"), "utf8"), /if \(signupResult\.code && !signupResult\.completed && !signupResult\.exchangeStarted\) finishSignup\(panel, true\);\s*\n\s*\}, 15000\);/);
+
+// 2026-10-22: si el id de teléfono guardado ya no está CONECTADO pero la cuenta tiene el teléfono oficial CONECTADO con otro id, se actualiza solo.
+(async () => {
+  const run = async (data, credentials) => {
+    const updates = [];
+    const ctx = { AbortSignal, String, Array, Promise, JSON, updates };
+    ctx.fetch = async () => ({ ok: true, json: async () => ({ data }) });
+    ctx.env = { DB: { prepare: (sql) => ({ bind: (value) => ({ run: async () => { updates.push(value); } }) }) } };
+    vm.createContext(ctx);
+    vm.runInContext(`const OFFICIAL_WHATSAPP_DIGITS = "56941985967"; async ${functionSource("reconcileWhatsAppPhoneNumber")}; this.api = { reconcileWhatsAppPhoneNumber };`, ctx);
+    const result = await ctx.api.reconcileWhatsAppPhoneNumber(ctx.env, credentials);
+    return { result, updates };
+  };
+  const base = { accessToken: "tok", wabaId: "111", source: "embedded-signup" };
+  const stale = await run([{ id: "900", display_phone_number: "+56 9 4198 5967", status: "DISCONNECTED" }, { id: "901", display_phone_number: "+56 9 4198 5967", status: "CONNECTED" }], { ...base, phoneNumberId: "900" });
+  assert.equal(stale.result.changed, true);
+  assert.deepEqual(stale.updates, ["901"]);
+  const fine = await run([{ id: "900", display_phone_number: "+56 9 4198 5967", status: "CONNECTED" }], { ...base, phoneNumberId: "900" });
+  assert.equal(fine.result.changed, false);
+  assert.deepEqual(fine.updates, []);
+  const none = await run([{ id: "900", display_phone_number: "+56 9 4198 5967", status: "DISCONNECTED" }], { ...base, phoneNumberId: "900" });
+  assert.equal(none.result.changed, false);
+  const otherNumber = await run([{ id: "950", display_phone_number: "+56 9 1111 2222", status: "CONNECTED" }], { ...base, phoneNumberId: "900" });
+  assert.equal(otherNumber.result.changed, false);
+})().catch((error) => { console.error(error); process.exit(1); });
+assert.match(worker, /const expected = officialMatches\.find\(\(candidate\) => candidate\.status === "CONNECTED"\) \|\| officialMatches\[0\];/);
+assert.match(worker, /await reconcileWhatsAppPhoneNumber\(env, await getWhatsAppCredentials\(env\)\);\s*\n\s*const result = await runBillingAutomation\(env\);/);
