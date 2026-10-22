@@ -5028,6 +5028,22 @@ export default {
       return sendBillingMessages(request, env);
     }
 
+    // 2026-10-22: el número quedó registrado como ON_PREMISE/DISCONNECTED en la API y la app de WhatsApp Business no podía verificarlo. Soporte de WhatsApp
+    // indica quitarlo de la plataforma antes de registrarlo en la app. Acción manual, solo superadministrador y con confirmación escrita; no borra la cuenta ni las plantillas.
+    if (url.pathname === "/api/whatsapp/deregister-number" && request.method === "POST") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session || session.role !== "super_admin") return Response.json({ ok: false, error: "Solo un superadministrador puede hacer esto." }, { status: 403 });
+      const body = await request.json().catch(() => ({}));
+      if (body.confirm !== "DESREGISTRAR") return Response.json({ ok: false, error: "Falta la confirmación." }, { status: 400 });
+      const credentials = await getWhatsAppCredentials(env);
+      if (!credentials.accessToken || !/^\d+$/.test(String(credentials.phoneNumberId || ""))) return Response.json({ ok: false, error: "No hay un número configurado." }, { status: 400 });
+      const response = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/deregister`, {
+        method: "POST", headers: { authorization: `Bearer ${credentials.accessToken}` }, signal: AbortSignal.timeout(15000),
+      });
+      const payload = await response.json().catch(() => ({}));
+      return Response.json({ ok: response.ok && payload.success === true, status: response.status, success: payload.success, error: payload.error?.message, errorCode: payload.error?.code }, { status: response.ok ? 200 : 502 });
+    }
+
     if (url.pathname === "/api/whatsapp/onboarding" && request.method === "GET") {
       const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
       if (!session || session.role !== "super_admin") return Response.json({ ok: false, error: "Solo un superadministrador puede configurar Meta." }, { status: 403 });

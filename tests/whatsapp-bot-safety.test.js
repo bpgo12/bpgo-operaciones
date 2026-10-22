@@ -1160,3 +1160,10 @@ assert.match(worker, /await reconcileWhatsAppPhoneNumber\(env, await getWhatsApp
   assert.equal(await ctx.api.getMetaPhoneDiagnostic({}), null);
 })().catch((error) => { console.error(error); process.exit(1); });
 assert.match(worker, /metaDiagnostic: await getMetaPhoneDiagnostic\(credentials\),/);
+
+// 2026-10-22: desregistrar el número de la API es una acción manual: solo superadministrador, con confirmación escrita y sin tocar plantillas ni la cuenta.
+const deregisterBlock = worker.slice(worker.indexOf('url.pathname === "/api/whatsapp/deregister-number"'), worker.indexOf('url.pathname === "/api/whatsapp/onboarding" && request.method === "GET"'));
+assert.match(deregisterBlock, /session\.role !== "super_admin"/);
+assert.match(deregisterBlock, /body\.confirm !== "DESREGISTRAR"/);
+assert.match(deregisterBlock, /\/deregister`/);
+assert.doesNotMatch(deregisterBlock, /message_templates|DELETE/);
