@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Resultados de anuncios | BPGO</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 960px; margin: 32px auto; padding: 0 16px; color: #1c2b33; }
+    select, button { font-size: 1rem; padding: 8px 12px; border-radius: 8px; border: 1px solid #c9d6d3; }
+    button { background: #0b7a6b; color: #fff; border: 0; cursor: pointer; }
+    table { width: 100%; border-collapse: collapse; margin-top: 20px; font-size: .95rem; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid #e1e8e6; vertical-align: top; }
+    th { background: #f2f5f4; }
+    td.n { text-align: right; font-variant-numeric: tabular-nums; }
+    .muted { color: #5b6b70; font-size: .85rem; }
+    .wrap { overflow-x: auto; }
+    details summary { cursor: pointer; color: #0b7a6b; }
+  </style>
+</head>
+<body>
+  <h1>Resultados de anuncios</h1>
+  <p>Personas que escribieron por WhatsApp desde un anuncio de Facebook o Instagram, agrupadas por anuncio. Solo funciona con tu sesión abierta en operaciones.bpgo.cl.</p>
+  <label>Período
+    <select id="days">
+      <option value="7">Últimos 7 días</option>
+      <option value="30" selected>Últimos 30 días</option>
+      <option value="90">Últimos 90 días</option>
+    </select>
+  </label>
+  <button type="button" id="go">Ver resultados</button>
+  <p id="status" class="muted"></p>
+  <div class="wrap"><table id="table" hidden>
+    <thead><tr><th>Anuncio</th><th>Conversaciones</th><th>Leads de venta</th><th>Contratos completados</th><th>Contactos</th></tr></thead>
+    <tbody></tbody>
+  </table></div>
+  <script>
+    var STATUS = { completed: "completado", awaiting_installation_data: "datos de instalación", awaiting_plan: "eligiendo plan",
+      awaiting_factibilidad: "revisando factibilidad", awaiting_location: "esperando ubicación", awaiting_sector: "esperando sector",
+      awaiting_group_clarification: "aclarando sector", no_factibilidad: "sin factibilidad", cancelled: "cancelado" };
+    function cell(text, cls) { var td = document.createElement("td"); td.textContent = text; if (cls) td.className = cls; return td; }
+    async function load() {
+      var status = document.getElementById("status"), table = document.getElementById("table"), body = table.querySelector("tbody");
+      status.textContent = "Cargando…"; table.hidden = true; body.textContent = "";
+      try {
+        var response = await fetch("/api/whatsapp/ad-referrals?days=" + document.getElementById("days").value, { credentials: "same-origin" });
+        var data = await response.json();
+        if (!data.ok) { status.textContent = data.error || ("Error " + response.status); return; }
+        if (!data.ads.length) { status.textContent = "Nadie ha escrito desde un anuncio en este período."; return; }
+        data.ads.forEach(function (ad) {
+          var tr = document.createElement("tr");
+          var name = cell(ad.headline || "(anuncio sin título)");
+          var meta = document.createElement("div"); meta.className = "muted";
+          meta.textContent = (ad.adId ? "ID " + ad.adId + " · " : "") + (ad.firstAt || "").slice(0, 10) + " a " + (ad.lastAt || "").slice(0, 10);
+          name.appendChild(meta);
+          tr.appendChild(name);
+          tr.appendChild(cell(ad.conversations, "n"));
+          tr.appendChild(cell(ad.salesLeads, "n"));
+          tr.appendChild(cell(ad.completed, "n"));
+          var contacts = document.createElement("td"), details = document.createElement("details"), summary = document.createElement("summary");
+          summary.textContent = "Ver " + ad.contacts.length; details.appendChild(summary);
+          ad.contacts.forEach(function (c) {
+            var line = document.createElement("div");
+            line.textContent = "+" + c.phone + (c.name ? " · " + c.name : "") + " · " + (c.leadStatus ? (STATUS[c.leadStatus] || c.leadStatus) : "solo consulta");
+            details.appendChild(line);
+          });
+          contacts.appendChild(details); tr.appendChild(contacts);
+          body.appendChild(tr);
+        });
+        status.textContent = ""; table.hidden = false;
+      } catch (error) { status.textContent = "Error de red: " + error.message; }
+    }
+    document.getElementById("go").addEventListener("click", load);
+    load();
+  </script>
+</body>
+</html>

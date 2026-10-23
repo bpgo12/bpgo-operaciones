@@ -3429,6 +3429,55 @@ async function createAutomationCase(env, message) {
     .run();
 }
 
+// Anuncios "Enviar mensaje por WhatsApp" (2026-10-23): cuando alguien escribe desde un anuncio de
+// Facebook/Instagram, Meta agrega `referral` al primer mensaje. El mensaje completo ya queda en
+// whatsapp_inbox_messages.raw_json, así que el reporte lo lee de ahí sin tocar el flujo del bot.
+function adReferralFromMessage(message) {
+  const ref = message?.referral;
+  if (!ref || typeof ref !== "object") return null;
+  const clean = (value, max = 300) => (value == null ? null : String(value).trim().slice(0, max) || null);
+  return {
+    sourceType: clean(ref.source_type, 40),
+    sourceId: clean(ref.source_id, 80),
+    sourceUrl: clean(ref.source_url, 500),
+    headline: clean(ref.headline),
+    body: clean(ref.body),
+    ctwaClid: clean(ref.ctwa_clid, 200),
+  };
+}
+
+// Agrupa por anuncio: conversaciones (teléfonos distintos), cuántos llegaron a ser lead de venta y
+// cuántos quedaron completados (datos de instalación recibidos). `leadsByPhone` = estado más avanzado.
+function summarizeAdReferrals(messages, leadsByPhone) {
+  const ads = new Map();
+  for (const row of messages) {
+    let parsed = null;
+    try { parsed = JSON.parse(row.raw_json || "null"); } catch { parsed = null; }
+    const referral = adReferralFromMessage(parsed);
+    if (!referral) continue;
+    const key = referral.sourceId || referral.sourceUrl || referral.headline || "sin_id";
+    if (!ads.has(key)) ads.set(key, { adId: referral.sourceId, sourceType: referral.sourceType, headline: referral.headline, sourceUrl: referral.sourceUrl, phones: new Map(), firstAt: row.created_at, lastAt: row.created_at });
+    const ad = ads.get(key);
+    if (!ad.headline && referral.headline) ad.headline = referral.headline;
+    if (row.created_at < ad.firstAt) ad.firstAt = row.created_at;
+    if (row.created_at > ad.lastAt) ad.lastAt = row.created_at;
+    if (!ad.phones.has(row.phone)) ad.phones.set(row.phone, { phone: row.phone, name: row.customer_name || null, at: row.created_at });
+  }
+  const result = [];
+  for (const ad of ads.values()) {
+    const contacts = [...ad.phones.values()].map((c) => ({ ...c, leadStatus: leadsByPhone.get(c.phone) || null }));
+    result.push({
+      adId: ad.adId, sourceType: ad.sourceType, headline: ad.headline, sourceUrl: ad.sourceUrl,
+      firstAt: ad.firstAt, lastAt: ad.lastAt,
+      conversations: contacts.length,
+      salesLeads: contacts.filter((c) => c.leadStatus).length,
+      completed: contacts.filter((c) => c.leadStatus === "completed").length,
+      contacts,
+    });
+  }
+  return result.sort((a, b) => b.conversations - a.conversations);
+}
+
 async function saveInboundWhatsAppMessages(env, changes) {
   await ensureWhatsAppInboxTable(env);
   let saved = 0;
@@ -5438,6 +5487,25 @@ export default {
       const result = await env.DB.prepare("UPDATE whatsapp_sales_leads SET status = ?, updated_at = datetime('now') WHERE id = ?").bind(status, id).run();
       if (!result.meta?.changes) return Response.json({ ok: false, error: "Solicitud no encontrada." }, { status: 404 });
       return Response.json({ ok: true, id, status });
+    }
+
+    if (url.pathname === "/api/whatsapp/ad-referrals" && request.method === "GET") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session) return Response.json({ ok: false, error: "Sesion no autorizada." }, { status: 401 });
+      const days = Math.min(Math.max(Math.round(Number(url.searchParams.get("days")) || 30), 1), 365);
+      const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+      await ensureWhatsAppInboxTable(env);
+      await ensureWhatsAppBotTables(env);
+      const messages = await env.DB.prepare(`SELECT phone, customer_name, created_at, raw_json FROM whatsapp_inbox_messages
+        WHERE direction = 'inbound' AND created_at >= ? AND raw_json LIKE '%"referral"%' ORDER BY created_at ASC LIMIT 5000`).bind(since).all();
+      const rank = { completed: 3, awaiting_installation_data: 2, awaiting_plan: 2 };
+      const leadsByPhone = new Map();
+      const leadRows = await env.DB.prepare("SELECT phone, status FROM whatsapp_sales_leads WHERE created_at >= datetime(?, '-1 day')").bind(since.slice(0, 19).replace("T", " ")).all();
+      for (const lead of leadRows.results || []) {
+        const current = leadsByPhone.get(lead.phone);
+        if (!current || (rank[lead.status] || 1) > (rank[current] || 1)) leadsByPhone.set(lead.phone, lead.status);
+      }
+      return Response.json({ ok: true, days, ads: summarizeAdReferrals(messages.results || [], leadsByPhone) });
     }
 
     if (url.pathname === "/api/whatsapp/bot-faq" && request.method === "GET") {
