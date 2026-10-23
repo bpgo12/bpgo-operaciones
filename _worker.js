@@ -140,7 +140,7 @@ async function getMetaPhoneConnection(credentials) {
 async function getMetaPhoneDiagnostic(credentials) {
   try {
     if (!credentials?.accessToken || !credentials?.phoneNumberId) return null;
-    const response = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}?fields=status,platform_type,account_mode,code_verification_status,name_status,is_pin_enabled,health_status`, {
+    const response = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}?fields=status,platform_type,account_mode,code_verification_status,name_status,is_pin_enabled,health_status,is_on_biz_app`, {
       headers: { authorization: `Bearer ${credentials.accessToken}` }, signal: AbortSignal.timeout(8000),
     });
     const payload = await response.json().catch(() => ({}));
@@ -149,7 +149,7 @@ async function getMetaPhoneDiagnostic(credentials) {
       type: item.entity_type, canSend: item.can_send_message, errors: (item.errors || []).map((error) => ({ code: error.error_code, description: error.error_description, solution: error.possible_solution })),
     })) : [];
     return {
-      status: payload.status, platformType: payload.platform_type, accountMode: payload.account_mode, codeVerification: payload.code_verification_status,
+      status: payload.status, platformType: payload.platform_type, isOnBizApp: payload.is_on_biz_app, accountMode: payload.account_mode, codeVerification: payload.code_verification_status,
       nameStatus: payload.name_status, pinEnabled: payload.is_pin_enabled, canSendMessage: payload.health_status?.can_send_message, entities,
     };
   } catch { return null; }
