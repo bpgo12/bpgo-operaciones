@@ -1167,3 +1167,8 @@ assert.match(deregisterBlock, /session\.role !== "super_admin"/);
 assert.match(deregisterBlock, /body\.confirm !== "DESREGISTRAR"/);
 assert.match(deregisterBlock, /\/deregister`/);
 assert.doesNotMatch(deregisterBlock, /message_templates|DELETE/);
+
+// 2026-10-23: el registro de Meta debe usar sessionInfoVersion "3" (como cuando la coexistencia sí se conectó en agosto), no el parámetro "version: v4".
+const onboardingScript = fs.readFileSync(path.join(__dirname, "..", "assets", "whatsapp-onboarding-v43.js"), "utf8");
+assert.match(onboardingScript, /featureType: "whatsapp_business_app_onboarding",\s*sessionInfoVersion: "3"/);
+assert.doesNotMatch(onboardingScript, /version: "v4"/);
