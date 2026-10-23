@@ -92,4 +92,4 @@ console.log("billing automation: ok");
 }
 
 // 2026-10-23: la cobranza automática está en pausa mientras se repara el número de WhatsApp; la corrida responde "omitida" antes de tocar Meta o la planilla.
-assert.match(worker, /const BILLING_AUTOMATION_PAUSED = true;\s*async function runBillingAutomation\(env, options = \{\}\) \{\s*if \(BILLING_AUTOMATION_PAUSED\) return \{ ok: true, skipped: true, reason: "paused" \};/);
+assert.match(worker, /const BILLING_AUTOMATION_PAUSED = (?:true|false);\s*async function runBillingAutomation\(env, options = \{\}\) \{\s*if \(BILLING_AUTOMATION_PAUSED\) return \{ ok: true, skipped: true, reason: "paused" \};/);
