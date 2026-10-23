@@ -1172,3 +1172,7 @@ assert.doesNotMatch(deregisterBlock, /message_templates|DELETE/);
 const onboardingScript = fs.readFileSync(path.join(__dirname, "..", "assets", "whatsapp-onboarding-v43.js"), "utf8");
 assert.match(onboardingScript, /featureType: "whatsapp_business_app_onboarding",\s*sessionInfoVersion: "3"/);
 assert.doesNotMatch(onboardingScript, /version: "v4"/);
+
+// 2026-10-23: el panel muestra qué eventos envió Meta (y en qué paso terminó) para diagnosticar por qué no aparece el código/QR.
+assert.match(onboardingScript, /signupResult\.events = \(signupResult\.events \|\| \[\]\)\.concat\(/);
+assert.match(onboardingScript, /Eventos de Meta: " \+ \(\(signupResult\.events \|\| \[\]\)\.join\(", "\) \|\| "ninguno"\)/);

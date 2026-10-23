@@ -139,7 +139,7 @@
       signupResult.completed = true;
       showStatus(panel, data.connected
         ? "Conexión y recepción de mensajes activadas para " + (data.displayPhoneNumber || "el número BPGO") + "."
-        : "Autorización guardada para " + (data.displayPhoneNumber || "el número BPGO") + ". Falta completar el registro final en Meta" + (data.status ? " (estado del número en Meta: " + data.status + ")" : "") + ".", data.connected ? "success" : "pending");
+        : "Autorización guardada para " + (data.displayPhoneNumber || "el número BPGO") + ". Falta completar el registro final en Meta" + (data.status ? " (estado del número en Meta: " + data.status + ")" : "") + ". Eventos de Meta: " + ((signupResult.events || []).join(", ") || "ninguno") + ".", data.connected ? "success" : "pending");
       window.setTimeout(function () { loadStatus(panel); }, 1800);
     } catch (error) {
       signupResult.saving = false;
@@ -225,6 +225,9 @@
       try { payload = JSON.parse(payload); } catch (_) { return; }
     }
     if (!payload || payload.type !== "WA_EMBEDDED_SIGNUP") return;
+    // 2026-10-23: se anota qué le dijo Meta (evento y paso donde terminó) para mostrarlo al final; no incluye códigos ni tokens.
+    var noteData = payload.data && payload.data.data ? payload.data.data : (payload.data || {});
+    signupResult.events = (signupResult.events || []).concat([String(payload.event || "?") + (noteData.current_step ? " en " + noteData.current_step : "") + (noteData.error_message ? " (" + String(noteData.error_message).slice(0, 80) + ")" : "")]);
     if (payload.event === "FINISH" || payload.event === "FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING") {
       var eventData = payload.data && payload.data.data ? payload.data.data : (payload.data || {});
       signupResult.wabaId = String(eventData.waba_id || eventData.wabaId || signupResult.wabaId || "");
