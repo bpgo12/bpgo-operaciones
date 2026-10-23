@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Sincronizar coexistencia de WhatsApp</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 520px; margin: 40px auto; padding: 0 16px; color: #1c2b33; }
+    button { font-size: 1rem; padding: 12px 20px; border: 0; border-radius: 8px; background: #0b7a6b; color: #fff; cursor: pointer; }
+    button[disabled] { opacity: .6; cursor: wait; }
+    pre { background: #f2f5f4; padding: 12px; border-radius: 8px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>Sincronizar coexistencia</h1>
+  <p>Pide a Meta la sincronización de contactos y de historial del número conectado a la app de WhatsApp Business. Meta la acepta una sola vez y dentro de las 24 horas posteriores a la conexión. Solo funciona con tu sesión de superadministrador abierta en operaciones.bpgo.cl. Deja WhatsApp Business abierto en el teléfono mientras tanto.</p>
+  <button type="button" id="go">Sincronizar ahora</button>
+  <pre id="out" hidden></pre>
+  <script>
+    document.getElementById("go").addEventListener("click", async function () {
+      var button = this, out = document.getElementById("out");
+      if (!window.confirm("¿Pedir la sincronización de contactos e historial a Meta?")) return;
+      button.disabled = true; out.hidden = false; out.textContent = "Enviando…";
+      try {
+        var response = await fetch("/api/whatsapp/coexistence-sync", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirm: "SINCRONIZAR" }) });
+        out.textContent = response.status + " " + await response.text();
+      } catch (error) { out.textContent = "Error de red: " + error.message; }
+      button.disabled = false;
+    });
+  </script>
+</body>
+</html>

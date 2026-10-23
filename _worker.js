@@ -5052,6 +5052,29 @@ export default {
       }
     }
 
+    // 2026-10-23: tras conectar un número de la app de WhatsApp Business (coexistencia), Meta exige que la plataforma pida la sincronización de contactos y de historial
+    // dentro de las 24 horas (cada una se puede pedir una sola vez); la app del teléfono mostraba "Finaliza la configuración". Acción manual, solo superadministrador.
+    if (url.pathname === "/api/whatsapp/coexistence-sync" && request.method === "POST") {
+      const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
+      if (!session || session.role !== "super_admin") return Response.json({ ok: false, error: "Solo un superadministrador puede hacer esto." }, { status: 403 });
+      const body = await request.json().catch(() => ({}));
+      if (body.confirm !== "SINCRONIZAR") return Response.json({ ok: false, error: "Falta la confirmación." }, { status: 400 });
+      const credentials = await getWhatsAppCredentials(env);
+      if (!credentials.accessToken || !/^\d+$/.test(String(credentials.phoneNumberId || ""))) return Response.json({ ok: false, error: "No hay un número configurado." }, { status: 400 });
+      const results = {};
+      for (const syncType of ["smb_app_state_sync", "history"]) {
+        try {
+          const response = await fetch(`https://graph.facebook.com/v25.0/${encodeURIComponent(credentials.phoneNumberId)}/smb_app_data`, {
+            method: "POST", headers: { authorization: `Bearer ${credentials.accessToken}`, "content-type": "application/json" },
+            body: JSON.stringify({ messaging_product: "whatsapp", sync_type: syncType }), signal: AbortSignal.timeout(15000),
+          });
+          const payload = await response.json().catch(() => ({}));
+          results[syncType] = { status: response.status, requestId: payload.request_id, error: payload.error?.message, errorCode: payload.error?.code };
+        } catch (error) { results[syncType] = { error: `No se pudo consultar a Meta: ${error?.name || "error"}` }; }
+      }
+      return Response.json({ ok: true, results }, { status: 200 });
+    }
+
     if (url.pathname === "/api/whatsapp/onboarding" && request.method === "GET") {
       const session = await readSession(request, env.OPERATIONS_ADMIN_SECRET);
       if (!session || session.role !== "super_admin") return Response.json({ ok: false, error: "Solo un superadministrador puede configurar Meta." }, { status: 403 });

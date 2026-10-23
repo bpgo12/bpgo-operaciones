@@ -1176,3 +1176,10 @@ assert.doesNotMatch(onboardingScript, /version: "v4"/);
 // 2026-10-23: el panel muestra qué eventos envió Meta (y en qué paso terminó) para diagnosticar por qué no aparece el código/QR.
 assert.match(onboardingScript, /signupResult\.events = \(signupResult\.events \|\| \[\]\)\.concat\(/);
 assert.match(onboardingScript, /Eventos de Meta: " \+ \(\(signupResult\.events \|\| \[\]\)\.join\(", "\) \|\| "ninguno"\)/);
+
+// 2026-10-23: la sincronización de coexistencia (contactos e historial) es una acción manual de superadministrador con confirmación escrita.
+const syncBlock = worker.slice(worker.indexOf('url.pathname === "/api/whatsapp/coexistence-sync"'), worker.indexOf('url.pathname === "/api/whatsapp/onboarding" && request.method === "GET"'));
+assert.match(syncBlock, /session\.role !== "super_admin"/);
+assert.match(syncBlock, /body\.confirm !== "SINCRONIZAR"/);
+assert.match(syncBlock, /\["smb_app_state_sync", "history"\]/);
+assert.match(syncBlock, /\/smb_app_data`/);
