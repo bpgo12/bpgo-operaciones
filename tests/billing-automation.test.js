@@ -90,3 +90,6 @@ console.log("billing automation: ok");
   require("node:assert/strict").match(body, /billingAllowed && !billingAllowed\.eligible\.has\(phone\)/);
   require("node:assert/strict").match(body, /no se envió ningún mensaje/);
 }
+
+// 2026-10-23: la cobranza automática está en pausa mientras se repara el número de WhatsApp; la corrida responde "omitida" antes de tocar Meta o la planilla.
+assert.match(worker, /const BILLING_AUTOMATION_PAUSED = true;\s*async function runBillingAutomation\(env, options = \{\}\) \{\s*if \(BILLING_AUTOMATION_PAUSED\) return \{ ok: true, skipped: true, reason: "paused" \};/);

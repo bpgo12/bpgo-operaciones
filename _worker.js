@@ -3817,7 +3817,11 @@ async function reconcileBillingSuspensionQueue(env, month, parsed) {
   }
 }
 
+// 2026-10-23: pausa de la cobranza automática mientras se repara la conexión del número de WhatsApp (todos los envíos fallaban con 133010). Con la pausa,
+// la corrida responde "omitida" sin llamar a Meta ni leer la planilla. Para reanudar: cambiar a false y publicar.
+const BILLING_AUTOMATION_PAUSED = true;
 async function runBillingAutomation(env, options = {}) {
+  if (BILLING_AUTOMATION_PAUSED) return { ok: true, skipped: true, reason: "paused" };
   await ensureBillingAutomationTables(env);
   const date = options.date || new Date();
   const stage = options.stage || billingStageForDate(date);
