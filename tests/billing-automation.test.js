@@ -24,6 +24,7 @@ const context = { Date, Intl, String, Number, Set, Map, Array, Object };
 vm.createContext(context);
 vm.runInContext(`
   const BILLING_MONTHS_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+  const BILLING_CUT_PATTERN = ${worker.match(/const BILLING_CUT_PATTERN = (\/.*\/);/)[1]};
   function normalizeWhatsAppPhone(value) { let phone=String(value||"").replace(/\\D/g,""); if(phone.startsWith("0")) phone=phone.slice(1); if(phone.length===9) phone="56"+phone; return phone; }
   ${functionSource("chileDateParts")}
   ${functionSource("billingStageForDate")}
@@ -53,6 +54,10 @@ const rows = [headers,
   ["7", "Comprobante", "A", "Norte", "912345677", "Plan", "$21.300", "", "", "", "ACTIVO"],
   ["8", "Duplicado A", "A", "Norte", "912345678", "Plan", "$21.300", "", "", "", "ACTIVO"],
   ["9", "Duplicado B", "A", "Norte", "912345678", "Plan", "$21.300", "", "", "", "ACTIVO"],
+  // 2026-10-24: "retirado" y "cortado" significan lo mismo (el cliente ya no es parte de BPGO), en la celda del mes o en ESTADO BPGO.
+  ["10", "Retirado en el mes", "A", "Norte", "912345680", "Plan", "$21.300", "", "", "RETIRADO", "ACTIVO"],
+  ["11", "Retirado en estado", "A", "Norte", "912345681", "Plan", "$21.300", "", "", "", "RETIRADO"],
+  ["12", "Cortado en el mes", "A", "Norte", "912345682", "Plan", "$21.300", "", "", "CORTADO", "ACTIVO"],
 ];
 const parsed = api.billingEligibilityFromRows(rows, new Date("2026-09-23T16:00:00Z"), new Set(["56912345677"]));
 assert.equal(parsed.ok, true);
@@ -61,6 +66,11 @@ assert.deepEqual(Array.from(parsed.eligible, (item) => item.customerName), ["Pen
 const reasons = Array.from(parsed.excluded, (item) => item.reason);
 for (const reason of ["paid", "inactive_or_suspended", "non_positive_amount", "invalid_phone", "duplicate_phone"]) {
   assert.ok(reasons.includes(reason), `missing exclusion ${reason}`);
+}
+
+for (const name of ["Retirado en el mes", "Retirado en estado", "Cortado en el mes", "Cortado"]) {
+  const found = parsed.excluded.find((item) => item.customerName === name);
+  assert.equal(found && found.reason, "inactive_or_suspended", `${name} debe quedar excluido como cortado/retirado`);
 }
 
 assert.doesNotMatch(worker, /reason = "pending_receipt"/);

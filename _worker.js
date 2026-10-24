@@ -3590,6 +3590,7 @@ function billingSheetColumns(rows, date = new Date()) {
 // Orden de Carlos (2026-10-20): la ÚNICA fuente para decidir si se cobra es la planilla. Si el mes no figura PAGADO, el recordatorio se envía
 // siempre; los comprobantes sin aprobar o en revisión en el panel ya NO excluyen a nadie (el tercer parámetro se conserva por compatibilidad
 // y se ignora).
+const BILLING_CUT_PATTERN = /CORTAD|CORTE|SUSPEND|INACTIV|RETIRAD|DE BAJA/;
 function billingEligibilityFromRows(rows, date = new Date(), _ignoredPendingReceiptPhones = new Set()) {
   const columns = billingSheetColumns(rows, date);
   if (Object.values(columns).some((index) => index < 0)) {
@@ -3619,8 +3620,10 @@ function billingEligibilityFromRows(rows, date = new Date(), _ignoredPendingRece
     if (!/^56\d{9}$/.test(item.phone)) reason = "invalid_phone";
     else if ((phoneCounts.get(item.phone) || 0) > 1) reason = "duplicate_phone";
     else if (item.monthStatus === "PAGADO") reason = "paid";
+    // 2026-10-24: "cortado", "retirado" (y suspendido/inactivo/de baja) significan lo mismo: el cliente ya no es parte de BPGO. Se reconoce tanto en
+    // ESTADO BPGO como en la celda del mes (donde la planilla escribe "RETIRADO"), y nunca recibe cobranza.
+    else if (BILLING_CUT_PATTERN.test(item.accountStatus) || BILLING_CUT_PATTERN.test(item.monthStatus)) reason = "inactive_or_suspended";
     else if (item.monthStatus) reason = "month_not_pending";
-    else if (/CORTADO|SUSPENDIDO|INACTIV/.test(item.accountStatus)) reason = "inactive_or_suspended";
     else if (!(item.amount > 0)) reason = "non_positive_amount";
     (reason ? excluded : eligible).push(reason ? { ...item, reason } : item);
   }
@@ -4531,7 +4534,7 @@ async function sendBillingMessages(request, env) {
 
 // Motivos (mismos que la cobranza automática) por los que un cliente NO recibe el recordatorio de cobranza.
 const BILLING_EXCLUSION_LABELS = {
-  inactive_or_suspended: "Excluido: CORTADO/SUSPENDIDO en la planilla",
+  inactive_or_suspended: "Excluido: CORTADO/RETIRADO/SUSPENDIDO en la planilla",
   paid: "Excluido: mes PAGADO en la planilla",
   month_not_pending: "Excluido: el mes no está pendiente en la planilla",
   non_positive_amount: "Excluido: sin monto en la planilla",
