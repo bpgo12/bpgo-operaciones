@@ -1183,3 +1183,9 @@ assert.match(syncBlock, /session\.role !== "super_admin"/);
 assert.match(syncBlock, /body\.confirm !== "SINCRONIZAR"/);
 assert.match(syncBlock, /\["smb_app_state_sync", "history"\]/);
 assert.match(syncBlock, /\/smb_app_data`/);
+
+// 2026-10-24: el envío manual usa siempre la plantilla con enlace de pago (v2) si está aprobada, y ya no se corta en 50 destinatarios.
+assert.match(worker, /if \(campaign === "billing"\) \{\s*const v2 = await manualReminderV2Status\(env, true\)/);
+assert.doesNotMatch(worker, /body\.records\.slice\(0, 50\)/);
+assert.match(worker, /body\.records\.slice\(0, 200\)/);
+assert.match(worker, /const MANUAL_REMINDER_V2 = \{[\s\S]{0,400}https:\/\/bpgo\.cl\/pagar/);

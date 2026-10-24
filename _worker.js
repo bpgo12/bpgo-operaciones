@@ -4403,7 +4403,8 @@ async function handleCyberApi(request, env, session) {
 
 async function sendBillingMessages(request, env) {
   const body = await request.json().catch(() => ({}));
-  const records = Array.isArray(body.records) ? body.records.slice(0, 50) : [];
+  // 2026-10-24: antes se cortaba en 50 destinatarios; ahora se envía la cola completa. El tope de 200 es solo el seguro del límite de llamadas por solicitud de Cloudflare (4 por cliente).
+  const records = Array.isArray(body.records) ? body.records.slice(0, 200) : [];
   if (!records.length) {
     return Response.json({ ok: false, error: "No hay destinatarios para enviar." }, { status: 400 });
   }
@@ -4415,7 +4416,8 @@ async function sendBillingMessages(request, env) {
   let templateName = campaign === "number-change"
     ? "nuevo_numero_whatsapp"
     : String(env.WHATSAPP_TEMPLATE_NAME || "recordatorio_pago_bpgo").trim();
-  if (campaign === "billing" && !String(env.WHATSAPP_TEMPLATE_NAME || "").trim()) {
+  // 2026-10-24: el envío manual usa siempre la plantilla con el enlace de pago (v2) mientras esté APROBADA; si no lo está, queda la plantilla configurada.
+  if (campaign === "billing") {
     const v2 = await manualReminderV2Status(env, true).catch(() => "UNAVAILABLE");
     if (v2 === "APPROVED") templateName = MANUAL_REMINDER_V2.name;
   }
