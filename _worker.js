@@ -5057,6 +5057,29 @@ export default {
       }
     }
 
+    // 2026-10-24: el sitio público (bpgo.cl) avisa aquí cuando un pago web necesita acción (cliente que estaba SUSPENDIDO y hay que reconectar, o pago que no
+    // quedó marcado en la planilla). Se autentica con el secreto compartido WEB_PAYMENT_NOTIFY_SECRET y avisa a Carlos con la plantilla de avisos internos.
+    if (url.pathname === "/api/whatsapp/web-payment-notice" && request.method === "POST") {
+      const secret = String(env.WEB_PAYMENT_NOTIFY_SECRET || "");
+      const provided = String(request.headers.get("x-notify-secret") || "");
+      let diff = secret.length ^ provided.length;
+      for (let i = 0; i < secret.length; i += 1) diff |= secret.charCodeAt(i) ^ (provided.charCodeAt(i) || 0);
+      if (!secret || diff !== 0) return Response.json({ ok: false, error: "No autorizado." }, { status: 401 });
+      const body = await request.json().catch(() => ({}));
+      const buyOrder = String(body.buyOrder || "").replace(/[^A-Za-z0-9]/g, "").slice(0, 40);
+      if (!buyOrder) return Response.json({ ok: false, error: "Falta la orden de compra." }, { status: 400 });
+      const amount = Number(body.amount) || 0;
+      const credentials = await getWhatsAppCredentials(env);
+      const summary = [
+        `Pagó $${amount.toLocaleString("es-CL")} por la web (orden ${buyOrder}${body.month ? `, ${String(body.month).slice(0, 15)}` : ""}).`,
+        body.suspended ? "Estaba SUSPENDIDO: reconectar el servicio." : "",
+        `Planilla: ${String(body.registro || (body.marked ? "marcado PAGADO" : "revisar")).slice(0, 200)}.`,
+      ].filter(Boolean).join(" ");
+      const result = await notifyStaff(env, credentials, "carlos", body.suspended ? "Pago web de cliente suspendido" : "Pago web por revisar",
+        String(body.name || "Cliente").slice(0, 100), String(body.phone || ""), summary, { sourceMessageId: `webpay:${buyOrder}` });
+      return Response.json({ ok: Boolean(result?.ok), status: result?.status, duplicate: Boolean(result?.duplicate) }, { status: result?.ok ? 200 : 502 });
+    }
+
     // 2026-10-23: tras conectar un número de la app de WhatsApp Business (coexistencia), Meta exige que la plataforma pida la sincronización de contactos y de historial
     // dentro de las 24 horas (cada una se puede pedir una sola vez); la app del teléfono mostraba "Finaliza la configuración". Acción manual, solo superadministrador.
     if (url.pathname === "/api/whatsapp/coexistence-sync" && request.method === "POST") {

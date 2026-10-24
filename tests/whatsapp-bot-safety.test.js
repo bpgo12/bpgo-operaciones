@@ -1189,3 +1189,11 @@ assert.match(worker, /if \(campaign === "billing"\) \{\s*const v2 = await manual
 assert.doesNotMatch(worker, /body\.records\.slice\(0, 50\)/);
 assert.match(worker, /body\.records\.slice\(0, 200\)/);
 assert.match(worker, /const MANUAL_REMINDER_V2 = \{[\s\S]{0,400}https:\/\/bpgo\.cl\/pagar/);
+
+// 2026-10-24: el aviso de pago web (cliente suspendido o pago por revisar) exige el secreto compartido y es idempotente por orden de compra.
+const webPaymentBlock = worker.slice(worker.indexOf('url.pathname === "/api/whatsapp/web-payment-notice"'), worker.indexOf('url.pathname === "/api/whatsapp/coexistence-sync"'));
+assert.match(webPaymentBlock, /env\.WEB_PAYMENT_NOTIFY_SECRET/);
+assert.match(webPaymentBlock, /x-notify-secret/);
+assert.match(webPaymentBlock, /if \(!secret \|\| diff !== 0\) return Response\.json\(\{ ok: false, error: "No autorizado\." \}, \{ status: 401 \}\);/);
+assert.match(webPaymentBlock, /notifyStaff\(env, credentials, "carlos"/);
+assert.match(webPaymentBlock, /sourceMessageId: `webpay:\$\{buyOrder\}`/);
