@@ -103,3 +103,10 @@ console.log("billing automation: ok");
 
 // 2026-10-23: la cobranza automática está en pausa mientras se repara el número de WhatsApp; la corrida responde "omitida" antes de tocar Meta o la planilla.
 assert.match(worker, /const BILLING_AUTOMATION_PAUSED = (?:true|false);\s*async function runBillingAutomation\(env, options = \{\}\) \{\s*if \(BILLING_AUTOMATION_PAUSED\) return \{ ok: true, skipped: true, reason: "paused" \};/);
+
+// 2026-10-24: la pantalla de cobranza no incluye en la cola ni en el contador a los clientes CORTADO/RETIRADO de la planilla (ESTADO BPGO o celda del mes).
+const clientBundle = fs.readFileSync(path.join(__dirname, "..", "assets", "index-bulk-v28.js"), "utf8");
+assert.ok(clientBundle.includes("cutCol=c6(a,[`estado bpgo`])"));
+assert.ok(clientBundle.includes("cutFlag=/cortad|retirad|de baja|inactiv/.test(K3(h)+` `+(cutCol>=0?K3(v6(e[cutCol])):``))"));
+assert.ok(clientBundle.includes("active:!K3(h).includes(`suspendido`)&&!cutFlag,cut:cutFlag,"));
+assert.ok(clientBundle.includes("function q6(e,t,n=!1){return e.filter(e=>{if(e.cut)return!1;"));
