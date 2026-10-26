@@ -110,3 +110,7 @@ assert.ok(clientBundle.includes("cutCol=c6(a,[`estado bpgo`])"));
 assert.ok(clientBundle.includes("cutFlag=/cortad|retirad|de baja|inactiv/.test(K3(h)+` `+(cutCol>=0?K3(v6(e[cutCol])):``))"));
 assert.ok(clientBundle.includes("active:!K3(h).includes(`suspendido`)&&!cutFlag,cut:cutFlag,"));
 assert.ok(clientBundle.includes("function q6(e,t,n=!1){return e.filter(e=>{if(e.cut)return!1;"));
+
+// 2026-10-26: la pestaña "Suspendidos" de operaciones muestra solo a quienes están suspendidos en el mes actual, no a todos los que alguna vez lo estuvieron.
+assert.ok(clientBundle.includes("se=e.filter(e=>!e.active||(e.suspendedMonths??[]).some(t=>K3(t)===K3(f))),"));
+assert.ok(!clientBundle.includes("se=e.filter(e=>!e.active||(e.suspendedMonths?.length??0)>0),"));
