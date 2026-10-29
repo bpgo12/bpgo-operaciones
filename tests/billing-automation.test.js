@@ -137,3 +137,31 @@ assert.ok(!clientBundle.includes("se=e.filter(e=>!e.active||(e.suspendedMonths?.
 const bundleNow = fs.readFileSync(path.join(__dirname, "..", "assets", "index-bulk-v28.js"), "utf8");
 assert.ok(bundleNow.includes("se=e.filter(e=>!e.cut&&(!e.active||(e.suspendedMonths??[]).some(t=>K3(t)===K3(f)))),"));
 assert.ok(bundleNow.includes("map(e=>String(e.id??``).startsWith(`billing-customer-`)?{...e,cut:!0,active:!1}:e)"));
+
+// 2026-10-29: módulo "Suspendidos largo plazo": meses seguidos suspendidos hasta el mes actual, con contacto y zona; excluye CORTADO/RETIRADO.
+const largoStart = clientBundle.indexOf("function largoRows(");
+assert.notEqual(largoStart, -1);
+let largoDepth = 0, largoEnd = -1;
+for (let i = clientBundle.indexOf("{", largoStart); i < clientBundle.length; i += 1) {
+  if (clientBundle[i] === "{") largoDepth += 1;
+  if (clientBundle[i] === "}") { largoDepth -= 1; if (largoDepth === 0) { largoEnd = i + 1; break; } }
+}
+const largoContext = { Set };
+vm.createContext(largoContext);
+vm.runInContext(`const S3=["enero","febrero","marzo","abril","mayo","junio","julio","agosto","septiembre","octubre","noviembre","diciembre"]; function K3(e){return e.trim().toLowerCase().normalize("NFD").replace(/[\\u0300-\\u036f]/g,"")} ${clientBundle.slice(largoStart, largoEnd)}; this.largoRows=largoRows;`, largoContext);
+const cliente = (nombre, meses, extra = {}) => ({ customerName: nombre, phone: "56912345678", sector: "Norte", suspendedMonths: meses, ...extra });
+const base = [
+  cliente("Cuatro seguidos", ["julio", "agosto", "septiembre", "octubre"]),
+  cliente("Seis seguidos", ["mayo", "junio", "julio", "agosto", "septiembre", "octubre"], { sector: "Sur" }),
+  cliente("Tres seguidos", ["agosto", "septiembre", "octubre"]),
+  cliente("Con hueco", ["enero", "febrero", "marzo", "abril", "junio", "julio", "septiembre", "octubre"]),
+  cliente("Ya no suspendido", ["mayo", "junio", "julio", "agosto", "septiembre"]),
+  cliente("Retirado", ["julio", "agosto", "septiembre", "octubre"], { cut: true }),
+];
+const largo = largoContext.largoRows(base, "octubre", 4, "");
+assert.deepEqual(Array.from(largo.rows, (x) => `${x.customerName}:${x.run}`), ["Seis seguidos:6", "Cuatro seguidos:4"]);
+assert.deepEqual(Array.from(largoContext.largoRows(base, "octubre", 3, "").rows, (x) => x.customerName), ["Seis seguidos", "Cuatro seguidos", "Tres seguidos"]);
+assert.deepEqual(Array.from(largoContext.largoRows(base, "octubre", 2, "Sur").rows, (x) => x.customerName), ["Seis seguidos"]);
+assert.deepEqual(Array.from(largo.sectors), ["Norte", "Sur"]);
+assert.ok(clientBundle.includes("{id:`largo`,label:`Suspendidos largo plazo`}"));
+assert.ok(clientBundle.includes("u===`largo`&&(()=>{let L=largoRows(e,f,largoMin,largoZona);"));
