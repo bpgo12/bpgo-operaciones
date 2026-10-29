@@ -25,6 +25,7 @@ vm.createContext(context);
 vm.runInContext(`
   const BILLING_MONTHS_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
   const BILLING_CUT_PATTERN = ${worker.match(/const BILLING_CUT_PATTERN = (\/.*\/);/)[1]};
+  const BILLING_HARD_CUT_PATTERN = ${worker.match(/const BILLING_HARD_CUT_PATTERN = (\/.*\/);/)[1]};
   function normalizeWhatsAppPhone(value) { let phone=String(value||"").replace(/\\D/g,""); if(phone.startsWith("0")) phone=phone.slice(1); if(phone.length===9) phone="56"+phone; return phone; }
   ${functionSource("chileDateParts")}
   ${functionSource("billingStageForDate")}
@@ -67,6 +68,23 @@ const reasons = Array.from(parsed.excluded, (item) => item.reason);
 for (const reason of ["paid", "inactive_or_suspended", "non_positive_amount", "invalid_phone", "duplicate_phone"]) {
   assert.ok(reasons.includes(reason), `missing exclusion ${reason}`);
 }
+
+// 2026-10-29: SUSPENDIDO (en el mes) = cliente suspendido que sigue pendiente de pago. La cobranza automática no le escribe, pero el envío manual
+// (includeSuspended) sí; CORTADO/RETIRADO nunca reciben nada.
+const suspRows = [headers,
+  ["20", "Suspendido mes", "A", "Norte", "912345690", "Plan", "$21.300", "", "", "SUSPENDIDO", "ACTIVO"],
+  ["21", "Retirado mes", "A", "Norte", "912345691", "Plan", "$21.300", "", "", "RETIRADO", "ACTIVO"],
+  ["22", "Cortado estado", "A", "Norte", "912345692", "Plan", "$21.300", "", "", "", "CORTADO"],
+  ["23", "Pendiente normal", "A", "Norte", "912345693", "Plan", "$21.300", "", "", "", "ACTIVO"],
+];
+const automatico = api.billingEligibilityFromRows(suspRows, new Date("2026-09-23T16:00:00Z"));
+assert.deepEqual(Array.from(automatico.eligible, (item) => item.customerName), ["Pendiente normal"]);
+assert.equal(automatico.excluded.find((item) => item.customerName === "Suspendido mes").reason, "inactive_or_suspended");
+const manual = api.billingEligibilityFromRows(suspRows, new Date("2026-09-23T16:00:00Z"), new Set(), { includeSuspended: true });
+assert.deepEqual(Array.from(manual.eligible, (item) => item.customerName), ["Suspendido mes", "Pendiente normal"]);
+assert.equal(manual.excluded.find((item) => item.customerName === "Retirado mes").reason, "inactive_or_suspended");
+assert.equal(manual.excluded.find((item) => item.customerName === "Cortado estado").reason, "inactive_or_suspended");
+assert.match(worker, /billingEligibilityFromRows\(source\.rows, new Date\(\), await pendingPaymentReceiptPhones\(env, month\), \{ includeSuspended: true \}\)/);
 
 for (const name of ["Retirado en el mes", "Retirado en estado", "Cortado en el mes", "Cortado"]) {
   const found = parsed.excluded.find((item) => item.customerName === name);

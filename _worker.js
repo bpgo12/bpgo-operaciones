@@ -3591,7 +3591,13 @@ function billingSheetColumns(rows, date = new Date()) {
 // siempre; los comprobantes sin aprobar o en revisión en el panel ya NO excluyen a nadie (el tercer parámetro se conserva por compatibilidad
 // y se ignora).
 const BILLING_CUT_PATTERN = /CORTAD|CORTE|SUSPEND|INACTIV|RETIRAD|DE BAJA/;
-function billingEligibilityFromRows(rows, date = new Date(), _ignoredPendingReceiptPhones = new Set()) {
+// 2026-10-29: SUSPENDIDO en la planilla = cliente suspendido por no pagar (sigue pendiente de pago); CORTADO/RETIRADO = ya no es parte de BPGO.
+// El envío manual ("Enviar lote por API", includeSuspended) sí cobra a los suspendidos para que paguen y los reconecten; la cobranza automática
+// (aviso de suspensión de los días 20/22/23) NO les escribe, porque ya están suspendidos.
+const BILLING_HARD_CUT_PATTERN = /CORTAD|CORTE|INACTIV|RETIRAD|DE BAJA/;
+function billingEligibilityFromRows(rows, date = new Date(), _ignoredPendingReceiptPhones = new Set(), options = null) {
+  const includeSuspended = Boolean(options?.includeSuspended);
+  const cutPattern = includeSuspended ? BILLING_HARD_CUT_PATTERN : BILLING_CUT_PATTERN;
   const columns = billingSheetColumns(rows, date);
   if (Object.values(columns).some((index) => index < 0)) {
     return { ok: false, error: "La planilla no contiene todas las columnas obligatorias del mes vigente.", eligible: [], excluded: [] };
@@ -3622,8 +3628,8 @@ function billingEligibilityFromRows(rows, date = new Date(), _ignoredPendingRece
     else if (item.monthStatus === "PAGADO") reason = "paid";
     // 2026-10-24: "cortado", "retirado" (y suspendido/inactivo/de baja) significan lo mismo: el cliente ya no es parte de BPGO. Se reconoce tanto en
     // ESTADO BPGO como en la celda del mes (donde la planilla escribe "RETIRADO"), y nunca recibe cobranza.
-    else if (BILLING_CUT_PATTERN.test(item.accountStatus) || BILLING_CUT_PATTERN.test(item.monthStatus)) reason = "inactive_or_suspended";
-    else if (item.monthStatus) reason = "month_not_pending";
+    else if (cutPattern.test(item.accountStatus) || cutPattern.test(item.monthStatus)) reason = "inactive_or_suspended";
+    else if (item.monthStatus && !(includeSuspended && /SUSPEND/.test(item.monthStatus))) reason = "month_not_pending";
     else if (!(item.amount > 0)) reason = "non_positive_amount";
     (reason ? excluded : eligible).push(reason ? { ...item, reason } : item);
   }
@@ -4450,7 +4456,7 @@ async function sendBillingMessages(request, env) {
         error: "No se pudo leer la planilla de Google; no se envió ningún mensaje.", results: [] }, { status: 502 });
     }
     const month = BILLING_MONTHS_ES[chileDateParts().month - 1];
-    const eligibility = billingEligibilityFromRows(source.rows, new Date(), await pendingPaymentReceiptPhones(env, month));
+    const eligibility = billingEligibilityFromRows(source.rows, new Date(), await pendingPaymentReceiptPhones(env, month), { includeSuspended: true });
     if (!eligibility.ok) {
       return Response.json({ ok: false, sent: 0, skipped: 0, failed: 0, excluded: 0, error: eligibility.error, results: [] }, { status: 422 });
     }
@@ -4534,7 +4540,7 @@ async function sendBillingMessages(request, env) {
 
 // Motivos (mismos que la cobranza automática) por los que un cliente NO recibe el recordatorio de cobranza.
 const BILLING_EXCLUSION_LABELS = {
-  inactive_or_suspended: "Excluido: CORTADO/RETIRADO/SUSPENDIDO en la planilla",
+  inactive_or_suspended: "Excluido: CORTADO/RETIRADO en la planilla (ya no es parte de BPGO)",
   paid: "Excluido: mes PAGADO en la planilla",
   month_not_pending: "Excluido: el mes no está pendiente en la planilla",
   non_positive_amount: "Excluido: sin monto en la planilla",
