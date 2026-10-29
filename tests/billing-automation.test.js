@@ -130,5 +130,10 @@ assert.ok(clientBundle.includes("active:!K3(h).includes(`suspendido`)&&!cutFlag,
 assert.ok(clientBundle.includes("function q6(e,t,n=!1){return e.filter(e=>{if(e.cut)return!1;"));
 
 // 2026-10-26: la pestaña "Suspendidos" de operaciones muestra solo a quienes están suspendidos en el mes actual, no a todos los que alguna vez lo estuvieron.
-assert.ok(clientBundle.includes("se=e.filter(e=>!e.active||(e.suspendedMonths??[]).some(t=>K3(t)===K3(f))),"));
+assert.ok(clientBundle.includes("(e.suspendedMonths??[]).some(t=>K3(t)===K3(f))"));
 assert.ok(!clientBundle.includes("se=e.filter(e=>!e.active||(e.suspendedMonths?.length??0)>0),"));
+
+// 2026-10-29: la pestaña Suspendidos no lista a los CORTADO/RETIRADO ni a clientes que ya no están en la planilla (se marcan fuera de BPGO al sincronizar).
+const bundleNow = fs.readFileSync(path.join(__dirname, "..", "assets", "index-bulk-v28.js"), "utf8");
+assert.ok(bundleNow.includes("se=e.filter(e=>!e.cut&&(!e.active||(e.suspendedMonths??[]).some(t=>K3(t)===K3(f)))),"));
+assert.ok(bundleNow.includes("map(e=>String(e.id??``).startsWith(`billing-customer-`)?{...e,cut:!0,active:!1}:e)"));
