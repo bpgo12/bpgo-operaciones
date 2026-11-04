@@ -2310,6 +2310,14 @@ async function executeBotAction(env, credentials, phone, action, message) {
       await sendBotReply(env, credentials, phone, "Para revisar el descuento por los días sin servicio, ¿cuántos días exactos estuviste sin internet?", preferAudio);
       return;
     }
+    // Cualquier respuesta que pida el comprobante a alguien que ya lo mandó se cambia por el aviso de que ya lo tenemos.
+    if (ASKS_FOR_RECEIPT.test(action.text)) {
+      const alreadySent = await recentReceiptCase(env, phone).catch(() => null);
+      if (alreadySent) {
+        await sendBotReply(env, credentials, phone, receiptAlreadyReceivedReply(alreadySent), preferAudio);
+        return;
+      }
+    }
     await sendBotReply(env, credentials, phone, action.text, preferAudio);
     return;
   }
@@ -2321,7 +2329,10 @@ async function executeBotAction(env, credentials, phone, action, message) {
     // Un texto que solo AVISA un pago ("hoy realizamos el pago", "ya pagué") sin ningún adjunto no es un comprobante:
     // antes se contestaba "Recibimos tu comprobante" (56912000009) y se avisaba a Carlos de un comprobante inexistente.
     if (!message.mediaId) {
-      await sendBotReply(env, credentials, phone, "Gracias por avisar 🙏 Cuando tengas el comprobante (foto o PDF), envíalo por este chat y lo dejamos en revisión.", preferAudio);
+      // Si ya mandó el comprobante (p. ej. anoche y este texto llegó aparte), no se lo vuelve a pedir.
+      const alreadySent = await recentReceiptCase(env, phone).catch(() => null);
+      await sendBotReply(env, credentials, phone, alreadySent ? receiptAlreadyReceivedReply(alreadySent)
+        : "Gracias por avisar 🙏 Cuando tengas el comprobante (foto o PDF), envíalo por este chat y lo dejamos en revisión.", preferAudio);
       return;
     }
     if (!hasStrongReceiptEvidence(action, message)) {
@@ -2588,6 +2599,27 @@ async function recentInboundMedia(env, phone) {
   if (!row || Date.now() - Date.parse(row.created_at) >= 60000) return null;
   return { mediaId: row.media_id, mediaType: row.message_type };
 }
+
+// 2026-11-04: un cliente mandó el comprobante de noche (el bot respondió "Recibimos tu comprobante") y el texto "adjunto comprobante de pago", que llegó
+// aparte, se contestó recién a las 9:00 con "Cuando tengas el comprobante, envíalo": el bot no recordaba el comprobante que ya tenía. Antes de pedirle un
+// comprobante a alguien, se mira si ya mandó uno (caso de pago) en las últimas 48 h.
+async function recentReceiptCase(env, phone, hours = 48) {
+  const row = await env.DB.prepare(`SELECT status, created_at FROM whatsapp_automation_cases
+    WHERE phone = ? AND case_type = 'payment' ORDER BY created_at DESC LIMIT 1`).bind(phone).first();
+  if (!row) return null;
+  const text = String(row.created_at || "");
+  const at = Date.parse(/[T]/.test(text) ? text : `${text.replace(" ", "T")}Z`);
+  if (!Number.isFinite(at) || Date.now() - at >= hours * 3600000) return null;
+  return row;
+}
+
+function receiptAlreadyReceivedReply(receiptCase) {
+  return String(receiptCase?.status || "").toLowerCase() === "approved"
+    ? "Tu pago ya figura confirmado 🎉 ¡Gracias!"
+    : "Ya recibimos tu comprobante 🙏 Está en revisión y apenas lo confirmemos te avisamos.";
+}
+
+const ASKS_FOR_RECEIPT = /(env[ií]a|envi[aá]nos|env[ií]ame|manda|m[aá]ndanos|adjunta|sube|comparte)\w*[^.?!\n]{0,60}comprobante|cuando tengas el comprobante/i;
 
 // Estado de conversación que caduca (2026-10-07): había 16 comprobantes "esperando el nombre" desde el 20 de
 // septiembre y 11 solicitudes de venta abiertas desde el 18 de septiembre. Cualquier mensaje futuro de esos

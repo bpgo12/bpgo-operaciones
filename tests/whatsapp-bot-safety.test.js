@@ -894,7 +894,7 @@ assert.match(worker, /idx_staff_notifications_role_status ON staff_notifications
   assert.equal(ctx.api.isCaseStatusQuestion("Hola"), false);
   assert.equal(ctx.api.isCaseStatusQuestion("¿y mi solicitud?"), true);
 }
-assert.match(worker, /if \(!message\.mediaId\) \{\s*\n\s*await sendBotReply\(env, credentials, phone, "Gracias por avisar 🙏 Cuando tengas el comprobante/);
+assert.match(worker, /if \(!message\.mediaId\) \{[\s\S]{0,400}"Gracias por avisar 🙏 Cuando tengas el comprobante/);
 assert.match(worker, /La campaña\/promoción Cyber ya TERMINÓ/);
 assert.match(worker, /El monto a pagar es \$\{formatCurrency\(c\.balance\)\}/);
 
@@ -1197,3 +1197,37 @@ assert.match(webPaymentBlock, /x-notify-secret/);
 assert.match(webPaymentBlock, /if \(!secret \|\| diff !== 0\) return Response\.json\(\{ ok: false, error: "No autorizado\." \}, \{ status: 401 \}\);/);
 assert.match(webPaymentBlock, /notifyStaff\(env, credentials, "carlos"/);
 assert.match(webPaymentBlock, /sourceMessageId: `webpay:\$\{buyOrder\}`/);
+
+// 2026-11-04: si el cliente ya mandó el comprobante (caso de pago en las últimas 48 h), el bot no se lo vuelve a pedir.
+(async () => {
+  const run = async (rows, text, at) => {
+    const ctx = { Date, Number, String, Promise, Boolean, rows };
+    ctx.env = { DB: { prepare: () => ({ bind: () => ({ first: async () => rows[0] || null }) }) } };
+    vm.createContext(ctx);
+    vm.runInContext(`const ASKS_FOR_RECEIPT = ${worker.match(/const ASKS_FOR_RECEIPT = (\/.*\/i);/)[1]}; async ${functionSource("recentReceiptCase")}; ${functionSource("receiptAlreadyReceivedReply")}; this.api = { recentReceiptCase, receiptAlreadyReceivedReply, ASKS_FOR_RECEIPT };`, ctx);
+    return ctx;
+  };
+  const ahora = Date.now();
+  const iso = (horas) => new Date(ahora - horas * 3600000).toISOString();
+  const sql = (horas) => new Date(ahora - horas * 3600000).toISOString().slice(0, 19).replace("T", " ");
+  // Comprobante de anoche (formato ISO y formato SQL): se reconoce.
+  for (const created_at of [iso(10), sql(10)]) {
+    const ctx = await run([{ status: "suggested", created_at }]);
+    const found = await ctx.api.recentReceiptCase(ctx.env, "56900000001");
+    assert.ok(found, `debe reconocer el comprobante reciente (${created_at})`);
+    assert.match(ctx.api.receiptAlreadyReceivedReply(found), /Ya recibimos tu comprobante/);
+  }
+  // Comprobante de hace 3 días o sin comprobante: no cuenta.
+  assert.equal(await (async () => { const ctx = await run([{ status: "suggested", created_at: iso(72) }]); return ctx.api.recentReceiptCase(ctx.env, "56900000001"); })(), null);
+  assert.equal(await (async () => { const ctx = await run([]); return ctx.api.recentReceiptCase(ctx.env, "56900000001"); })(), null);
+  // Pago ya aprobado: se dice que figura confirmado.
+  const aprobado = await run([{ status: "approved", created_at: iso(5) }]);
+  assert.match(aprobado.api.receiptAlreadyReceivedReply(await aprobado.api.recentReceiptCase(aprobado.env, "56900000001")), /ya figura confirmado/);
+  // Frases del bot que piden el comprobante.
+  for (const frase of ["Cuando tengas el comprobante (foto o PDF), envíalo por este chat", "Envíame el comprobante para dejarlo en revisión.", "Por favor mándanos tu comprobante de pago", "¿Puedes adjuntar el comprobante?"]) {
+    assert.ok(aprobado.api.ASKS_FOR_RECEIPT.test(frase), frase);
+  }
+  assert.equal(aprobado.api.ASKS_FOR_RECEIPT.test("Recibimos tu comprobante, en breve lo revisamos."), false);
+})().catch((error) => { console.error(error); process.exit(1); });
+assert.match(worker, /const alreadySent = await recentReceiptCase\(env, phone\)\.catch\(\(\) => null\);\s*await sendBotReply\(env, credentials, phone, alreadySent \?/);
+assert.match(worker, /if \(ASKS_FOR_RECEIPT\.test\(action\.text\)\) \{/);
