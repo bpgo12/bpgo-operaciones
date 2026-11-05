@@ -1940,7 +1940,7 @@ function externalConnectivityPaymentReply(value) {
   const mentionsExternalSignal = /\b(mala senal|sin senal|poca senal|senal mala|mala conexion|poca cobertura)\b/.test(text)
     && /\b(trabajo|faena|minera|campamento|oficina|donde trabajo|aca donde trabajo)\b/.test(text);
   if (mentionsLaterPayment && (mentionsExternalSignal || /\b(senal|conexion|cobertura)\b/.test(text))) {
-    return "Entendido, puedes realizar el pago más tarde cuando tengas mejor conexión.";
+    return "Entendido, puedes realizar el pago más tarde cuando tengas mejor conexión. Cuando puedas, paga acá 💳: https://bpgo.cl/pagar";
   }
   return null;
 }
@@ -1954,7 +1954,8 @@ function cancellationMeansPayment(value, history) {
   if (/\b(dar de baja|baja del servicio|cancelar (?:el )?(?:servicio|contrato|internet|plan)|terminar (?:el )?(?:servicio|contrato|plan)|no quiero seguir|quiero retirarme)\b/.test(text)) return false;
   const recent = (Array.isArray(history) ? history : []).slice(-8).map((item) => normalize(item.message_text)).join(" ");
   const billingContext = /\b(mensualidad|pendiente de pago|regularizar|bpgo\.cl\/pagar|pago|pagar|comprobante|deuda|saldo)\b/.test(recent);
-  const paymentPhrase = /\b(voy a cancelar|voy a cancelo|voy a cancels|mas tarde cancel|otro ratito.*cancel|a la tarde.*cancel|en la tarde.*cancel)\b/.test(text);
+  const paymentPhrase = /\b(voy a cancelar|voy a cancelo|voy a cancels|mas tarde cancel|otro ratito.*cancel|a la tarde.*cancel|en la tarde.*cancel)\b/.test(text)
+    || /\bcancel(ar|o)\s+(el\s+|la\s+|mi\s+|este\s+)?(mes|mensualidad|cuota|pago|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b/.test(text);
   return billingContext || paymentPhrase || text === "cancelar" || text === "cancelo";
 }
 
@@ -2013,7 +2014,12 @@ async function callBotResponder(env, context, inboundMessage, media) {
       : "Perfecto. Envíame el comprobante para dejarlo en revisión." };
   }
   if (cancellationMeansPayment(inboundMessage?.text, context.history)) {
-    return { action: "reply", text: "Entendido, puedes realizar el pago más tarde. Cuando lo hagas, si quieres puedes enviarnos el comprobante por este medio." };
+    // 2026-11-05: "Necesito cancelar el mes de noviembre" (quiere PAGAR noviembre) recibió "puedes realizar el pago más tarde". Solo si promete pagar
+    // después se le dice que puede hacerlo cuando pueda; en cualquier caso la respuesta lleva siempre el enlace de la página de pago.
+    const promisesLater = /\b(voy a|mas tarde|otro ratito|a la tarde|en la tarde|manana|despues|luego)\b/.test(normalizedForCancel);
+    return { action: "reply", text: promisesLater
+      ? `Entendido, puedes pagar cuando puedas en ${PAYMENT_PAGE_URL} 💳 Si quieres, después envíanos el comprobante por este medio.`
+      : `¡Claro! Puedes pagar tu mensualidad con tarjeta de débito o crédito, rápido y seguro, acá 💳: ${PAYMENT_PAGE_URL} Si ya pagaste por transferencia, envíame el comprobante. 🙏` };
   }
   if (!env.OPENAI_API_KEY) return { action: "escalate", reason: "bot_not_configured" };
   let customerLine = "No se pudo identificar al cliente en el sistema por su número.";
@@ -2337,6 +2343,9 @@ async function ensureReceiptTables(env) {
     registered INTEGER NOT NULL DEFAULT 0, reasons TEXT, sheet_row INTEGER, created_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_receipt_log_tx ON receipt_payment_log(tx)").run().catch(() => null);
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_balance_flows (
+    phone TEXT PRIMARY KEY, data_json TEXT, attempts INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
 }
 
 async function startReceiptFlow(env, phone, caseId, data, state) {
@@ -2490,6 +2499,128 @@ async function completeReceiptFlow(env, credentials, phone, flow, reported, pref
     : `REVISAR: ${evaluation.reasons.join("; ")}.`;
   await finishReceiptFlowToStaff(env, credentials, phone, { ...flow, case_id: flow.case_id }, `${detail} Titular indicado: ${customerName}. ${verdict}`, preferAudio,
     `Gracias, dejamos tu comprobante asociado a nombre de ${customerName}. El equipo lo confirmará pronto. 🙏`);
+}
+
+// ===== Consulta de saldo: nombre + RUT, lectura de dos meses y siempre el enlace de pago (2026-11-05) =====
+// Orden de Carlos: cuando el cliente pregunta cuánto debe, el bot pide el NOMBRE y el RUT del titular, los cruza con la planilla y responde con el
+// mes anterior y el mes vigente (el vigente vence el día 10), siempre con el enlace de la página de pago. Nunca afirma "no debes nada": solo habla
+// de esos dos meses. Cliente cortado/retirado, de cobro aparte, con datos que no cuadran o con alta reciente (mes anterior) pasa a una persona.
+const BALANCE_FLOW_TTL_HOURS = 3;
+const BALANCE_DUE_DAY = 10;
+const PAYMENT_PAGE_URL = "https://bpgo.cl/pagar";
+
+function isBalanceInquiry(value) {
+  const text = String(value || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, " ");
+  return /\b(saldo|deuda|adeud\w*|estado de (mi )?cuenta|cuanto (debo|pago|tengo que pagar|se debe|se adeuda|me falta|queda)|cuanto es (lo que )?(se )?(debo|debe|adeuda|adeudo)|que tengo que pagar|estoy al dia|monto (a|por) pagar|cuanto es mi mensualidad)\b/.test(text);
+}
+
+function capitalizeMonth(name) {
+  return name ? name.charAt(0).toUpperCase() + name.slice(1) : "";
+}
+
+// Texto con el estado de los dos meses de un cliente de la planilla. Devuelve { text } o { handoff: motivo }.
+function buildBalanceReply(row, now) {
+  const money = (value) => `$${Number(value).toLocaleString("es-CL")}`;
+  const today = chileDateParts(now);
+  const currentName = capitalizeMonth(BILLING_MONTHS_ES[today.month - 1]);
+  const previousName = today.month > 1 ? capitalizeMonth(BILLING_MONTHS_ES[today.month - 2]) : null;
+  if (/CORTAD|RETIRAD|INACTIV|DE BAJA/.test(row.accountStatus) || RECEIPT_COBRO_APARTE_RUTS.has(row.rut)) return { handoff: "cliente cortado, retirado o de cobro aparte" };
+  if (!(row.amount > 0)) return { handoff: "el cliente no tiene monto en la planilla" };
+  const registered = parseReceiptDate(row.registro);
+  const registeredLastMonth = registered && registered.year === (today.month > 1 ? today.year : today.year - 1) && registered.month === (today.month > 1 ? today.month - 1 : 12);
+  if (registeredLastMonth) return { handoff: "alta del mes anterior: el cobro de instalación se revisa a mano" };
+  const known = (status) => status === "" || status === "PAGADO" || /SUSPEND/.test(status);
+  if (!known(row.monthStatus) || (previousName && row.prevStatus !== null && !known(row.prevStatus))) return { handoff: `un mes figura como "${!known(row.monthStatus) ? row.monthStatus : row.prevStatus}"` };
+  const newThisMonth = Boolean(registered && registered.month === today.month && registered.year === today.year && !row.prevPaid);
+  const items = [];
+  let suspended = false;
+  // Mes anterior: solo si el cliente ya existía entonces (una alta de este mes no debe nada del mes anterior).
+  if (previousName && row.prevStatus !== null && !newThisMonth && row.prevStatus !== "PAGADO") {
+    items.push({ name: previousName, amount: row.amount, overdue: true });
+    suspended = suspended || /SUSPEND/.test(row.prevStatus);
+  }
+  if (row.monthStatus !== "PAGADO") {
+    items.push({ name: currentName, amount: expectedReceiptAmount(row, now), current: true, installation: newThisMonth });
+    suspended = suspended || /SUSPEND/.test(row.monthStatus);
+  }
+  const closing = `Si ya pagaste, envíame el comprobante. 🙏`;
+  if (!items.length) {
+    return { text: `Tu cuenta está al día 🙌 ${previousName && !newThisMonth ? `${previousName} y ${currentName}` : currentName} ${previousName && !newThisMonth ? "figuran pagados" : "figura pagado"}. Si ya pagaste algo más reciente, envíame el comprobante.` };
+  }
+  const lines = items.map((item) => `• ${item.installation ? `Instalación${item.amount !== 25000 ? " + proporcional" : ""} de ${item.name}` : item.name}: ${money(item.amount)}${item.current ? (today.day <= BALANCE_DUE_DAY ? ` (vence el ${BALANCE_DUE_DAY})` : ` (venció el ${BALANCE_DUE_DAY})`) : ""}`);
+  const total = items.length > 1 ? `\nTotal: ${money(items.reduce((sum, item) => sum + item.amount, 0))}` : "";
+  const reconnect = suspended ? "\nTu servicio figura suspendido: al pagar coordinamos la reconexión." : "";
+  const paidNote = items.length === 1 && row.prevStatus === "PAGADO" && !items[0].overdue && previousName ? `${previousName} figura pagado ✅.\n` : "";
+  return { text: `${paidNote}Esto es lo que figura en tu cuenta:\n${lines.join("\n")}${total}${reconnect}\nPuedes pagar con tarjeta, rápido y seguro, acá 💳: ${PAYMENT_PAGE_URL}\n${closing}` };
+}
+
+async function handleBalanceFlow(env, credentials, phone, text, message, preferAudio) {
+  const body = String(text || "").trim();
+  if (!body) return false;
+  await ensureReceiptTables(env);
+  let flow = await env.DB.prepare("SELECT * FROM whatsapp_balance_flows WHERE phone = ?").bind(phone).first();
+  if (flow && Date.now() - sqlTimeMs(flow.updated_at) > BALANCE_FLOW_TTL_HOURS * 3600000) {
+    await env.DB.prepare("DELETE FROM whatsapp_balance_flows WHERE phone = ?").bind(phone).run();
+    flow = null;
+  }
+  if (!flow) {
+    if (!isBalanceInquiry(body)) return false;
+    await env.DB.prepare(`INSERT INTO whatsapp_balance_flows (phone, data_json, attempts, updated_at) VALUES (?, '{}', 0, datetime('now'))
+      ON CONFLICT(phone) DO UPDATE SET data_json = '{}', attempts = 0, updated_at = datetime('now')`).bind(phone).run();
+    await sendBotReply(env, credentials, phone, "Con gusto te ayudo a revisar tu cuenta 🙏 Para hacerlo, ¿me indicas el nombre del titular del servicio y su RUT?", preferAudio);
+    return true;
+  }
+  const handoff = async (reply, summary) => {
+    await env.DB.prepare("DELETE FROM whatsapp_balance_flows WHERE phone = ?").bind(phone).run().catch(() => null);
+    await sendBotReply(env, credentials, phone, reply, preferAudio);
+    await notifyStaff(env, credentials, "carlos", "Consulta de saldo", await getKnownAccountName(env, phone).catch(() => null), phone, summary, { sourceMessageId: `balance:${message.id}` });
+    await setBotSessionMode(env, phone, "human", "billing_balance_handoff");
+  };
+  if (isOptOutMessage(body)) {
+    await env.DB.prepare("DELETE FROM whatsapp_balance_flows WHERE phone = ?").bind(phone).run();
+    await sendBotReply(env, credentials, phone, `Entendido 🙌 Cuando quieras revisar tu cuenta, escríbenos. Recuerda que puedes pagar en ${PAYMENT_PAGE_URL}`, preferAudio);
+    return true;
+  }
+  const data = (() => { try { return JSON.parse(flow.data_json || "{}"); } catch { return {}; } })();
+  const rut = extractRutFromText(body) || data.rut || null;
+  const candidateName = extractAccountName(String(body).replace(/\b\d{1,2}\.?\d{3}\.?\d{3}\s*-?\s*[0-9kK]\b/g, " "));
+  const name = isPlausibleAccountName(candidateName) ? candidateName : data.name || null;
+  if (!rut || !name) {
+    if (flow.attempts >= 2) {
+      await handoff("Para ayudarte mejor, te va a escribir un agente por acá en breve. 🙏", `Consulta de saldo sin poder identificar al cliente (faltó ${!rut ? "el RUT" : "el nombre"}). Escribió: "${body.slice(0, 120)}"`);
+      return true;
+    }
+    await env.DB.prepare("UPDATE whatsapp_balance_flows SET data_json = ?, attempts = attempts + 1, updated_at = datetime('now') WHERE phone = ?")
+      .bind(JSON.stringify({ rut, name }), phone).run();
+    await sendBotReply(env, credentials, phone, !rut && !name ? "Necesito el nombre del titular y su RUT, por ejemplo: Juan Pérez, 12.345.678-5."
+      : !rut ? "Gracias 🙏 Ahora necesito el RUT del titular del servicio." : "Gracias 🙏 Ahora necesito el nombre del titular del servicio.", preferAudio);
+    return true;
+  }
+  const fresh = await fetchFreshBillingSource(env).catch(() => null);
+  const sheet = fresh ? receiptSheetRows(fresh.rows) : { ok: false, list: [] };
+  if (!sheet.ok) {
+    await handoff("Estoy revisando tu cuenta y un agente te confirma el detalle en breve. 🙏", "Consulta de saldo: no se pudo leer la planilla para responder.");
+    return true;
+  }
+  const matches = sheet.list.filter((item) => item.rut && item.rut === rut);
+  const row = matches.length === 1 && nameMatchesRow(nameTokens(name), matches[0].tokens) ? matches[0] : null;
+  if (!row) {
+    if (flow.attempts >= 1) {
+      await handoff("No logré encontrar un servicio con esos datos. Te va a escribir un agente por acá para ayudarte. 🙏", `Consulta de saldo: el nombre "${name}" y el RUT ${rut} no coinciden con un cliente de la planilla.`);
+      return true;
+    }
+    await env.DB.prepare("UPDATE whatsapp_balance_flows SET data_json = '{}', attempts = attempts + 1, updated_at = datetime('now') WHERE phone = ?").bind(phone).run();
+    await sendBotReply(env, credentials, phone, "No encontré un servicio con esos datos. ¿Me confirmas el nombre del titular y su RUT? Por ejemplo: Juan Pérez, 12.345.678-5.", preferAudio);
+    return true;
+  }
+  const reply = buildBalanceReply(row, new Date());
+  if (reply.handoff) {
+    await handoff("Estoy revisando tu cuenta y un agente te confirma el detalle en breve. 🙏", `Consulta de saldo de ${row.name}: ${reply.handoff}.`);
+    return true;
+  }
+  await env.DB.prepare("DELETE FROM whatsapp_balance_flows WHERE phone = ?").bind(phone).run();
+  await sendBotReply(env, credentials, phone, reply.text, preferAudio);
+  return true;
 }
 
 // Aplica un pago confirmado por un humano (Carlos/Eduardo tocando el botón de WhatsApp) directamente
@@ -3773,6 +3904,7 @@ async function runBotForInboundMessages(env, changes) {
           await setBotSessionMode(env, phone, "human", "case_created_billing");
           continue;
         }
+        if (!isStaffPhone && await handleBalanceFlow(env, credentials, phone, text, message, preferAudio)) continue;
         if (!(await isStillLatestMessage(env, phone, message.id))) continue;
         let mediaId = message.image?.id || message.document?.id || null;
         let mediaType = message.type || "unknown";

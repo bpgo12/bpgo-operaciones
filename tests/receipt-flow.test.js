@@ -300,6 +300,93 @@ const goodReceipt = (overrides) => ({
       h.restore();
     }
   }
+
+  // 11) Consulta de saldo: pide nombre y RUT, cruza con la planilla y responde con el mes anterior y el vigente, siempre con el enlace de pago.
+  {
+    const cap = (name) => name.charAt(0).toUpperCase() + name.slice(1);
+    const pregunta = "Me podría indicar por favor cuánto es lo que se adeuda";
+    const ask = async (h, who, datos) => { await h.text(who, pregunta); await h.text(who, datos); return h.lastTo(who).at(-1); };
+
+    // 11a) Mes anterior pagado, mes vigente pendiente (con nombre y RUT en un solo mensaje).
+    {
+      const h = await harness({});
+      await h.text(client, pregunta);
+      assert.match(h.lastTo(client).at(-1), /¿me indicas el nombre del titular del servicio y su RUT?/);
+      await h.text(client, "Maria Perez Prueba 11.111.111-1");
+      const reply = h.lastTo(client).at(-1);
+      assert.match(reply, new RegExp(`${cap(previousMonth)} figura pagado ✅`));
+      assert.match(reply, new RegExp(`• ${cap(currentMonth)}: \\$18\\.000 \\(v(ence|enció) el 10\\)`));
+      assert.match(reply, /https:\/\/bpgo\.cl\/pagar/);
+      assert.equal(h.sqlite.prepare("SELECT COUNT(*) AS n FROM whatsapp_balance_flows").get().n, 0);
+      h.restore();
+    }
+    // 11b) Primero el nombre y luego el RUT, en mensajes separados.
+    {
+      const h = await harness({});
+      await h.text(client, pregunta);
+      await h.text(client, "Maria Perez Prueba");
+      assert.match(h.lastTo(client).at(-1), /necesito el RUT del titular/);
+      await h.text(client, "11.111.111-1");
+      assert.match(h.lastTo(client).at(-1), /Esto es lo que figura en tu cuenta/);
+      h.restore();
+    }
+    // 11c) Mes anterior también pendiente: se suman los dos y se muestra el total.
+    {
+      const h = await harness({});
+      h.rows[1][9] = "";
+      const reply = await ask(h, client, "Maria Perez Prueba, 11.111.111-1");
+      assert.match(reply, new RegExp(`• ${cap(previousMonth)}: \\$18\\.000`));
+      assert.match(reply, /Total: \$36\.000/);
+      h.restore();
+    }
+    // 11d) Al día, suspendido, cortado y datos que no cuadran.
+    {
+      const h = await harness({});
+      assert.match(await ask(h, client, "Ana Soto Prueba 33.333.333-3"), /Tu cuenta está al día 🙌/);
+      h.restore();
+    }
+    {
+      const h = await harness({});
+      const reply = await ask(h, client, "Juan Lopez Prueba 22.222.222-2");
+      assert.match(reply, /\$25\.000/);
+      assert.match(reply, /suspendido: al pagar coordinamos la reconexión/);
+      h.restore();
+    }
+    {
+      const h = await harness({});
+      const reply = await ask(h, client, "Pedro Diaz Prueba 44.444.444-4");
+      assert.match(reply, /un agente te confirma el detalle en breve/);
+      assert.doesNotMatch(reply, /\$\d/);
+      assert.equal(h.sqlite.prepare("SELECT mode FROM whatsapp_bot_sessions WHERE phone = ?").get(client).mode, "human");
+      h.restore();
+    }
+    {
+      // RUT de una persona y nombre de otra: no se revela nada; tras el segundo intento fallido pasa a un agente.
+      const h = await harness({});
+      await h.text(client, pregunta);
+      await h.text(client, "Ana Soto Prueba 11.111.111-1");
+      assert.match(h.lastTo(client).at(-1), /No encontré un servicio con esos datos/);
+      await h.text(client, "Ana Soto Prueba 11.111.111-1");
+      assert.match(h.lastTo(client).at(-1), /No logré encontrar un servicio con esos datos/);
+      assert.ok(h.lastTo(client).every((text) => !/\$\d/.test(text)), "no se debe mostrar ningún monto");
+      h.restore();
+    }
+  }
+
+  // 12) "Necesito cancelar el mes de noviembre": en Chile cancelar es pagar. La respuesta lleva siempre el enlace de pago.
+  {
+    const h = await harness({});
+    await h.text(client, `Necesito cancelar el mes de ${currentMonth}`);
+    const reply = h.lastTo(client).at(-1);
+    assert.match(reply, /https:\/\/bpgo\.cl\/pagar/);
+    assert.doesNotMatch(reply, /más tarde/);
+    await h.text("56977770009", "Voy a cancelar más tarde, cuando tenga plata");
+    const later = h.lastTo("56977770009").at(-1);
+    assert.match(later, /https:\/\/bpgo\.cl\/pagar/);
+    assert.match(later, /cuando puedas/);
+    h.restore();
+  }
+
   fs.rmSync(tmpFile, { force: true });
   console.log("receipt flow: ok");
 })().catch((error) => { fs.rmSync(tmpFile, { force: true }); console.error(error); process.exit(1); });
