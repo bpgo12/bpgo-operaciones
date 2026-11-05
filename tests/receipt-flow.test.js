@@ -326,6 +326,8 @@ const goodReceipt = (overrides) => ({
       await h.text(client, pregunta);
       await h.text(client, "Maria Perez Prueba");
       assert.match(h.lastTo(client).at(-1), /necesito el RUT del titular/);
+      await h.text(client, "¿cuánto se adeuda?");
+      assert.match(h.lastTo(client).at(-1), /me falta el RUT/);
       await h.text(client, "11.111.111-1");
       assert.match(h.lastTo(client).at(-1), /Esto es lo que figura en tu cuenta/);
       h.restore();
@@ -342,7 +344,7 @@ const goodReceipt = (overrides) => ({
     // 11d) Al día, suspendido, cortado y datos que no cuadran.
     {
       const h = await harness({});
-      assert.match(await ask(h, client, "Ana Soto Prueba 33.333.333-3"), /Tu cuenta está al día 🙌/);
+      assert.match(await ask(h, client, "Ana Soto Prueba 33.333.333-3"), /figuran pagados en la planilla/);
       h.restore();
     }
     {
@@ -380,13 +382,24 @@ const goodReceipt = (overrides) => ({
     const reply = h.lastTo(client).at(-1);
     assert.match(reply, /https:\/\/bpgo\.cl\/pagar/);
     assert.doesNotMatch(reply, /más tarde/);
+    assert.ok(reply.includes(currentMonth));
     await h.text("56977770009", "Voy a cancelar más tarde, cuando tenga plata");
     const later = h.lastTo("56977770009").at(-1);
     assert.match(later, /https:\/\/bpgo\.cl\/pagar/);
-    assert.match(later, /cuando puedas/);
+    assert.doesNotMatch(later, /cuando puedas/);
     h.restore();
   }
 
+  {
+    const h = await harness({});
+    h.setAi(goodReceipt());
+    await h.image(client);
+    await h.text(client, "es de noviembre");
+    assert.match(h.lastTo(client).at(-1), /noviembre.*revisión/);
+    assert.equal(h.writes.length, 0);
+    assert.equal(h.sqlite.prepare("SELECT mode FROM whatsapp_bot_sessions WHERE phone = ?").get(client).mode, "human");
+    h.restore();
+  }
   fs.rmSync(tmpFile, { force: true });
   console.log("receipt flow: ok");
 })().catch((error) => { fs.rmSync(tmpFile, { force: true }); console.error(error); process.exit(1); });

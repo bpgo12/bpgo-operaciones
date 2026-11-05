@@ -791,7 +791,7 @@ assert.match(worker, /\(failed\?\.n \|\| 0\) >= 10\) return Response\.json\(\{ o
   for (const no of ["Hola muy buenas tardes", "ok gracias", "¿se podría?", "Necesito ayuda con la forma de pago", "quiero contratar internet", "webpaycl comprobante Pago 1b6fu", "hola", "buenas tardes, quisiera saber si llega internet a mi casa por favor"]) assert.equal(ctx.api.isPlausibleSector(no), false, no);
 }
 assert.match(worker, /if \(!isPlausibleSector\(text\)\) \{/);
-assert.match(worker, /if \(!isStaffPhone && String\(text \|\| ""\)\.trim\(\) && isHumanRequest\(text\) && !isOptOutMessage\(text\)\) \{/);
+assert.match(worker, /if \(!isStaffPhone && String\(text \|\| ""\)\.trim\(\) && \(isHumanRequest\(text\) \|\| isExecutiveQuickReply\(text\)\) && !isOptOutMessage\(text\)\) \{/);
 assert.match(worker, /fragment \? `Anotado ✅ \$\{describeInstallationFragment\(fragment\)\}\. Todavía me falta/);
 // 2026-10-20 (56912000014): datos de instalación dados de a poco, con errores y repeticiones.
 {
@@ -1005,7 +1005,7 @@ assert.match(worker, /"fundo anique", "rucanire", "huechicura", "canete"/);
 }
 assert.match(worker, /const registered = await webpayPaymentIsRegistered\(env, phone\)\.catch\(\(\) => false\);/);
 assert.match(worker, /return hits\.length === 1 && hits\[0\]\.reason === "paid";/);
-assert.match(worker, /ya quedó ingresado ✅/);
+assert.match(worker, /La mensualidad consultada ya figura pagada/);
 
 // 2026-10-20: la cobranza automática dependía solo del cron de GitHub (retrasos de 3-6 h). Respaldo desde los webhooks, con reclamo atómico por cliente.
 assert.match(worker, /async function runBillingAutomationIfDue\(env\)/);
@@ -1222,7 +1222,7 @@ assert.match(webPaymentBlock, /sourceMessageId: `webpay:\$\{buyOrder\}`/);
   assert.equal(await (async () => { const ctx = await run([]); return ctx.api.recentReceiptCase(ctx.env, "56900000001"); })(), null);
   // Pago ya aprobado: se dice que figura confirmado.
   const aprobado = await run([{ status: "approved", created_at: iso(5) }]);
-  assert.match(aprobado.api.receiptAlreadyReceivedReply(await aprobado.api.recentReceiptCase(aprobado.env, "56900000001")), /ya figura confirmado/);
+  assert.match(aprobado.api.receiptAlreadyReceivedReply(await aprobado.api.recentReceiptCase(aprobado.env, "56900000001")), /anterior confirmado.*ese pago o a uno nuevo/);
   // Frases del bot que piden el comprobante.
   for (const frase of ["Cuando tengas el comprobante (foto o PDF), envíalo por este chat", "Envíame el comprobante para dejarlo en revisión.", "Por favor mándanos tu comprobante de pago", "¿Puedes adjuntar el comprobante?"]) {
     assert.ok(aprobado.api.ASKS_FOR_RECEIPT.test(frase), frase);

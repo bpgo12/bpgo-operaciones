@@ -79,6 +79,6 @@ assert.match(worker, /audience: "bpgo-sales-followup", workflowPath: "sales-lead
 // Caso real (2026-10-01): Carlos tocaba "Registrar pago" en el aviso de WhatsApp, el pago quedaba
 // aplicado y el staff recibía la confirmación -- pero el CLIENTE nunca se enteraba de que su pago
 // ya estaba registrado. El botón solo avisaba hacia adentro, nunca hacia afuera.
-assert.match(worker, /if \(applied\.ok\) \{[\s\S]{0,1600}Hemos confirmado tu pago\. 🎉 Tu servicio está activo\. Si tienes alguna duda, no dudes en escribirnos\. 😊"\)\.catch\(\(\) => null\);/);
+assert.match(worker, /if \(applied\.ok\) \{[\s\S]{0,1600}Tu pago quedó registrado\. Gracias por avisarnos\./);
 
 console.log("whatsapp staff notifications: ok");
