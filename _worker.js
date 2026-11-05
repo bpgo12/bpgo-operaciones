@@ -2094,6 +2094,11 @@ async function callBotResponder(env, context, inboundMessage, media) {
               extracted_amount: { type: "number", description: "Monto pagado, solo si se lee con certeza en la imagen del comprobante (payment_ack)." },
               extracted_date: { type: "string", description: "Fecha del pago, solo si se lee con certeza en la imagen del comprobante (payment_ack)." },
               transaction_id: { type: "string", description: "Número de operación/transacción/folio del comprobante, solo si se lee con certeza (payment_ack). Sirve para detectar comprobantes repetidos." },
+              receipt_datetime: { type: "string", description: "Fecha y hora del pago tal como aparece impresa en el comprobante (payment_ack), solo si se lee con certeza." },
+              receipt_bank: { type: "string", description: "Banco o medio de pago del comprobante (por ejemplo Banco Estado, Banco de Chile, Webpay), solo si se lee con certeza." },
+              destination_account: { type: "string", description: "Número (o los últimos dígitos) de la cuenta de DESTINO del comprobante, tal como aparece (por ejemplo ****6196), solo si se lee con certeza." },
+              destination_bank: { type: "string", description: "Banco de la cuenta de DESTINO del comprobante, solo si se lee con certeza." },
+              destination_name: { type: "string", description: "Nombre del beneficiario o titular de la cuenta de destino, tal como aparece (puede venir cortado), solo si se lee con certeza." },
               receipt_evidence: { type: "array", items: { type: "string", enum: ["receipt_title", "bank", "amount", "date_time", "origin_account", "destination_account", "recipient", "transaction_id"] }, description: "Señales visibles reales del comprobante. Mínimo 3 para payment_ack sin texto explícito." },
               days_without_service: { type: "number", description: "Cantidad de días que el cliente dijo haber estado sin servicio (billing_review_request)." },
             },
@@ -2119,7 +2124,10 @@ async function callBotResponder(env, context, inboundMessage, media) {
   const parsed = (() => { try { return JSON.parse(toolCall.function.arguments); } catch { return null; } })();
   if (!parsed?.action) return { action: "escalate", reason: "bot_parse_error" };
   // Si el PDF no se pudo leer, ninguna "evidencia" del comprobante puede ser real: se descarta.
-  if (pdfUnread) { parsed.receipt_evidence = []; parsed.extracted_amount = undefined; parsed.transaction_id = undefined; }
+  if (pdfUnread) {
+    parsed.receipt_evidence = []; parsed.extracted_amount = undefined; parsed.transaction_id = undefined;
+    for (const key of ["receipt_datetime", "receipt_bank", "destination_account", "destination_bank", "destination_name"]) parsed[key] = undefined;
+  }
   return parsed;
 }
 
@@ -2132,6 +2140,355 @@ function currentBillingMonthEs() {
   // confirmado a esa hora se buscara/aplicara contra el mes equivocado. Se usa chileDateParts() en
   // vez del reloj local del runtime.
   return SPANISH_MONTH_NAMES[chileDateParts().month - 1];
+}
+
+// ===== Comprobantes de pago: conversación ordenada y registro autónomo (2026-11-04) =====
+// Orden de Carlos: 1) "¿Es tu comprobante de pago?"  2) "¿A nombre de quién está el servicio?"  3) el bot revisa el comprobante contra la planilla y,
+// si TODO cuadra, lo registra solo (nivel 3). AUTO_PAYMENT_MODE: "shadow" (por defecto: decide y avisa, NO escribe en la planilla), "auto" (escribe
+// PAGADO) u "off" (conserva el flujo anterior de pedir el nombre y avisar). Todo lo que no cuadra pasa a Carlos con los motivos.
+const RECEIPT_MAX_AGE_DAYS = 5;
+const RECEIPT_FLOW_TTL_HOURS = 6;
+const AUTO_PAYMENT_HOURLY_LIMIT = 8;
+// Clientes que BPGO cobra por otra vía: nunca se les registra un pago desde el bot.
+const RECEIPT_COBRO_APARTE_RUTS = new Set(["691605000"]);
+// Cuenta corriente de BPGO (Banco Estado ****6196, confirmada por Carlos el 2026-11-04). Más cuentas: variable RECEIPT_ALLOWED_ACCOUNTS (JSON [{"bank":"estado","last4":"6196"}]).
+const DEFAULT_RECEIPT_ACCOUNTS = [{ bank: "estado", last4: "6196" }];
+const RECEIPT_MONTHS = { enero: 1, febrero: 2, marzo: 3, abril: 4, mayo: 5, junio: 6, julio: 7, agosto: 8, septiembre: 9, setiembre: 9, octubre: 10, noviembre: 11, diciembre: 12 };
+const RECEIPT_NAME_STOPWORDS = new Set(["de", "del", "la", "las", "los", "y", "e", "sr", "sra", "don", "dona"]);
+
+function autoPaymentMode(env) {
+  const mode = String(env?.AUTO_PAYMENT_MODE || "shadow").trim().toLowerCase();
+  return mode === "auto" || mode === "off" ? mode : "shadow";
+}
+
+function receiptAccounts(env) {
+  try {
+    const parsed = JSON.parse(String(env?.RECEIPT_ALLOWED_ACCOUNTS || ""));
+    const list = Array.isArray(parsed) ? parsed.map((item) => ({ bank: String(item?.bank || "").toLowerCase(), last4: String(item?.last4 || "").replace(/\D/g, "").slice(-4) })).filter((item) => item.last4.length === 4) : [];
+    if (list.length) return list;
+  } catch { /* se usa la cuenta por defecto */ }
+  return DEFAULT_RECEIPT_ACCOUNTS;
+}
+
+function receiptDestinationOk(data, accounts) {
+  const digits = String(data?.destination_account || "").replace(/\D/g, "");
+  if (digits.length < 4) return false;
+  const bank = normalizeSheetHeader(data?.destination_bank || data?.bank || "");
+  return accounts.some((item) => digits.endsWith(item.last4) && (!item.bank || bank.includes(item.bank)));
+}
+
+// Acepta "03 de noviembre del 2026", "03/11/2026", "3-11-26" y "2026-11-03". Devuelve solo la fecha (día), en hora de Chile.
+function parseReceiptDate(value) {
+  const text = normalizeSheetHeader(value);
+  let match = text.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (match) return { day: Number(match[3]), month: Number(match[2]), year: Number(match[1]) };
+  match = text.match(/(\d{1,2})\s+de\s+([a-z]+)\s+(?:del?\s+)?(\d{4})/);
+  if (match && RECEIPT_MONTHS[match[2]]) return { day: Number(match[1]), month: RECEIPT_MONTHS[match[2]], year: Number(match[3]) };
+  match = text.match(/(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})/);
+  if (match) {
+    const year = Number(match[3]) < 100 ? 2000 + Number(match[3]) : Number(match[3]);
+    return { day: Number(match[1]), month: Number(match[2]), year };
+  }
+  return null;
+}
+
+function receiptAgeDays(date, now = new Date()) {
+  const today = chileDateParts(now);
+  return Math.round((Date.UTC(today.year, today.month - 1, today.day) - Date.UTC(date.year, date.month - 1, date.day)) / 86400000);
+}
+
+function nameTokens(value) {
+  return normalizeSheetHeader(String(value || "").replace(/\(.*?\)/g, " ")).replace(/[^a-z\s]/g, " ").split(/\s+/)
+    .filter((token) => token.length >= 2 && !RECEIPT_NAME_STOPWORDS.has(token));
+}
+
+function nameMatchesRow(reportedTokens, rowTokens) {
+  if (reportedTokens.length < 2) return false;
+  const row = new Set(rowTokens);
+  const hits = reportedTokens.filter((token) => row.has(token)).length;
+  return hits === reportedTokens.length || (hits >= 2 && hits / new Set([...reportedTokens, ...rowTokens]).size >= 0.6);
+}
+
+function extractRutFromText(value) {
+  const match = String(value || "").match(/\b(\d{1,2}\.?\d{3}\.?\d{3})\s*-?\s*([0-9kK])\b/);
+  return match ? `${match[1].replace(/\./g, "")}${match[2].toUpperCase()}` : null;
+}
+
+// "¿Es tu comprobante de pago?" -> "sí, es mi comprobante" / "no, es otra cosa".
+function classifyReceiptConfirmation(text) {
+  const normalized = cyberNormalize(text);
+  if (/\b(no|nop|nope|no es|no era|equivocad[oa]|me equivoque|por error)\b/.test(normalized) && !/\b(si|claro|correcto)\b/.test(normalized)) return "no";
+  if (/\b(si|sii+|sip|claro|correcto|asi es|exacto|efectivamente|ese es|es mi comprobante|es el comprobante|comprobante|pago|pague|transferencia|deposito)\b/.test(normalized)) return "yes";
+  return "other";
+}
+
+// Filas de la planilla "Registro de Pagos" con lo necesario para identificar al cliente y validar el pago del mes vigente.
+function receiptSheetRows(rows, now = new Date()) {
+  const headers = Array.isArray(rows?.[0]) ? rows[0].map(normalizeSheetHeader) : [];
+  const monthIndex = chileDateParts(now).month - 1;
+  const lastIndexOfMonth = (name) => headers.map((header, index) => (header === name ? index : -1)).filter((index) => index >= 0).pop() ?? -1;
+  const col = {
+    id: headers.indexOf("id del cliente"), name: headers.indexOf("nombre del cliente"), rut: headers.indexOf("rut"), phone: headers.indexOf("telefono"),
+    amount: headers.indexOf("monto total"), registro: headers.indexOf("fecha de registro"), status: headers.indexOf("estado bpgo"),
+    month: lastIndexOfMonth(BILLING_MONTHS_ES[monthIndex]), prev: monthIndex > 0 ? lastIndexOfMonth(BILLING_MONTHS_ES[monthIndex - 1]) : -1,
+  };
+  if (col.name < 0 || col.phone < 0 || col.amount < 0 || col.month < 0) return { ok: false, list: [] };
+  const cell = (row, index) => (index >= 0 ? String(row[index] ?? "").trim() : "");
+  const list = rows.slice(1).map((row, index) => ({
+    sheetRow: index + 2, id: cell(row, col.id), name: cell(row, col.name), tokens: nameTokens(cell(row, col.name)),
+    rut: cell(row, col.rut).replace(/[^0-9kK]/g, "").toUpperCase(), phone: normalizeWhatsAppPhone(cell(row, col.phone)),
+    amount: parseBillingAmount(cell(row, col.amount)), registro: cell(row, col.registro),
+    monthStatus: cell(row, col.month).toUpperCase(), prevStatus: col.prev >= 0 ? cell(row, col.prev).toUpperCase() : null,
+    accountStatus: cell(row, col.status).toUpperCase(),
+    prevPaid: col.registro >= 0 && row.slice(col.registro + 1, col.month).some((value) => /pagad/i.test(String(value || ""))),
+  })).filter((item) => item.name);
+  return { ok: true, list };
+}
+
+// Monto que debe pagar ese cliente este mes: la mensualidad, o (cliente nuevo) instalación + proporcional; desde el día 27 solo la instalación.
+function expectedReceiptAmount(row, now = new Date()) {
+  if (!(row?.amount > 0)) return null;
+  const registered = parseReceiptDate(row.registro);
+  const today = chileDateParts(now);
+  if (registered && registered.month === today.month && registered.year === today.year && !row.prevPaid && !RECEIPT_COBRO_APARTE_RUTS.has(row.rut)) {
+    const days = registered.day >= 27 ? 0 : Math.min(30, Math.max(0, 30 - registered.day));
+    return 25000 + Math.round((row.amount * days) / 30);
+  }
+  return row.amount;
+}
+
+// Decide si un comprobante se puede registrar solo. Devuelve { decision: "register" | "review" | "already_paid", reasons, row, expected, suspended }.
+function evaluateReceipt(input) {
+  const { data, reported, rows, now, txSeen, accounts, hourlyLimitReached } = input;
+  const reasons = [];
+  const money = (value) => `$${Number(value).toLocaleString("es-CL")}`;
+  const sheet = receiptSheetRows(rows, now);
+  let row = null;
+  if (!sheet.ok) reasons.push("no pude leer la planilla");
+  else {
+    const rut = extractRutFromText(reported);
+    const tokens = nameTokens(String(reported || "").replace(/\d/g, " "));
+    let candidates = rut ? sheet.list.filter((item) => item.rut && item.rut === rut) : [];
+    if (!candidates.length && tokens.length >= 2) candidates = sheet.list.filter((item) => nameMatchesRow(tokens, item.tokens));
+    if (candidates.length === 1) row = candidates[0];
+    else reasons.push(candidates.length ? `el titular indicado coincide con ${candidates.length} clientes` : "no encontré a ese titular en la planilla");
+  }
+  let suspended = false;
+  let alreadyPaid = false;
+  if (row) {
+    if (!row.phone || sheet.list.filter((item) => item.phone === row.phone).length !== 1) reasons.push("el teléfono de ese cliente está vacío o repetido en la planilla");
+    if (/CORTAD|RETIRAD|INACTIV|DE BAJA/.test(row.accountStatus) || RECEIPT_COBRO_APARTE_RUTS.has(row.rut)) reasons.push(`el cliente figura ${row.accountStatus || "de cobro aparte"}`);
+    if (row.monthStatus === "PAGADO") alreadyPaid = true;
+    else if (/SUSPEND/.test(row.monthStatus)) suspended = true;
+    else if (row.monthStatus) reasons.push(`el mes figura como ${row.monthStatus}`);
+    const registered = parseReceiptDate(row.registro);
+    const today = chileDateParts(now);
+    const prevMonthStart = Date.UTC(today.year, today.month - 2, 1);
+    if (row.prevStatus !== null && row.prevStatus !== "PAGADO" && registered && Date.UTC(registered.year, registered.month - 1, registered.day) < prevMonthStart) {
+      reasons.push(`el mes anterior no figura pagado (${row.prevStatus || "vacío"}): no sé a qué mes corresponde`);
+    }
+  }
+  const expected = row ? expectedReceiptAmount(row, now) : null;
+  const amount = Math.round(Number(data?.amount));
+  if (!(amount > 0)) reasons.push("no pude leer el monto");
+  else if (row && expected && amount !== expected) reasons.push(`monto leído ${money(amount)}, esperado ${money(expected)}`);
+  else if (row && !expected) reasons.push("el cliente no tiene monto en la planilla");
+  if (!receiptDestinationOk(data, accounts)) reasons.push(`la cuenta de destino no es de BPGO (leída: ${String(data?.destination_account || "no se leyó").slice(0, 30)})`);
+  const paidOn = parseReceiptDate(data?.date);
+  if (!paidOn) reasons.push("no pude leer la fecha del pago");
+  else {
+    const age = receiptAgeDays(paidOn, now);
+    if (age < 0) reasons.push("la fecha del comprobante es futura");
+    else if (age > RECEIPT_MAX_AGE_DAYS) reasons.push(`el comprobante es de hace ${age} días`);
+  }
+  const tx = normalizeReceiptTransactionId(data?.tx);
+  if (!tx) reasons.push("el comprobante no trae un número de operación legible");
+  else if (txSeen) reasons.push("el número de operación ya se había usado antes");
+  if (hourlyLimitReached) reasons.push("freno automático: ya se registraron muchos pagos en la última hora");
+  const decision = reasons.length ? "review" : alreadyPaid ? "already_paid" : "register";
+  return { decision: alreadyPaid && !reasons.length ? "already_paid" : decision, reasons, row, expected, suspended, tx, amount };
+}
+
+function receiptDataFromAction(action) {
+  return {
+    amount: Number.isFinite(Number(action.extracted_amount)) ? Math.round(Number(action.extracted_amount)) : null,
+    date: String(action.receipt_datetime || action.extracted_date || "").slice(0, 80),
+    tx: String(action.transaction_id || "").slice(0, 80),
+    bank: String(action.receipt_bank || "").slice(0, 60),
+    destination_account: String(action.destination_account || "").slice(0, 40),
+    destination_bank: String(action.destination_bank || "").slice(0, 60),
+    destination_name: String(action.destination_name || "").slice(0, 100),
+  };
+}
+
+function sqlTimeMs(value) {
+  const text = String(value || "");
+  return Date.parse(/T/.test(text) ? text : `${text.replace(" ", "T")}Z`);
+}
+
+async function ensureReceiptTables(env) {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS whatsapp_receipt_flows (
+    phone TEXT PRIMARY KEY, case_id TEXT, state TEXT NOT NULL, data_json TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS receipt_payment_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, case_id TEXT, phone TEXT, reported TEXT, tx TEXT, amount INTEGER, decision TEXT, mode TEXT,
+    registered INTEGER NOT NULL DEFAULT 0, reasons TEXT, sheet_row INTEGER, created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`).run();
+  await env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_receipt_log_tx ON receipt_payment_log(tx)").run().catch(() => null);
+}
+
+async function startReceiptFlow(env, phone, caseId, data, state) {
+  await ensureReceiptTables(env);
+  await env.DB.prepare(`INSERT INTO whatsapp_receipt_flows (phone, case_id, state, data_json, attempts, created_at, updated_at) VALUES (?, ?, ?, ?, 0, datetime('now'), datetime('now'))
+    ON CONFLICT(phone) DO UPDATE SET case_id = excluded.case_id, state = excluded.state, data_json = excluded.data_json, attempts = 0, created_at = datetime('now'), updated_at = datetime('now')`)
+    .bind(phone, caseId || null, state, JSON.stringify(data)).run();
+}
+
+async function receiptTxSeen(env, tx, caseId) {
+  const normalized = normalizeReceiptTransactionId(tx);
+  if (!normalized) return false;
+  const inCases = await env.DB.prepare("SELECT id FROM whatsapp_automation_cases WHERE receipt_tx = ? AND id != ? LIMIT 1").bind(normalized, caseId || "").first().catch(() => null);
+  const inLog = await env.DB.prepare("SELECT id FROM receipt_payment_log WHERE tx = ? AND registered = 1 LIMIT 1").bind(normalized).first().catch(() => null);
+  return Boolean(inCases || inLog);
+}
+
+async function autoRegistrationsLastHour(env) {
+  const row = await env.DB.prepare("SELECT COUNT(*) AS n FROM receipt_payment_log WHERE registered = 1 AND created_at > datetime('now', '-60 minutes')").first().catch(() => null);
+  return Number(row?.n || 0);
+}
+
+// Escribe PAGADO en la planilla (acción del Apps Script que ya usa la página de pagos) y comprueba que quedó escrito.
+async function markReceiptPaidInSheet(env, row) {
+  const target = sheetsScriptUrl(env);
+  if (!target) return { ok: false, reason: "no hay acceso a la planilla" };
+  const month = BILLING_MONTHS_ES[chileDateParts().month - 1];
+  const written = await sheetsScriptJson(target, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "updatePaymentStatus", phone: row.phone, customerName: row.name, billingMonth: month, status: "PAGADO", paidAt: new Date().toISOString() }),
+  });
+  if (!written?.ok) return { ok: false, reason: String(written?.error || "la planilla no aceptó el cambio").slice(0, 120) };
+  const fresh = await fetchFreshBillingSource(env).catch(() => null);
+  const after = fresh ? receiptSheetRows(fresh.rows).list.find((item) => item.sheetRow === row.sheetRow) : null;
+  return after?.monthStatus === "PAGADO" ? { ok: true } : { ok: false, reason: "escribí en la planilla pero el mes no quedó PAGADO" };
+}
+
+async function finishReceiptFlowToStaff(env, credentials, phone, flow, summary, preferAudio, customerText) {
+  await env.DB.prepare("DELETE FROM whatsapp_receipt_flows WHERE phone = ?").bind(phone).run().catch(() => null);
+  await sendBotReply(env, credentials, phone, customerText, preferAudio);
+  await notifyStaff(env, credentials, "carlos", "Comprobante de pago (resultado)", await getKnownAccountName(env, phone).catch(() => null), phone, summary,
+    { sourceMessageId: `receipt-final:${flow.case_id || phone}:${Date.now()}` });
+  await setBotSessionMode(env, phone, "human", "case_created_payment");
+}
+
+// Maneja la conversación del comprobante (confirmar que es de pago -> nombre del titular -> revisión). Devuelve true si el mensaje se consumió aquí.
+async function handleReceiptFlowText(env, credentials, phone, text, message, preferAudio) {
+  const body = String(text || "").trim();
+  if (!body) return false;
+  await ensureReceiptTables(env);
+  const flow = await env.DB.prepare("SELECT * FROM whatsapp_receipt_flows WHERE phone = ?").bind(phone).first();
+  if (!flow) return false;
+  if (Date.now() - sqlTimeMs(flow.updated_at) > RECEIPT_FLOW_TTL_HOURS * 3600000) {
+    await env.DB.prepare("DELETE FROM whatsapp_receipt_flows WHERE phone = ?").bind(phone).run();
+    return false;
+  }
+  const touch = (state, attempts) => env.DB.prepare("UPDATE whatsapp_receipt_flows SET state = ?, attempts = ?, updated_at = datetime('now') WHERE phone = ?").bind(state, attempts, phone).run();
+  if (flow.state === "awaiting_confirm") {
+    const answer = classifyReceiptConfirmation(body);
+    if (answer === "no") {
+      await env.DB.prepare("DELETE FROM whatsapp_receipt_flows WHERE phone = ?").bind(phone).run();
+      await sendBotReply(env, credentials, phone, "Entendido 🙌 ¿En qué te puedo ayudar?", preferAudio);
+      return true;
+    }
+    if (answer === "yes") {
+      await touch("awaiting_name", 0);
+      await sendBotReply(env, credentials, phone, "Perfecto 🙏 Cuéntanos, ¿a nombre de quién está el servicio?", preferAudio);
+      return true;
+    }
+    if (flow.attempts < 1) {
+      await touch("awaiting_confirm", flow.attempts + 1);
+      await sendBotReply(env, credentials, phone, "Para continuar, ¿la imagen que enviaste es tu comprobante de pago? Respóndeme sí o no. 🙏", preferAudio);
+      return true;
+    }
+    await finishReceiptFlowToStaff(env, credentials, phone, flow, "Comprobante recibido, pero el cliente no confirmó si la imagen era un comprobante de pago. Revisar la conversación.", preferAudio,
+      "Para ayudarte mejor, un agente va a revisar tu mensaje en breve. 🙏");
+    return true;
+  }
+  if (flow.state === "awaiting_name") {
+    const reportedName = extractAccountName(body);
+    const hasRut = Boolean(extractRutFromText(body));
+    if (isOptOutMessage(body)) {
+      await finishReceiptFlowToStaff(env, credentials, phone, flow, "Comprobante recibido; el cliente no quiso indicar el titular. Revisar manualmente.", preferAudio,
+        "Entendido, dejamos tu comprobante en revisión. Cualquier cosa, escríbenos. 🙏");
+      return true;
+    }
+    if (!hasRut && !isPlausibleAccountName(reportedName)) {
+      if (flow.attempts < 2) {
+        await touch("awaiting_name", flow.attempts + 1);
+        await sendBotReply(env, credentials, phone, "Necesito el nombre del titular del servicio (o su RUT), por ejemplo: Juan Pérez.", preferAudio);
+        return true;
+      }
+      await finishReceiptFlowToStaff(env, credentials, phone, flow, `Comprobante recibido, pero no se obtuvo el titular tras pedirlo 3 veces. El cliente escribió: "${body.slice(0, 120)}".`, preferAudio,
+        "Para ayudarte mejor, un agente va a revisar tu comprobante en breve. 🙏");
+      return true;
+    }
+    await completeReceiptFlow(env, credentials, phone, flow, hasRut ? body : reportedName, preferAudio);
+    return true;
+  }
+  return false;
+}
+
+async function completeReceiptFlow(env, credentials, phone, flow, reported, preferAudio) {
+  const data = (() => { try { return JSON.parse(flow.data_json || "{}"); } catch { return {}; } })();
+  const mode = autoPaymentMode(env);
+  const fresh = await fetchFreshBillingSource(env).catch(() => null);
+  const evaluation = evaluateReceipt({
+    data, reported, rows: fresh?.rows || [], now: new Date(), txSeen: await receiptTxSeen(env, data.tx, flow.case_id),
+    accounts: receiptAccounts(env), hourlyLimitReached: mode === "auto" && (await autoRegistrationsLastHour(env)) >= AUTO_PAYMENT_HOURLY_LIMIT,
+  });
+  const money = (value) => `$${Number(value).toLocaleString("es-CL")}`;
+  const customerName = evaluation.row?.name || reported;
+  const detail = `Comprobante ${evaluation.amount > 0 ? money(evaluation.amount) : "sin monto"}, ${data.date || "sin fecha"}, operación ${evaluation.tx || "no leída"}, destino ${data.destination_account || "?"} ${data.destination_bank || data.bank || ""}.`.replace(/\s+/g, " ");
+  if (flow.case_id) {
+    await env.DB.prepare("UPDATE whatsapp_automation_cases SET reported_name = ?, updated_at = datetime('now') WHERE id = ?").bind(reported.slice(0, 120), flow.case_id).run().catch(() => null);
+  }
+  let registered = false;
+  let failure = null;
+  if (evaluation.decision === "register" && mode === "auto") {
+    const marked = await markReceiptPaidInSheet(env, evaluation.row);
+    if (marked.ok) {
+      registered = true;
+      await applyPaymentToBillingRecord(env, evaluation.row.phone, evaluation.amount).catch(() => null);
+      if (flow.case_id) {
+        await env.DB.prepare("UPDATE whatsapp_automation_cases SET status = 'approved', decision_note = ?, updated_at = datetime('now') WHERE id = ?")
+          .bind("Pago registrado automáticamente por el bot (comprobante validado contra la planilla).", flow.case_id).run().catch(() => null);
+      }
+    } else failure = marked.reason;
+  }
+  await env.DB.prepare(`INSERT INTO receipt_payment_log (case_id, phone, reported, tx, amount, decision, mode, registered, reasons, sheet_row)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .bind(flow.case_id || null, phone, reported.slice(0, 120), evaluation.tx || null, evaluation.amount || null, evaluation.decision, mode, registered ? 1 : 0,
+      JSON.stringify(failure ? [...evaluation.reasons, failure] : evaluation.reasons), evaluation.row?.sheetRow || null).run().catch(() => null);
+  await env.DB.prepare("DELETE FROM whatsapp_receipt_flows WHERE phone = ?").bind(phone).run().catch(() => null);
+  const first = String(customerName).split(/\s+/)[0] ? String(customerName).split(/\s+/)[0].charAt(0).toUpperCase() + String(customerName).split(/\s+/)[0].slice(1).toLowerCase() : "";
+  if (registered) {
+    await sendBotReply(env, credentials, phone, `¡Listo, ${first}! Recibimos tu pago de ${money(evaluation.amount)} y ya quedó registrado ✅ ¡Gracias! 🙏${evaluation.suspended ? " Coordinaremos la reconexión de tu servicio a la brevedad." : ""}`, preferAudio);
+    await notifyStaff(env, credentials, "carlos", "Pago registrado automáticamente", customerName, phone,
+      `${detail} Registrado como PAGADO en la planilla (fila ${evaluation.row.sheetRow}).${evaluation.suspended ? " ESTABA SUSPENDIDO: reconectar el servicio." : ""}`,
+      { sourceMessageId: `receipt-final:${flow.case_id || phone}:${Date.now()}` });
+    return;
+  }
+  if (evaluation.decision === "already_paid") {
+    await sendBotReply(env, credentials, phone, "Revisé tu cuenta y este mes ya figura pagado 🙌 Si tienes alguna duda, escríbenos.", preferAudio);
+    await notifyStaff(env, credentials, "carlos", "Comprobante de pago (resultado)", customerName, phone,
+      `${detail} El mes YA figura PAGADO en la planilla: posible pago doble o comprobante repetido. Revisar.`, { sourceMessageId: `receipt-final:${flow.case_id || phone}:${Date.now()}` });
+    return;
+  }
+  const verdict = evaluation.decision === "register"
+    ? (failure ? `Todo cuadraba pero no pude escribir en la planilla (${failure}). Registrar a mano.` : "TODO CUADRA: lo habría registrado solo (modo prueba). Puedes registrarlo con el botón.")
+    : `REVISAR: ${evaluation.reasons.join("; ")}.`;
+  await finishReceiptFlowToStaff(env, credentials, phone, { ...flow, case_id: flow.case_id }, `${detail} Titular indicado: ${customerName}. ${verdict}`, preferAudio,
+    `Gracias, dejamos tu comprobante asociado a nombre de ${customerName}. El equipo lo confirmará pronto. 🙏`);
 }
 
 // Aplica un pago confirmado por un humano (Carlos/Eduardo tocando el botón de WhatsApp) directamente
@@ -2367,38 +2724,35 @@ async function executeBotAction(env, credentials, phone, action, message) {
         .bind(`Comprobante de pago recibido para validación. Verificación: ${receiptCheck}`, caseRow.id).run().catch(() => null);
     }
     const matchedCustomer = await findCustomerForWhatsApp(env, phone, message.customerName);
-    // A diferencia del flujo donde el cliente escribe el nombre (que sí pasa por
-    // isPlausibleAccountName), este "known" puede venir del nombre registrado en la planilla o de
-    // un reported_name ya guardado en un caso anterior. Si esa fuente tiene un dato sucio (fila mal
-    // cargada, o un valor inválido que se coló antes por este mismo camino), no se debe reutilizar
-    // ni propagar -- se revalida igual antes de confiar en él.
     const captionName = extractAccountName(message.customerText);
     const rawKnown = caseRow?.reported_name || (isPlausibleAccountName(captionName) ? captionName : null) || await getKnownAccountName(env, phone)
       || (matchedCustomer.matchedByPhone ? matchedCustomer.name : null);
     const known = isPlausibleAccountName(rawKnown) ? rawKnown : null;
-    if (known) {
-      if (caseRow && !caseRow.reported_name) {
-        await env.DB.prepare("UPDATE whatsapp_automation_cases SET reported_name = ? WHERE id = ?").bind(known, caseRow.id).run();
+    // 2026-11-04: aviso inmediato a Carlos (con el botón "Registrar pago") para que ningún comprobante quede sin enterarse aunque el cliente no termine la conversación.
+    await notifyStaff(env, credentials, "carlos", "Comprobante de pago", known || "Nombre pendiente", phone,
+      `Comprobante recibido; el bot está confirmando los datos con el cliente. ${receiptCheck}`.trim(), { caseId: caseRow?.id || null, sourceMessageId: message.messageId });
+    if (autoPaymentMode(env) === "off") {
+      // Interruptor apagado: flujo anterior (pedir el nombre y dejar el caso a una persona).
+      if (known) {
+        await sendBotReply(env, credentials, phone, "Recibimos tu comprobante, en breve lo revisamos. ¡Gracias! 🙏", preferAudio);
+        await setBotSessionMode(env, phone, "human", "case_created_payment");
+        return;
       }
-      // Texto fijo: la IA llegó a escribir "Tu pago ha sido registrado correctamente", afirmando un registro que
-      // solo una persona puede hacer (2026-10-07).
-      await sendBotReply(env, credentials, phone, "Recibimos tu comprobante, en breve lo revisamos. ¡Gracias! 🙏", preferAudio);
-      await notifyStaff(env, credentials, "carlos", "Comprobante de pago", known, phone, `Comprobante recibido. ${receiptCheck}`.trim(), { caseId: caseRow?.id || null, sourceMessageId: message.messageId });
-      await setBotSessionMode(env, phone, "human", "case_created_payment");
+      if (caseRow) {
+        await ensureWhatsAppBotTables(env);
+        await env.DB.prepare(`INSERT INTO whatsapp_pending_payments (phone, case_id, created_at) VALUES (?, ?, datetime('now'))
+          ON CONFLICT(phone) DO UPDATE SET case_id = excluded.case_id, created_at = datetime('now')`).bind(phone, caseRow.id).run();
+      }
+      await sendBotReply(env, credentials, phone, "¡Gracias por tu comprobante! Para dejarlo asociado a tu cuenta, ¿a nombre de quién está contratado el servicio?", preferAudio);
       return;
     }
-    if (caseRow) {
-      await ensureWhatsAppBotTables(env);
-      await env.DB.prepare(`INSERT INTO whatsapp_pending_payments (phone, case_id, created_at) VALUES (?, ?, datetime('now'))
-        ON CONFLICT(phone) DO UPDATE SET case_id = excluded.case_id, created_at = datetime('now')`)
-        .bind(phone, caseRow.id).run();
-    }
-    await sendBotReply(env, credentials, phone, "¡Gracias por tu comprobante! Para dejarlo asociado a tu cuenta, ¿a nombre de quién está contratado el servicio?", preferAudio);
-    // Antes el aviso a Carlos solo salía DESPUÉS de que el cliente contestara su nombre: quien mandaba el comprobante
-    // y no contestaba (56912000012, dos veces) nunca generaba aviso. Ahora el aviso sale al recibir el comprobante,
-    // con el nombre pendiente; cuando el cliente responde el nombre, el aviso de ese caso ya existe y no se repite.
-    await notifyStaff(env, credentials, "carlos", "Comprobante de pago", "Nombre pendiente", phone,
-      `Comprobante recibido (el cliente aún no indica a nombre de quién). ${receiptCheck}`.trim(), { caseId: caseRow?.id || null, sourceMessageId: message.messageId });
+    // Secuencia: 1) "¿Es tu comprobante de pago?" 2) "¿A nombre de quién está el servicio?" 3) revisión/registro (ver handleReceiptFlowText).
+    // Si el cliente ya escribió que es un comprobante de pago, se salta el paso 1.
+    const explicit = hasExplicitPaymentIntent(message.customerText);
+    await startReceiptFlow(env, phone, caseRow?.id || null, receiptDataFromAction(action), explicit ? "awaiting_name" : "awaiting_confirm");
+    await sendBotReply(env, credentials, phone, explicit
+      ? "Recibí tu comprobante 🙏 Cuéntanos, ¿a nombre de quién está el servicio?"
+      : "Recibí la imagen 📎 ¿Es tu comprobante de pago?", preferAudio);
     return;
   }
   if (action.action === "visit_request") {
@@ -3328,6 +3682,7 @@ async function runBotForInboundMessages(env, changes) {
             continue;
           }
         }
+        if (await handleReceiptFlowText(env, credentials, phone, text, message, preferAudio)) continue;
         const pendingVisit = await env.DB.prepare("SELECT reason, preferred_date FROM whatsapp_pending_visits WHERE phone = ?").bind(phone).first();
         if (pendingVisit && String(text || "").trim()) {
           // Estábamos esperando el nombre del titular para completar una visita/incidencia

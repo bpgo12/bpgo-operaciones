@@ -664,10 +664,10 @@ assert.match(worker, /NUNCA menciones saldo, deuda, monto pendiente, estado de p
 }
 assert.match(worker, /type: "file", file: \{ filename: "comprobante\.pdf", file_data: `data:application\/pdf;base64,\$\{media\.base64\}` \}/);
 assert.match(worker, /if \(\(!response \|\| !response\.ok\) && isPdf\) \{\s*\n\s*pdfUnread = true;/);
-assert.match(worker, /if \(pdfUnread\) \{ parsed\.receipt_evidence = \[\]/);
+assert.match(worker, /if \(pdfUnread\) \{\s*\n\s*parsed\.receipt_evidence = \[\]/);
 assert.match(worker, /transaction_id: \{ type: "string"/);
 assert.match(worker, /mediaMime: media\?\.mimeType \|\| null/);
-assert.match(worker, /`Comprobante recibido\. \$\{receiptCheck\}`/);
+assert.match(worker, /`Comprobante recibido; el bot está confirmando los datos con el cliente\. \$\{receiptCheck\}`/);
 
 // Muestra real de respuestas del bot (2026-10-06): nota interna filtrada al cliente, promesa de llegada del
 // técnico, saludo respondido con la frase robótica prohibida y "Necesito el nombre del titular" repetido ante
@@ -752,7 +752,7 @@ assert.match(worker, /"Error del bot"/);
 assert.match(worker, /const safeReply = reactivationNeedsNormalFlow\(message\) \? null : safeReplyForReactivatedBusinessHandoff\(sessionRow\.escalation_reason\);/);
 assert.match(worker, /const recoveredHandoffReply = reactivationNeedsNormalFlow\(message\) \? null : safeReplyForReactivatedBusinessHandoff\(message\.reactivatedHandoffReason\);/);
 assert.doesNotMatch(worker, /sendBotReply\(env, credentials, phone, action\.text \|\| "Recibimos tu comprobante/);
-assert.match(worker, /"Nombre pendiente", phone,\s*\n\s*`Comprobante recibido \(el cliente aún no indica a nombre de quién\)/);
+assert.match(worker, /known \|\| "Nombre pendiente", phone,\s*\n\s*`Comprobante recibido; el bot está confirmando/);
 
 // Revisión de punta a punta (2026-10-07) con 3.300 escenarios simulados contra el Worker real:
 assert.match(worker, /if \(salesLead && !funnelYields && message\.type !== "image" && message\.type !== "document"\) \{/, "un adjunto nunca es respuesta del embudo de venta");
