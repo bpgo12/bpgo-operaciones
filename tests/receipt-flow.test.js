@@ -258,6 +258,48 @@ const goodReceipt = (overrides) => ({
     h.restore();
   }
 
+  // 10) Caso real (2026-11-05): la foto del comprobante quedó SIN respuesta de noche y el texto "pago noviembre" llegó aparte. Al responder el texto, la foto se arrastra
+  //     y empieza la secuencia del comprobante (en vez de "paga en bpgo.cl/pagar"). Si la foto ya tuvo respuesta, o es muy antigua, no se arrastra.
+  {
+    const inbox = (h, hoursAgo, direction, type, text) => h.sqlite.prepare("INSERT INTO whatsapp_inbox_messages (message_id, phone, direction, message_type, message_text, media_id, created_at, raw_json) VALUES (?, ?, ?, ?, ?, ?, ?, '{}')")
+      .run(`seed-${Math.random()}`, client, direction, type, text, type === "image" ? "MEDIA1" : null, new Date(Date.now() - hoursAgo * 3600000).toISOString());
+    const paidText = "Buenas noches pago noviembre";
+    {
+      const h = await harness({ AUTO_PAYMENT_MODE: "auto" });
+      inbox(h, 10, "inbound", "image", "");
+      h.setAi(goodReceipt());
+      await h.text(client, paidText);
+      assert.match(h.lastTo(client).at(-1), /Recibí tu comprobante 🙏 Cuéntanos, ¿a nombre de quién está el servicio?/);
+      h.restore();
+    }
+    {
+      const h = await harness({ AUTO_PAYMENT_MODE: "auto" });
+      inbox(h, 10, "inbound", "image", "");
+      inbox(h, 9, "outbound", "text", "Recibimos tu imagen");
+      h.setAi(goodReceipt());
+      await h.text(client, paidText);
+      assert.doesNotMatch(h.lastTo(client).at(-1), /Cuéntanos, ¿a nombre de quién/);
+      h.restore();
+    }
+    {
+      const h = await harness({ AUTO_PAYMENT_MODE: "auto" });
+      inbox(h, 30, "inbound", "image", "");
+      h.setAi(goodReceipt());
+      await h.text(client, paidText);
+      assert.doesNotMatch(h.lastTo(client).at(-1), /Cuéntanos, ¿a nombre de quién/);
+      h.restore();
+    }
+    {
+      // El aviso de fuera de horario no cuenta como respuesta a la foto.
+      const h = await harness({ AUTO_PAYMENT_MODE: "auto" });
+      inbox(h, 10, "inbound", "image", "");
+      inbox(h, 9.9, "outbound", "text", "Gracias por tu mensaje. Estamos fuera de horario laboral. ⏰ Te responderemos tan pronto como volvamos. 😊");
+      h.setAi(goodReceipt());
+      await h.text(client, paidText);
+      assert.match(h.lastTo(client).at(-1), /Cuéntanos, ¿a nombre de quién está el servicio?/);
+      h.restore();
+    }
+  }
   fs.rmSync(tmpFile, { force: true });
   console.log("receipt flow: ok");
 })().catch((error) => { fs.rmSync(tmpFile, { force: true }); console.error(error); process.exit(1); });

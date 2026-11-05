@@ -774,6 +774,7 @@ const OFF_HOURS_MARKER = "Estamos fuera de horario laboral";
 const OFF_HOURS_LEGACY_MARKER = "fuera de nuestro horario de atención";
 const OFF_HOURS_NOTICE_COOLDOWN_HOURS = 10;
 const OFF_HOURS_RESUME_MAX_AGE_HOURS = 16;
+const UNANSWERED_MEDIA_MAX_HOURS = 18;
 const OFF_HOURS_RESUME_BATCH = 5;
 
 function botScheduleConfig(env) {
@@ -2950,7 +2951,18 @@ async function recentInboundMedia(env, phone) {
   const row = await env.DB.prepare(`SELECT media_id, message_type, created_at FROM whatsapp_inbox_messages
     WHERE phone = ? AND direction = 'inbound' AND media_id IS NOT NULL AND message_type IN ('image', 'document')
     ORDER BY created_at DESC LIMIT 1`).bind(phone).first();
-  if (!row || Date.now() - Date.parse(row.created_at) >= 60000) return null;
+  if (!row) return null;
+  const ageMs = Date.now() - Date.parse(row.created_at);
+  if (ageMs >= 60000) {
+    // 2026-11-05: el cliente mandó la foto del comprobante de noche y, en otro mensaje, "pago noviembre". Nadie había respondido a la foto, y a las 9:00
+    // el bot contestó solo al texto ("paga en bpgo.cl/pagar, y si ya pagaste envíanos el comprobante"). Si la imagen sigue SIN respuesta (ni del bot
+    // ni de una persona, sin contar el aviso de fuera de horario), se arrastra junto al mensaje de texto.
+    if (ageMs >= UNANSWERED_MEDIA_MAX_HOURS * 3600000) return null;
+    const answered = await env.DB.prepare(`SELECT 1 AS found FROM whatsapp_inbox_messages WHERE phone = ? AND direction = 'outbound' AND created_at > ?
+      AND COALESCE(message_text, '') NOT LIKE ? AND COALESCE(message_text, '') NOT LIKE ? LIMIT 1`)
+      .bind(phone, row.created_at, `%${OFF_HOURS_MARKER}%`, `%${OFF_HOURS_LEGACY_MARKER}%`).first();
+    if (answered) return null;
+  }
   return { mediaId: row.media_id, mediaType: row.message_type };
 }
 
