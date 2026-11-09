@@ -104,5 +104,5 @@ check("solo sector", ["Jose Pardo", "Tres sauces"], { name: "Jose Pardo", addres
 check("referencia de ubicación", ["Tomas Rojas", "A un kilómetros más menos del  puente acá a mi casa"], { name: "Tomas Rojas", address: "A un kilómetros más menos del puente acá a mi casa" });
 
 // Una edición de mensaje (sin texto) no se contesta: respondía "Gracias por la foto".
-assert.match(src, /if \(\["edit", "revoke", "unsupported", "system", "ephemeral", "deleted"\]\.includes\(message\.type\)\) continue;/);
+assert.match(src, /if \(\["edit", "revoke", "unsupported", "system", "ephemeral", "deleted", "sticker"\]\.includes\(message\.type\)\) continue;/);
 console.log("installation capture: ok");

@@ -216,7 +216,7 @@ assert.match(worker, /if \(snapshot\.cortadosCheckFailed\) throw new Error\("No 
 // (latencia del modelo) y para cuando terminó, el segundo ya se había marcado como más nuevo --
 // el bot mandó la misma respuesta de precios dos veces. El chequeo debe repetirse SIN espera
 // adicional justo antes de ejecutar la acción, para descartar la respuesta ya obsoleta.
-assert.match(worker, /const action = await callBotResponder\(env, context, \{ type: message\.type \|\| "unknown", text \}, media\);[\s\S]{0,1200}if \(!\(await isStillLatestMessage\(env, phone, message\.id, 0\)\)\) continue;[\s\S]{0,50}await executeBotAction\(/);
+assert.match(worker, /await callBotResponder\(env, context, \{ type: message\.type \|\| "unknown", text \}, media\);[\s\S]{0,1200}if \(!\(await isStillLatestMessage\(env, phone, message\.id, 0\)\)\) continue;[\s\S]{0,50}await executeBotAction\(/);
 
 // Sectores ya conectados (misma tarifa que Cayucupil) que no estaban en matchPlanGroup, por lo que
 // un prospecto nuevo de esas zonas siempre requería aclaración manual.
@@ -305,8 +305,8 @@ assert.equal(api.isPlausibleAccountName("Pablo Luengo Rios"), true);
 assert.equal(api.isPlausibleAccountName("Buenaventura Soto"), true);
 assert.match(worker, /if \(message\.id && message\.from\) await markLatestMessage\(env, message\.from, message\.id\)\.catch\(\(\) => null\);/);
 assert.match(worker, /if \(message\.type === "reaction"\) continue;/);
-assert.match(worker, /async function recentInboundMedia\(env, phone\)/);
-assert.match(worker, /const carriedOver = await recentInboundMedia\(env, phone\)/);
+assert.match(worker, /async function recentInboundMedia\(env, phone, options = null\)/);
+assert.match(worker, /const carriedOver = await recentInboundMedia\(env, phone, \{ allowAnswered: isReceiptPresentation\(text\) \}\)/);
 
 // Caso real (2026-10-01, teléfono 56912000034): con factibilidad confirmada y los planes ya
 // enviados, la clienta preguntó "Debo cancelar en el momento q instalen los 25" en vez de nombrar

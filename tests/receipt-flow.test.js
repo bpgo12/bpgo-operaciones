@@ -54,9 +54,11 @@ async function harness(extraEnv) {
   const sent = [];
   const writes = [];
   let aiAction = null;
+  let readerAction = { kind: "other" };
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
     const u = String(url);
+    if (u.includes("api.openai.com") && JSON.parse(options.body).tools?.[0]?.function?.name === "bpgo_read_receipt") return new Response(JSON.stringify({ choices: [{ message: { tool_calls: [{ function: { arguments: JSON.stringify(readerAction) } }] } }] }), { status: 200 });
     if (u.includes("api.openai.com")) return new Response(JSON.stringify({ choices: [{ message: { tool_calls: [{ function: { arguments: JSON.stringify(aiAction) } }] } }] }), { status: 200 });
     if (u.includes("graph.facebook.com") && u.includes("/messages")) {
       const body = JSON.parse(options.body);
@@ -98,6 +100,7 @@ async function harness(extraEnv) {
   return {
     rows, sent, writes, sqlite, webhook, staffNotices,
     setAi: (value) => { aiAction = value; },
+    setReader: (value) => { readerAction = value; },
     restore: () => { globalThis.fetch = realFetch; },
     text: (from, body) => webhook({ from, type: "text", text: { body } }),
     image: (from, caption) => webhook({ from, type: "image", image: { id: "MEDIA1", mime_type: "image/jpeg", ...(caption ? { caption } : {}) } }),
@@ -398,6 +401,99 @@ const goodReceipt = (overrides) => ({
     assert.match(h.lastTo(client).at(-1), /noviembre.*revisión/);
     assert.equal(h.writes.length, 0);
     assert.equal(h.sqlite.prepare("SELECT mode FROM whatsapp_bot_sessions WHERE phone = ?").get(client).mode, "human");
+    h.restore();
+  }
+  // 13) Un sticker no es un comprobante ni necesita respuesta (caso real 2026-11-09: el bot contestó "Gracias por el comprobante" a un sticker de apretón de manos).
+  {
+    const h = await harness({});
+    h.setAi({ action: "reply", text: "Gracias por el comprobante. Lo revisaremos y te confirmaremos si todo está en orden." });
+    await h.webhook({ from: client, type: "sticker", sticker: { id: "STK1", mime_type: "image/webp" } });
+    assert.equal(h.lastTo(client).length, 0, "un sticker no debe recibir respuesta");
+    h.restore();
+  }
+
+  // 14) Si el modelo inventa que recibió un comprobante que nunca llegó, la frase se cambia por una pregunta segura.
+  {
+    const h = await harness({});
+    h.setAi({ action: "reply", text: "Gracias por el comprobante. Lo revisaremos y te confirmaremos si todo está en orden." });
+    await h.text(client, "ok de acuerdo, hablamos");
+    const reply = h.lastTo(client).at(-1);
+    assert.ok(!/Gracias por el comprobante/.test(reply), "no se debe agradecer un comprobante inexistente");
+    assert.match(reply, /Si ya pagaste, envíame el comprobante/);
+    h.restore();
+  }
+
+  // 15) Comprobante RECORTADO (sin título arriba): el modelo general lo dejó pasar como "una imagen cualquiera" (caso real 2026-11-09). El lector dedicado lo reconoce.
+  {
+    const h = await harness({});
+    h.setAi({ action: "reply", text: "Hola, ¿en qué te ayudo?" });
+    h.setReader({ kind: "payment_receipt", amount: 18000, date_time: todayText + " 10:23:28", transaction_id: "8036035", bank: "BancoEstado", destination_account: "Cuenta Corriente 39100126196", destination_bank: "BancoEstado", destination_name: "Bp Go", has_origin_account: true, has_title: false });
+    await h.image(client);
+    assert.match(h.lastTo(client).at(-1), /¿Es tu comprobante de pago\?/);
+    assert.ok(!/Recibí tu imagen/.test(h.lastTo(client).at(-1)));
+    h.restore();
+  }
+
+  // 16) "Hola ahí está el depósito" tras una foto ya acusada: no es "cómo pago" (no se responde monto ni link); se vuelve a mirar la foto.
+  {
+    const h = await harness({});
+    h.setAi({ action: "reply", text: "ok" });
+    h.setReader({ kind: "other" });
+    await h.image(client);
+    assert.match(h.lastTo(client).at(-1), /Recibí tu imagen/);
+    h.setReader({ kind: "payment_receipt", amount: 18000, date_time: todayText + " 10:23:28", transaction_id: "8036036", bank: "BancoEstado", destination_account: "Cuenta Corriente 39100126196", destination_bank: "BancoEstado", destination_name: "Bp Go" });
+    await h.text(client, "Hola ahí está el depósito");
+    const reply = h.lastTo(client).at(-1);
+    assert.ok(!/El monto a pagar|bpgo\.cl\/pagar/.test(reply), "no debe responder como si preguntara cómo pagar: " + reply);
+    assert.match(reply, /comprobante|a nombre de quién/);
+    h.restore();
+  }
+
+  // 17) "Ahí está el depósito" sin ninguna foto ni comprobante previo: pide el comprobante, no explica cómo pagar.
+  {
+    const h = await harness({});
+    h.setAi({ action: "reply", text: "ok" });
+    await h.text(client, "Hola ahí está el depósito");
+    const reply = h.lastTo(client).at(-1);
+    assert.ok(!/El monto a pagar|bpgo\.cl\/pagar/.test(reply), reply);
+    assert.match(reply, /comprobante \(foto o PDF\)/);
+    h.restore();
+  }
+
+  // 18) Caso real 2026-11-09: "El pago de <nombre> <RUT>" ya trae el titular; el bot no debe volver a preguntar "¿a nombre de quién?".
+  {
+    const h = await harness({});
+    h.setAi(goodReceipt());
+    await h.image(client);
+    await h.text(client, "El pago de Maria Perez Prueba 11.111.111-1");
+    const reply = h.lastTo(client).at(-1);
+    assert.ok(!/a nombre de quién está el servicio/.test(reply), reply);
+    assert.match(reply, /dejamos tu comprobante asociado a nombre de MARIA PEREZ PRUEBA/);
+    h.restore();
+  }
+
+  // 19) Nombre y RUT en dos mensajes seguidos: se leen juntos y el RUT no queda suelto ("¿En qué puedo ayudarte con el número…?").
+  {
+    const h = await harness({});
+    h.setAi(goodReceipt());
+    await h.image(client);
+    await h.text(client, "si");
+    await Promise.all([h.text(client, "Maria Perez Prueba"), h.text(client, "11.111.111-1")]);
+    const replies = h.lastTo(client);
+    assert.ok(!replies.some((reply) => /En qué puedo ayudarte con el número/.test(reply)), replies.join(" | "));
+    assert.ok(replies.some((reply) => /dejamos tu comprobante asociado a nombre de MARIA PEREZ PRUEBA/.test(reply)), replies.join(" | "));
+    h.restore();
+  }
+
+  // 20) Un RUT suelto justo después de dejar el comprobante es un dato de ese trámite.
+  {
+    const h = await harness({});
+    h.setAi(goodReceipt());
+    await h.image(client);
+    await h.text(client, "si");
+    await h.text(client, "Maria Perez Prueba");
+    await h.text(client, "11.111.111-1");
+    assert.ok(!h.lastTo(client).some((reply) => /En qué puedo ayudarte con el número/.test(reply)), "un RUT suelto tras el comprobante no es una consulta nueva");
     h.restore();
   }
   fs.rmSync(tmpFile, { force: true });
