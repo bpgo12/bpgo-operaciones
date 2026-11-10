@@ -1787,7 +1787,7 @@ const BOT_SYSTEM_PROMPT = `Eres el asistente de WhatsApp de BPGO (Consultora y S
 - Sectores con cobertura: Cayucupil, Peleco, Lanalhue, Trangilboro, Llenquehue, Tres Sauces, Los Aromos, La Curva, Fundo Anique, Rucañire, Huechicura y cercanos. Hay dos tarifarios según el sector: NUNCA cotices un plan, velocidad o precio de memoria.
 - Política de pago de la INSTALACIÓN (única versión válida, nunca la contradigas ni la inventes distinta): el costo de instalación ($25.000) más el mes de servicio por adelantado, calculado proporcional a los días que resten del mes, se pagan AL MOMENTO DE LA INSTALACIÓN. NUNCA se cobran en la boleta ni se difieren al primer mes de servicio. Si dudas de cualquier otro detalle de cómo se cobra una instalación, usa "escalate" en vez de inventar.
 - El medio de pago PREFERIDO es el portal con tarjeta de débito o crédito (https://bpgo.cl/pagar), el único link oficial. Cuando el cliente diga que va a pagar por transferencia o depósito, o pregunte cómo pagar, ofrécele primero el portal; los datos bancarios los entrega el sistema solo si insiste o no puede usar tarjeta (nunca los inventes). Al recordar o confirmar un pago pendiente, menciona el portal.
-- BPGO SÍ recibe pagos por transferencia bancaria y CajaVecina además del portal. NUNCA digas que "no se puede realizar transferencia" ni que el único medio es el portal. Si el cliente tiene dificultad para pagar (no puede usar la página, es adulto mayor, no entiende el portal), no insistas con el mismo link: usa "escalate" para que una persona le entregue los datos y lo guíe.
+- BPGO SÍ recibe pagos por transferencia bancaria y CajaVecina además del portal. NUNCA digas que "no se puede realizar transferencia" ni que el único medio es el portal. Si el cliente no puede pagar por el portal porque no tiene banca en línea ni tarjeta, el sistema le entrega por código la opción de efectivo en CajaVecina con los datos de la cuenta: no lo escales ni le repitas el link. Si tiene otra dificultad para pagar (no entiende el portal, es adulto mayor), no insistas con el mismo link: usa "escalate" para que una persona lo guíe.
 - La campaña/promoción Cyber ya TERMINÓ. NUNCA la menciones, ni ofrezcas agendar un cambio de plan promocional, ni preguntes "para el próximo 15 o prefieres otra fecha para la promoción", aunque aparezca en el historial. Si el cliente pregunta por esa oferta, di que ya no está disponible y usa "escalate" si insiste.
 - Fuera del horario de atención el sistema responde solo con un aviso fijo; tú nunca prometas respuesta inmediata.
 - Lee cada mensaje en relación con lo que acaba de pasar en la conversación. Expresiones como "ahí está", "ese es", "ahí va", "el depósito", "listo", "ya" suelen referirse al adjunto o a la pregunta inmediatamente anterior: en el historial, "[imagen enviada por el cliente]" es una foto que el cliente mandó. Si el cliente dice que ahí está el depósito o el comprobante, está ENTREGANDO su comprobante: no le expliques cómo pagar ni le cobres de nuevo.
@@ -1907,6 +1907,29 @@ function needsBankDataDirectly(value) {
   return /\bcaja ?vecina\b|\bsin tarjeta\b|\bno tengo tarjeta\b|\bno uso tarjeta\b|\bno puedo (pagar )?(con|por) (la )?(tarjeta|pagina|web|portal|link)|\b(link|enlace|pagina|portal|web)\b.{0,30}\b(no funciona|no me funciona|no carga|no abre|no me deja|error|problema)|\bno (me )?(funciona|deja|resulta)\b.{0,25}\b(link|pagina|portal|tarjeta)|\bdeposito en efectivo\b|\ben efectivo\b/.test(text);
 }
 const PAYMENT_TRANSFER_REPLY = "Si el link de pago no te funciona, puedes pagar por transferencia o CajaVecina con estos datos:\nBanco Estado\nCuenta corriente\nBP GO\nRUT 77.463.597-1\nN° de cuenta 39100126196\nCorreo: consultorabpconnection@gmail.com\n\nCuando realices el pago, envíanos el comprobante por este medio.";
+
+// Caso real (2026-11-10): tras el recordatorio, un cliente escribió en tres mensajes seguidos "Este mes cambió la página para realizar el
+// pago" / "No he podido" / "Ya que yo no tengo acceso a la banca en línea". El bot solo miraba el último y lo pasó a un agente. Se lee la
+// ráfaga completa: quien no puede pagar en el portal por no tener banca en línea o tarjeta necesita la opción de efectivo en CajaVecina.
+const PAYMENT_NO_ONLINE_BANKING_REPLY = "Entiendo. Si no tienes banca en línea, puedes pagar en efectivo en cualquier CajaVecina (almacén o punto BancoEstado) con estos datos:\nBanco Estado\nCuenta corriente\nBP GO\nRUT 77.463.597-1\nN° de cuenta 39100126196\n\nCuando pagues, envíanos la foto del comprobante por este medio y lo dejamos registrado. 🙏";
+function inboundBurstText(history, currentText) {
+  const parts = [];
+  for (const item of [...(Array.isArray(history) ? history : [])].reverse()) {
+    if (item.direction !== "inbound") break;
+    if (String(item.message_text || "").trim()) parts.unshift(String(item.message_text).trim());
+  }
+  parts.push(String(currentText || ""));
+  return parts.join(" ");
+}
+function cannotPayOnlineMessage(value) {
+  const text = String(value || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, " ").trim();
+  const mentionsPaying = /\b(pago|pagar|pagina|portal|link|mensualidad|cuenta)\b/.test(text);
+  const noBanking = /\b(no|sin)\b.{0,20}\b(tengo|tiene|cuento|uso|manejo)?\b.{0,12}\b(banca (en )?linea|banca por internet|internet banking|acceso a (la )?banca|app del banco|aplicacion del banco|clave (de|del) banco)\b/.test(text)
+    || /\bno\b.{0,25}\bacceso\b.{0,25}\b(banca|banco|tarjeta)\b/.test(text);
+  const triedAndFailed = /\bno (he|pude|puedo|logre|logro|he logrado)\b.{0,12}\b(podido|pagar|pago|hacerlo|realizarlo|ingresar|entrar)\b/.test(text) && mentionsPaying;
+  const pageChanged = /\b(cambio|cambiaron|cambiado)\b.{0,25}\b(pagina|link|portal|forma)\b/.test(text);
+  return noBanking || (triedAndFailed && /\b(banca|tarjeta|banco)\b/.test(text)) || (pageChanged && triedAndFailed);
+}
 
 function isAlternativePaymentRequest(value) {
   const text = String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
@@ -2067,6 +2090,12 @@ async function callBotResponder(env, context, inboundMessage, media) {
   // Tras ofrecerle el portal, cualquier mención a la cuenta/transferencia/depósito es insistir: se le entregan los datos.
   const alreadyOffered = (context.history || []).some((item) => item.direction !== "inbound" && String(item.message_text || "").includes(WEBPAY_FIRST_MARKER));
   const insists = alreadyOffered && /\b(cuenta|datos|transferencia|transferir|transfiero|deposito|depositar|deposito)\b/.test(String(inboundMessage?.text || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, ""));
+  if (inboundMessage?.type !== "image" && inboundMessage?.type !== "document" && !alreadyPaidClaim && cannotPayOnlineMessage(inboundBurstText(context.history, inboundMessage?.text))) {
+    const c = context.customer;
+    const amountLine = c?.id && c.billingAuthoritative && !c.billingAmbiguous && Number.isFinite(c.balance) && c.balance > 0
+      ? `El monto a pagar es ${formatCurrency(c.balance)}.\n\n` : "";
+    return { action: "reply", text: amountLine + PAYMENT_NO_ONLINE_BANKING_REPLY };
+  }
   if (inboundMessage?.type !== "image" && inboundMessage?.type !== "document" && !alreadyPaidClaim && (isAlternativePaymentRequest(inboundMessage?.text) || insists)) {
     // "¿Cuál es el valor para transferir?" (56912000017): los datos bancarios sin el monto no responden la pregunta.
     const c = context.customer;

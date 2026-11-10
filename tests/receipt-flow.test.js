@@ -496,6 +496,34 @@ const goodReceipt = (overrides) => ({
     assert.ok(!h.lastTo(client).some((reply) => /En qué puedo ayudarte con el número/.test(reply)), "un RUT suelto tras el comprobante no es una consulta nueva");
     h.restore();
   }
+  // 21) Caso real 2026-11-10: tres mensajes seguidos tras el recordatorio; sin banca en línea se ofrece efectivo en CajaVecina, no se escala.
+  {
+    const h = await harness({});
+    h.setAi({ action: "escalate", text: "Ya te comunico con un agente de BPGO, en breve te responde por acá.", reason: "customer_difficulty_paying" });
+    await Promise.all([h.text(client, "Este mes cambio la página para realizar el pago"), h.text(client, "No he podido"), h.text(client, "Ya que yo no tengo acceso a la banca en linea")]);
+    const replies = h.lastTo(client);
+    assert.equal(replies.length, 1, "una sola respuesta para la ráfaga");
+    assert.match(replies[0], /efectivo en cualquier CajaVecina/);
+    assert.match(replies[0], /N° de cuenta/);
+    assert.doesNotMatch(replies[0], /agente/);
+    h.restore();
+  }
+  // Quien solo dice que no tiene banca en línea en un mensaje también recibe la opción.
+  {
+    const h = await harness({});
+    h.setAi({ action: "escalate", text: "x", reason: "x" });
+    await h.text(client, "no tengo acceso a la banca en línea");
+    assert.match(h.lastTo(client).at(-1), /CajaVecina/);
+    h.restore();
+  }
+  // "No he podido" sin relación con pagos no activa la respuesta de pago.
+  {
+    const h = await harness({});
+    h.setAi({ action: "reply", text: "Revisemos tu router, ¿qué luces ves?" });
+    await h.text(client, "No he podido conectarme desde ayer");
+    assert.doesNotMatch(h.lastTo(client).at(-1), /CajaVecina/);
+    h.restore();
+  }
   fs.rmSync(tmpFile, { force: true });
   console.log("receipt flow: ok");
 })().catch((error) => { fs.rmSync(tmpFile, { force: true }); console.error(error); process.exit(1); });
