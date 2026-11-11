@@ -66,6 +66,9 @@ vm.runInContext(`
   ${functionSource("mentionsTechnicalIssueOrVisit")}
   ${functionSource("isOptOutMessage")}
   ${functionSource("matchPlanGroup")}
+  ${functionSource("rutCheckDigitValid")}
+  ${topLevelConst("LOOSE_RUT_PATTERN")}
+  ${functionSource("looseRutMatches")}
   ${functionSource("extractAccountName")}
   ${functionSource("normalizeWhatsAppPhone")}
   ${functionSource("cyberNormalize")}
@@ -393,10 +396,13 @@ assert.doesNotMatch(worker, /!mentionsServiceOutage\(action\.reason\)/);
 {
   const ctx = {};
   vm.createContext(ctx);
-  vm.runInContext(`${functionSource("extractAccountName")}; ${functionSource("isPlausibleAccountName")}; this.api = { extractAccountName, isPlausibleAccountName };`, ctx);
+  vm.runInContext(`${functionSource("rutCheckDigitValid")}; ${topLevelConst("LOOSE_RUT_PATTERN")}; ${functionSource("looseRutMatches")}; ${functionSource("extractAccountName")}; ${functionSource("isPlausibleAccountName")}; this.api = { extractAccountName, isPlausibleAccountName };`, ctx);
   const n = (v) => ctx.api.extractAccountName(v);
   assert.equal(n("Oscar Varela Solis, 12.345.678-5, mes de octubre 2026"), "Oscar Varela Solis");
   assert.equal(n("Oscar Varela Solis, 12.345.678-5"), "Oscar Varela Solis");
+  // 2026-11-11: puntos mal puestos y relleno ("Yo..", "rut..").
+  assert.equal(n("Yo..lucia paz.pastor..rut..5.503594.6."), "lucia paz pastor");
+  assert.equal(ctx.api.isPlausibleAccountName("Yo soy la titular"), false);
   assert.equal(n("a nombre de Juan Pérez"), "Juan Pérez");
   assert.equal(ctx.api.isPlausibleAccountName(n("Oscar Varela Solis, 12.345.678-5, mes de octubre 2026")), true);
   assert.equal(ctx.api.isPlausibleAccountName(n("ya pagué")), false);

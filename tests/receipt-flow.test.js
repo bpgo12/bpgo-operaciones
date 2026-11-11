@@ -570,6 +570,41 @@ const goodReceipt = (overrides) => ({
     assert.ok(h.staffNotices().some((notice) => /sin respuesta al cliente|no se le escribió/.test(notice.summary)), "Carlos recibe el resultado");
     h.restore();
   }
+  // 24) Caso real 2026-11-11: "Yo..lucia paz.pastor..rut..5.503594.6." (puntos mal puestos) no se reconocía y el bot repetía la pregunta.
+  {
+    const h = await harness({});
+    h.setAi(goodReceipt());
+    await h.image(client);
+    await h.text(client, "Hola..envío pago del mes en curso..gracias..");
+    await h.text(client, "Yo..lucia paz.pastor..rut..5.503594.6.");
+    const replies = h.lastTo(client);
+    assert.ok(!replies.some((reply) => /Necesito el nombre del titular/.test(reply)), replies.join(" | "));
+    assert.match(replies.at(-1), /asociado a nombre de LUCIA PAZ PASTOR|asociado a nombre de 55035946/i);
+    h.restore();
+  }
+  // Pregunta el titular como máximo dos veces y luego pasa a una persona (antes eran tres, idénticas).
+  {
+    const h = await harness({});
+    h.setAi(goodReceipt());
+    await h.image(client);
+    await h.text(client, "si");
+    await h.text(client, "no sé");
+    await h.text(client, "Si..yo soy la titular..");
+    const asks = h.lastTo(client).filter((reply) => /Necesito el nombre del titular/.test(reply));
+    assert.equal(asks.length, 1, "una sola repetición de la pregunta");
+    assert.match(h.lastTo(client).at(-1), /agente va a revisar/);
+    h.restore();
+  }
+  // 25) Si el equipo ya tomó la conversación (confirmó el pago a mano) antes de que el bot responda a la imagen, el bot no pregunta nada.
+  {
+    const h = await harness({});
+    h.setAi(goodReceipt());
+    h.sqlite.prepare("INSERT INTO whatsapp_bot_sessions (phone, mode, escalation_reason, updated_at) VALUES (?, 'human', 'manual_reply', datetime('now')) ON CONFLICT(phone) DO UPDATE SET mode = 'human', escalation_reason = 'manual_reply'").run(client);
+    await h.image(client);
+    assert.equal(h.lastTo(client).length, 0, "no se le pregunta '¿Es tu comprobante?' si el equipo ya tomó la conversación");
+    assert.equal(h.sqlite.prepare("SELECT COUNT(*) AS n FROM whatsapp_receipt_flows WHERE phone = ?").get(client).n, 0);
+    h.restore();
+  }
   fs.rmSync(tmpFile, { force: true });
   console.log("receipt flow: ok");
 })().catch((error) => { fs.rmSync(tmpFile, { force: true }); console.error(error); process.exit(1); });

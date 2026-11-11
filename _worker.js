@@ -390,6 +390,9 @@ function extractAccountName(value) {
   name = name.replace(/^(mi nombre es|el nombre es|es a nombre de|a nombre de|al nombre de|nombre( del titular)?)\s*:?\s*/i, "").trim();
   name = name.replace(/^[.:,-]+\s*/, "").trim();
   // Caso real (2026-10-20, 56912000019): "Oscar Varela Solis, 12.345.678-5, mes de octubre 2026" se rechazó como nombre por traer RUT y mes.
+  for (const loose of looseRutMatches(name)) name = name.replace(loose.raw, " ");
+  // "lucia paz.pastor..rut" / "Yo..lucia": los puntos entre palabras reemplazan espacios; "yo" / "soy" no son parte del nombre.
+  name = name.replace(/([A-Za-zÁÉÍÓÚÜÑáéíóúüñ])\.+(?=[A-Za-zÁÉÍÓÚÜÑáéíóúüñ])/g, "$1 ").replace(/^(?:yo|soy|me llamo)(?:\s+(?:soy|me llamo))?\s+(?=\S+\s+\S)/i, "");
   name = name
     .replace(/\b\d{1,2}\.?\d{3}\.?\d{3}-[\dkK]\b/g, " ")
     .replace(/\brut\s*:?/gi, " ")
@@ -411,6 +414,8 @@ function isPlausibleAccountName(value) {
   if (/^(hola|buenos|buenas|buen|saludos|hey|ok|okay|consulta|quiero|necesito|tengo|perfecto|dale|claro|vale|disculpa|disculpe|oiga|alo)\b/i.test(normalized)) return false;
   // Caso real (2026-11-10): "Una transferencia" (el tipo de comprobante) quedó guardado como titular del servicio.
   if (/\b(transferencias?|transfer|depositos?|comprobantes?|vouchers?|boletas?|capturas?|pagos?|pagado|pagada)\b/.test(normalized)) return false;
+  // "Yo soy la titular" afirma ser el titular, no lo nombra.
+  if (/\b(titular|duenos?|duenas?|clientes?|servicio|internet|cuenta)\b/.test(normalized)) return false;
   const words = name.split(" ").filter(Boolean);
   return words.length >= 2 && words.length <= 6 && words.every((word) => /^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ'-]{2,}$/.test(word));
 }
@@ -866,6 +871,15 @@ async function resumeAfterHoursChats(env) {
   return { ok: true, resumed };
 }
 
+// ¿Hay un mensaje saliente de "pago confirmado/registrado" en las 6 h anteriores al mensaje del cliente?
+async function paymentConfirmedBeforeMessage(env, phone, messageCreatedAt) {
+  const sinceIso = new Date(Date.parse(messageCreatedAt) - 6 * 3600000).toISOString();
+  const row = await env.DB.prepare(`SELECT 1 AS found FROM whatsapp_inbox_messages WHERE phone = ? AND direction = 'outbound'
+    AND created_at >= ? AND created_at <= ? AND (message_text LIKE '%confirmado tu pago%' OR message_text LIKE '%pago registrado%' OR message_text LIKE '%quedó registrado%' OR message_text LIKE '%quedo registrado%') LIMIT 1`)
+    .bind(phone, sinceIso, messageCreatedAt).first();
+  return Boolean(row);
+}
+
 async function takeOverUnansweredHumanChats(env) {
   if (!isBotOpenNow(env)) return { ok: true, taken: 0, reason: "closed" };
   if (String(env.WHATSAPP_BOT_ENABLED || "").toLowerCase() !== "true") return { ok: true, taken: 0 };
@@ -885,6 +899,10 @@ async function takeOverUnansweredHumanChats(env) {
   let taken = 0;
   for (const row of rows.results || []) {
     if (staffPhones.has(row.phone) || isClosingPleasantry(row.message_text)) continue;
+    // Caso real (2026-11-11): el equipo confirmó el pago ("Hemos confirmado tu pago") y el cliente añadió "envío pago del mes en curso, gracias";
+    // una hora después el bot lo retomó y empezó a pedirle el titular. Un aviso de pago posterior a esa confirmación no necesita bot.
+    if (hasExplicitPaymentIntent(row.message_text) && !String(row.message_text).includes("?")
+      && await paymentConfirmedBeforeMessage(env, row.phone, row.created_at).catch(() => false)) continue;
     // OJO: runBotForInboundMessages ya hace su propio claim de `retake:<id>` (el id del mensaje sintético).
     // Si acá se reclamara ese mismo id, el bot lo vería como "ya procesado" y saltaría el mensaje: la sesión
     // volvía a modo bot pero NUNCA se respondía (bug real 2026-10-05, 56912000009). Por eso esta marca usa
@@ -2336,9 +2354,33 @@ function nameMatchesRow(reportedTokens, rowTokens) {
   return hits === reportedTokens.length || (hits >= 2 && hits / new Set([...reportedTokens, ...rowTokens]).size >= 0.6);
 }
 
+function rutCheckDigitValid(body, dv) {
+  let sum = 0;
+  let factor = 2;
+  for (let index = body.length - 1; index >= 0; index -= 1) {
+    sum += Number(body[index]) * factor;
+    factor = factor === 7 ? 2 : factor + 1;
+  }
+  const rest = 11 - (sum % 11);
+  return (rest === 11 ? "0" : rest === 10 ? "K" : String(rest)) === String(dv).toUpperCase();
+}
+
+// Caso real (2026-11-11): la clienta escribió "rut..5.503594.6." (puntos mal puestos) y el bot, sin reconocer el RUT,
+// le pidió el titular de nuevo. Los RUT con puntuación irregular solo se aceptan si el dígito verificador cuadra.
+const LOOSE_RUT_PATTERN = /(?<!\d)(?<!\d\.)(\d{1,2}(?:\.?\d){6})(?:\s*-\s*|\s+|\.)?([0-9kK])(?!\d)/g;
+function looseRutMatches(value) {
+  const found = [];
+  for (const match of String(value || "").matchAll(LOOSE_RUT_PATTERN)) {
+    const body = match[1].replace(/\./g, "");
+    if (rutCheckDigitValid(body, match[2])) found.push({ raw: match[0], rut: `${body}${match[2].toUpperCase()}` });
+  }
+  return found;
+}
+
 function extractRutFromText(value) {
   const match = String(value || "").match(/\b(\d{1,2}\.?\d{3}\.?\d{3})\s*-?\s*([0-9kK])\b/);
-  return match ? `${match[1].replace(/\./g, "")}${match[2].toUpperCase()}` : null;
+  if (match) return `${match[1].replace(/\./g, "")}${match[2].toUpperCase()}`;
+  return looseRutMatches(value)[0]?.rut || null;
 }
 
 // Titular que el cliente ya dio dentro de su mensaje ("El pago de Sergio Catrileo Jara 16.669.061-7"): evita volver a preguntar "¿a nombre de quién?".
@@ -2596,12 +2638,21 @@ async function handleReceiptFlowText(env, credentials, phone, text, message, pre
       return true;
     }
     if (!hasRut && !isPlausibleAccountName(reportedName)) {
-      if (flow.attempts < 2) {
+      // "Yo soy la titular": si el número ya está asociado a un cliente, ese es el titular (no se le vuelve a preguntar).
+      if (/\b(?:yo\s+)?(?:soy|es)\s+(?:yo\s+)?(?:la|el)?\s*titular\b|\bsoy\s+yo\b|\byo\s+(?:soy\s+)?(?:la|el)\s+titular\b/i.test(joined.normalize("NFD").replace(/[̀-ͯ]/g, ""))) {
+        const known = await findCustomerForWhatsApp(env, phone, null).catch(() => null);
+        if (known?.matchedByPhone && isPlausibleAccountName(known.name)) {
+          await completeReceiptFlow(env, credentials, phone, flow, known.name, preferAudio);
+          return true;
+        }
+      }
+      // Máximo dos preguntas (antes tres, idénticas): con el cliente ya molesto, es mejor pasar a una persona.
+      if (flow.attempts < 1) {
         await touch("awaiting_name", flow.attempts + 1);
         await sendBotReply(env, credentials, phone, "Necesito el nombre del titular del servicio (o su RUT), por ejemplo: Juan Pérez.", preferAudio);
         return true;
       }
-      await finishReceiptFlowToStaff(env, credentials, phone, flow, `Comprobante recibido, pero no se obtuvo el titular tras pedirlo 3 veces. El cliente escribió: "${body.slice(0, 120)}".`, preferAudio,
+      await finishReceiptFlowToStaff(env, credentials, phone, flow, `Comprobante recibido, pero no se obtuvo el titular tras pedirlo 2 veces. El cliente escribió: "${body.slice(0, 120)}".`, preferAudio,
         "Para ayudarte mejor, un agente va a revisar tu comprobante en breve. 🙏");
       return true;
     }
@@ -3112,6 +3163,9 @@ async function executeBotAction(env, credentials, phone, action, message) {
       await completeReceiptFlow(env, credentials, phone, { case_id: caseRow?.id || null, data_json: JSON.stringify(receiptDataFromAction(action)) }, inlineHolder, preferAudio);
       return;
     }
+    // Caso real (2026-11-11): Carlos confirmó el pago a mano mientras el bot procesaba la imagen, y el bot igual preguntó
+    // "¿Es tu comprobante?" y luego "¿a nombre de quién?". Si el equipo ya tomó la conversación, no se inicia el flujo.
+    if (await humanTookOver(env, phone)) return;
     await startReceiptFlow(env, phone, caseRow?.id || null, receiptDataFromAction(action), explicit ? "awaiting_name" : "awaiting_confirm");
     await sendBotReply(env, credentials, phone, explicit
       ? "Recibí tu comprobante 🙏 Cuéntanos, ¿a nombre de quién está el servicio?"
