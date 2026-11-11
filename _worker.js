@@ -409,8 +409,18 @@ function isPlausibleAccountName(value) {
   // Saludos y frases de conversación no son nombres: "Buenos dias" (2 palabras, solo letras) pasaba
   // todos los filtros y se registró una visita "a nombre de Buenos dias".
   if (/^(hola|buenos|buenas|buen|saludos|hey|ok|okay|consulta|quiero|necesito|tengo|perfecto|dale|claro|vale|disculpa|disculpe|oiga|alo)\b/i.test(normalized)) return false;
+  // Caso real (2026-11-10): "Una transferencia" (el tipo de comprobante) quedó guardado como titular del servicio.
+  if (/\b(transferencias?|transfer|depositos?|comprobantes?|vouchers?|boletas?|capturas?|pagos?|pagado|pagada)\b/.test(normalized)) return false;
   const words = name.split(" ").filter(Boolean);
   return words.length >= 2 && words.length <= 6 && words.every((word) => /^[A-Za-zÁÉÍÓÚÜÑáéíóúüñ'-]{2,}$/.test(word));
+}
+
+// Mensaje que solo describe el comprobante ("Una transferencia", "es un depósito", "sii"): responde a "¿es tu comprobante?", no es el titular.
+function isReceiptKindOnly(value) {
+  const text = String(value || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[¡!¿?.,]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!text) return false;
+  if (/^(si+|sip|claro|ok|oka|okey|listo|dale|correcto)$/.test(text)) return true;
+  return /^(?:(?:si+|sip|claro|es|fue|era|una?|la|el|mi|de|por|via|bancaria|electronica)\s+)*(?:transferencias?|transfer|depositos?|comprobantes?|vouchers?|capturas?|foto|imagen|pago)(?:\s+(?:bancaria|electronica|de dinero|por (?:banco|app)))?$/.test(text);
 }
 
 function hasStrongReceiptEvidence(action, message) {
@@ -2344,14 +2354,24 @@ function holderFromText(value, loose = false) {
 }
 
 // Mensajes del cliente desde la última respuesta del bot (nombre y RUT suelen llegar en dos envíos seguidos).
-async function inboundTextSinceLastOutbound(env, phone) {
+async function inboundPartsSinceLastOutbound(env, phone) {
   const rows = (await env.DB.prepare("SELECT direction, message_text FROM whatsapp_inbox_messages WHERE phone = ? ORDER BY created_at DESC LIMIT 8").bind(phone).all()).results || [];
   const parts = [];
   for (const row of rows) {
     if (row.direction === "outbound") break;
     if (String(row.message_text || "").trim()) parts.unshift(String(row.message_text).trim());
   }
-  return parts.join(" ");
+  return parts;
+}
+async function inboundTextSinceLastOutbound(env, phone) {
+  return (await inboundPartsSinceLastOutbound(env, phone)).join(" ");
+}
+
+// Alguien de BPGO tomó la conversación a mano (panel o app de WhatsApp Business): el bot no debe seguir contestando un trámite que el equipo ya resolvió.
+const MANUAL_TAKEOVER_REASONS = new Set(["manual_reply", "manual_whatsapp_reply", "manual_takeover"]);
+async function humanTookOver(env, phone) {
+  const row = await getBotSessionRow(env, phone).catch(() => null);
+  return row?.mode === "human" && MANUAL_TAKEOVER_REASONS.has(row.escalation_reason);
 }
 
 // "¿Es tu comprobante de pago?" -> "sí, es mi comprobante" / "no, es otra cosa".
@@ -2563,7 +2583,10 @@ async function handleReceiptFlowText(env, credentials, phone, text, message, pre
   if (flow.state === "awaiting_name") {
     // Nombre y RUT llegan a veces en dos mensajes seguidos: se espera al último y se leen juntos (antes el RUT quedaba suelto: "¿En qué puedo ayudarte con el número…?").
     if (message?.id && !(await isStillLatestMessage(env, phone, message.id))) return true;
-    const joined = (await inboundTextSinceLastOutbound(env, phone).catch(() => "")) || body;
+    // "Una transferencia" / "sii" contestan la pregunta anterior (¿es tu comprobante?): no son el titular ni merecen otra pregunta.
+    if (isReceiptKindOnly(body) && !extractRutFromText(body)) return true;
+    const parts = await inboundPartsSinceLastOutbound(env, phone).catch(() => []);
+    const joined = parts.filter((part) => !isReceiptKindOnly(part)).join(" ") || body;
     const holder = holderFromText(joined, true);
     const reportedName = holder ? extractAccountName(holder) : extractAccountName(joined);
     const hasRut = Boolean(extractRutFromText(joined));
@@ -2647,6 +2670,13 @@ async function completeReceiptFlow(env, credentials, phone, flow, reported, pref
     .bind(flow.case_id || null, phone, reported.slice(0, 120), evaluation.tx || null, evaluation.amount || null, evaluation.decision, mode, registered ? 1 : 0,
       JSON.stringify(failure ? [...evaluation.reasons, failure] : evaluation.reasons), evaluation.row?.sheetRow || null).run().catch(() => null);
   await env.DB.prepare("DELETE FROM whatsapp_receipt_flows WHERE phone = ?").bind(phone).run().catch(() => null);
+  // Caso real (2026-11-10): Carlos registró el pago a mano y el bot, que ya venía procesando, contestó después ("ya figura pagado" + "asociado a nombre de ...").
+  if (await humanTookOver(env, phone)) {
+    await notifyStaff(env, credentials, "carlos", "Comprobante (sin respuesta al cliente)", customerName, phone,
+      `${detail} El cliente indicó el titular después de que el equipo tomó la conversación; no se le escribió. Resultado: ${evaluation.decision}${evaluation.reasons?.length ? ` (${evaluation.reasons.join("; ")})` : ""}.`,
+      { sourceMessageId: `receipt-final:${flow.case_id || phone}:${Date.now()}` }).catch(() => null);
+    return;
+  }
   const first = String(customerName).split(/\s+/)[0] ? String(customerName).split(/\s+/)[0].charAt(0).toUpperCase() + String(customerName).split(/\s+/)[0].slice(1).toLowerCase() : "";
   if (registered) {
     await sendBotReply(env, credentials, phone, `¡Listo, ${first}! Recibimos tu pago de ${money(evaluation.amount)} y ya quedó registrado ✅ ¡Gracias! 🙏${evaluation.suspended ? " Coordinaremos la reconexión de tu servicio a la brevedad." : ""}`, preferAudio);

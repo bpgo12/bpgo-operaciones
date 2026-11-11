@@ -524,6 +524,52 @@ const goodReceipt = (overrides) => ({
     assert.doesNotMatch(h.lastTo(client).at(-1), /CajaVecina/);
     h.restore();
   }
+  // 22) Caso real 2026-11-10: "Sii" y "Una transferencia" respondían a ¿es tu comprobante?; el bot guardó "Una transferencia" como titular.
+  {
+    const h = await harness({});
+    h.setAi(goodReceipt());
+    await h.image(client);
+    await h.text(client, "Sii");
+    assert.match(h.lastTo(client).at(-1), /¿a nombre de quién está el servicio?/);
+    const before = h.lastTo(client).length;
+    await h.text(client, "Una transferencia");
+    assert.equal(h.lastTo(client).length, before, "describir el comprobante no genera otra pregunta ni se toma como titular");
+    await h.text(client, "Maria Perez Prueba");
+    const reply = h.lastTo(client).at(-1);
+    assert.match(reply, /asociado a nombre de MARIA PEREZ PRUEBA/);
+    assert.doesNotMatch(reply, /Una transferencia/);
+    h.restore();
+  }
+  // Si el titular llega junto con "Una transferencia" en el mismo bloque, solo cuenta el nombre.
+  {
+    const h = await harness({});
+    h.setAi(goodReceipt());
+    await h.image(client);
+    await h.text(client, "Sii");
+    await Promise.all([h.text(client, "Una transferencia"), h.text(client, "Maria Perez Prueba")]);
+    const reply = h.lastTo(client).at(-1);
+    assert.match(reply, /asociado a nombre de MARIA PEREZ PRUEBA/);
+    h.restore();
+  }
+  // 23) Si el equipo toma la conversación mientras el bot procesa el titular, el bot no le escribe al cliente después.
+  {
+    const h = await harness({});
+    h.setAi(goodReceipt());
+    await h.image(client);
+    await h.text(client, "Sii");
+    const original = globalThis.fetch;
+    globalThis.fetch = async (url, options) => {
+      if (String(url).startsWith("https://script.example") && options?.method !== "POST") {
+        h.sqlite.prepare("INSERT INTO whatsapp_bot_sessions (phone, mode, escalation_reason, updated_at) VALUES (?, 'human', 'manual_whatsapp_reply', datetime('now')) ON CONFLICT(phone) DO UPDATE SET mode = 'human', escalation_reason = 'manual_whatsapp_reply'").run(client);
+      }
+      return original(url, options);
+    };
+    const before = h.lastTo(client).length;
+    await h.text(client, "Maria Perez Prueba");
+    assert.equal(h.lastTo(client).length, before, "no se le escribe al cliente después de que el equipo tomó la conversación");
+    assert.ok(h.staffNotices().some((notice) => /sin respuesta al cliente|no se le escribió/.test(notice.summary)), "Carlos recibe el resultado");
+    h.restore();
+  }
   fs.rmSync(tmpFile, { force: true });
   console.log("receipt flow: ok");
 })().catch((error) => { fs.rmSync(tmpFile, { force: true }); console.error(error); process.exit(1); });
